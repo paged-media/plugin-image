@@ -13,6 +13,9 @@ workspace = true
 [dependencies]
 image-core = { path = "../image-core" }
 thiserror = { workspace = true }
+# ZIP channel inflate (compression 2/3) — M1 `rendered` decode-on-demand.
+# Pure-Rust DEFLATE; verbatim `ChannelData.bytes` stays canonical.
+miniz_oxide = "0.8"
 
 [dev-dependencies]
 # Round-trip / model tests consume the INDEPENDENT fixture builder from

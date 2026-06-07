@@ -33,19 +33,22 @@ pub mod cache;
 pub mod node;
 pub mod region_prop;
 mod schedule;
+pub mod shrink;
 mod sink;
 
 use std::sync::Arc;
 
-use image_codecs::ImageSource;
-use image_core::{ParamsHash, Region, TileMap};
+use image_codecs::{ImageSource, ImageTarget};
+use image_core::{ParamsHash, PixelFormat, Region, TileMap};
 use image_gpu::GpuContext;
 use image_kernels::KernelDef;
 
 use crate::cache::OperationCache;
-use crate::node::{ApplyNode, OpNode, SourceNode};
+use crate::node::{ApplyInputs, ApplyNode, OpNode, SourceNode};
 
 pub use crate::node::NodeId;
+pub use crate::shrink::plan_shrink;
+pub use image_codecs::EncodedStats;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -78,20 +81,55 @@ impl Pipeline {
         Pipeline::default()
     }
 
-    /// Add a decode leaf. The source is owned by the pipeline (it
-    /// carries parser state mutated during a pull).
+    /// Add a decode leaf at full resolution (decode shrink 1). The source
+    /// is owned by the pipeline (it carries parser state mutated during a
+    /// pull).
     pub fn source(&mut self, source: Box<dyn ImageSource + Send>) -> NodeId {
+        self.push_source(source, 1)
+    }
+
+    /// Add a decode leaf with shrink-on-load planning (spec §7.2). Probes
+    /// the source's `native_shrink()` factors, runs [`plan_shrink`]
+    /// against `requested_scale` (a downscale fraction in `(0, 1]`), and
+    /// wires the chosen native shrink into the decode pull — the decoder
+    /// does as much of the downscale as it can natively, leaving the
+    /// residual fraction (the second element of the plan) to a downstream
+    /// resample kernel. Returns the leaf node plus the planned
+    /// `(shrink, residual)` so the caller can size/parameterize that
+    /// resample stage.
+    ///
+    /// With PNG/JPEG advertising only `[1]` today the chosen shrink is
+    /// always 1 (the decode pull is full-res and the residual carries the
+    /// whole scale); the planner algebra itself is unit-tested over
+    /// synthetic native ladders.
+    pub fn source_scaled(
+        &mut self,
+        source: Box<dyn ImageSource + Send>,
+        requested_scale: f32,
+    ) -> Result<(NodeId, u32, f32), PipelineError> {
+        let mut src = source;
+        // probe() before native_shrink() — JPEG learns its DCT ladder
+        // from the header (PNG/raw answer [1] unconditionally).
+        let _ = src.probe()?;
+        let (shrink, residual) = plan_shrink(src.native_shrink(), requested_scale);
+        let node = self.push_source(src, shrink);
+        Ok((node, shrink, residual))
+    }
+
+    fn push_source(&mut self, source: Box<dyn ImageSource + Send>, decode_shrink: u32) -> NodeId {
         let op_id = self.next_source_id;
         self.next_source_id += 1;
         self.push(OpNode::Source(SourceNode {
             source: std::sync::Mutex::new(source),
             op_id,
+            decode_shrink,
         }))
     }
 
-    /// Apply a kernel to `input`. `params` is the kernel's `#[repr(C)]`
-    /// param block bytes (the uniform upload AND the cache key — §6.1);
-    /// it must match `def.params.size` (checked at dispatch).
+    /// Apply a unary kernel to `input`. `params` is the kernel's
+    /// `#[repr(C)]` param block bytes (the uniform upload AND the cache
+    /// key — §6.1); it must match `def.params.size` (checked at
+    /// dispatch).
     pub fn apply(
         &mut self,
         input: NodeId,
@@ -101,7 +139,31 @@ impl Pipeline {
         let params: Arc<[u8]> = params.into();
         let params_hash = ParamsHash::of(&params);
         self.push(OpNode::Apply(ApplyNode {
-            input,
+            inputs: ApplyInputs::Unary(input),
+            def,
+            params,
+            params_hash,
+        }))
+    }
+
+    /// Apply a BINARY kernel to two upstream nodes — the compose lane
+    /// (`def.inputs == 2`, e.g. `math.add`). Both inputs are materialized
+    /// over the propagated ROI before dispatch and handed to the kernel
+    /// as `TileInput`s in `(a, b)` order; the cache key folds BOTH inputs'
+    /// content hashes, so a re-pull is a hit only when neither subtree
+    /// changed. `params` is the param block bytes (matches
+    /// `def.params.size` at dispatch).
+    pub fn apply2(
+        &mut self,
+        a: NodeId,
+        b: NodeId,
+        def: &'static KernelDef,
+        params: impl Into<Arc<[u8]>>,
+    ) -> NodeId {
+        let params: Arc<[u8]> = params.into();
+        let params_hash = ParamsHash::of(&params);
+        self.push(OpNode::Apply(ApplyNode {
+            inputs: ApplyInputs::Binary(a, b),
             def,
             params,
             params_hash,
@@ -109,7 +171,7 @@ impl Pipeline {
     }
 
     /// Materialize `node` over `roi` into a `TileMap` (spec §7.3). The
-    /// single sink M0 ships; `to_pyramid`/`to_encoder` are M1.
+    /// M0 sink; the structured-readback sink is [`to_encoder`].
     pub fn to_buffer(
         &mut self,
         node: NodeId,
@@ -117,6 +179,34 @@ impl Pipeline {
         ctx: &GpuContext,
     ) -> Result<TileMap, PipelineError> {
         sink::to_buffer(&self.nodes, &mut self.cache, node, roi, ctx)
+    }
+
+    /// Stream `node`'s output over `roi` into an [`ImageTarget`],
+    /// strip-by-strip (spec §7.3) — the ONLY structured GPU-readback path
+    /// in the system. Each strip is a tile-row band: the full ROI width ×
+    /// up to one tile (256px) high. Tiles are pulled through the normal
+    /// demand path (op cache included), the rgba16float working pixels are
+    /// converted to the requested 8-bit `fmt`, and the strip is handed to
+    /// `target.write_strip` in top-to-bottom order. `begin`/`finish`
+    /// bracket the run; the `TargetInfo` is built from the ROI dimensions
+    /// and `fmt`.
+    ///
+    /// `fmt` must be a `SampleDepth::U8` format. Alpha handling: formats
+    /// WITHOUT an alpha channel (`Gray`, `Rgb`-less — i.e. `ChannelLayout`
+    /// whose count drops the working alpha) drop the working alpha
+    /// channel; `Rgba`/`GrayA` carry it straight. The U8 conversion is the
+    /// straight `clamp(x, 0, 1) * 255` round (no transfer/CMS — that is
+    /// the M1 cast lane, BREAKAGE I-02; this mirrors the decode bridge's
+    /// verbatim policy on the way back out).
+    pub fn to_encoder(
+        &mut self,
+        node: NodeId,
+        roi: Region,
+        ctx: &GpuContext,
+        target: &mut dyn ImageTarget,
+        fmt: PixelFormat,
+    ) -> Result<EncodedStats, PipelineError> {
+        sink::to_encoder(&self.nodes, &mut self.cache, node, roi, ctx, target, fmt)
     }
 
     /// Cache hits since construction — the test hook proving a re-pull is

@@ -489,3 +489,335 @@
     - "ABI v1.1 amendment proof — first handwritten windowed module"
   tests:
     rust: ["image-conformance/tests/family_conv.rs"]
+
+# ── conv family T1: gaussian (separable) + unsharp ───────────
+
+- id: conv.gaussian_h
+  rust_path: families::conv::CONV_GAUSSIAN_H
+  state_row: image.kernel.family-t1
+  class: windowed
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: both
+  status: implemented
+  provenance:
+    - "separable convolution: standard literature"
+    - "Gaussian w_i=exp(-i²/2σ²) normalized over -r..=r ascending"
+    - "σ-halving per mip level (§8.3)"
+    - "no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]
+
+- id: conv.gaussian_v
+  rust_path: families::conv::CONV_GAUSSIAN_V
+  state_row: image.kernel.family-t1
+  class: windowed
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: both
+  status: implemented
+  provenance:
+    - "separable convolution: standard literature"
+    - "Gaussian w_i=exp(-i²/2σ²) normalized over -r..=r ascending"
+    - "σ-halving per mip level (§8.3)"
+    - "no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]
+
+- id: conv.unsharp
+  rust_path: families::conv::CONV_UNSHARP
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "unsharp masking: out = a + amount·(a − blurred), per-channel threshold gate"
+    - "binary point over (original, blurred Gaussian pair)"
+    - "no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]
+
+# ── resample family (T1) ─────────────────────────────────────
+
+- id: resample.nearest
+  rust_path: families::resample::RESAMPLE_NEAREST
+  state_row: image.kernel.family-t1
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "nearest-neighbour: standard literature; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_resample.rs"]
+
+- id: resample.mitchell
+  rust_path: families::resample::RESAMPLE_MITCHELL
+  state_row: image.kernel.family-t1
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "Mitchell–Netravali 1988 (B=C=1/3); clamp-to-edge, sum-normalized; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_resample.rs"]
+
+- id: resample.lanczos3
+  rust_path: families::resample::RESAMPLE_LANCZOS3
+  state_row: image.kernel.family-t1
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "Lanczos resampling (a=3): standard literature; sinc via sin(); clamp-to-edge, sum-normalized; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_resample.rs"]
+
+# ── compose family (T1; W3C blend set + non-separable four) ──
+
+- id: compose.normal
+  rust_path: families::compose::COMPOSE_NORMAL
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — normal"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'norm'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.multiply
+  rust_path: families::compose::COMPOSE_MULTIPLY
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — multiply"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'mul '"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.screen
+  rust_path: families::compose::COMPOSE_SCREEN
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — screen"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'scrn'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.overlay
+  rust_path: families::compose::COMPOSE_OVERLAY
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — overlay"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'over'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.darken
+  rust_path: families::compose::COMPOSE_DARKEN
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — darken"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'dark'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.lighten
+  rust_path: families::compose::COMPOSE_LIGHTEN
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — lighten"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'lite'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.color_dodge
+  rust_path: families::compose::COMPOSE_COLOR_DODGE
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — color_dodge"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'div '"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.color_burn
+  rust_path: families::compose::COMPOSE_COLOR_BURN
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — color_burn"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'idiv'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.hard_light
+  rust_path: families::compose::COMPOSE_HARD_LIGHT
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — hard_light"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'hLit'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.soft_light
+  rust_path: families::compose::COMPOSE_SOFT_LIGHT
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — soft_light"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'sLit'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.difference
+  rust_path: families::compose::COMPOSE_DIFFERENCE
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — difference"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'diff'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.exclusion
+  rust_path: families::compose::COMPOSE_EXCLUSION
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — exclusion"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'smud'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.hue
+  rust_path: families::compose::COMPOSE_HUE
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — hue"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'hue '"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.saturation
+  rust_path: families::compose::COMPOSE_SATURATION
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — saturation"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'sat '"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.color
+  rust_path: families::compose::COMPOSE_COLOR
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — color"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'colr'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.luminosity
+  rust_path: families::compose::COMPOSE_LUMINOSITY
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "W3C Compositing and Blending Level 1 (https://www.w3.org/TR/compositing-1/) — luminosity"
+    - "oracle: gegl; required by the PSD merged-composite (psd_composite) oracle"
+    - "PSD blend key 'lum '"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]

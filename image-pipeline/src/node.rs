@@ -36,18 +36,48 @@ pub struct SourceNode {
     /// Stable op id for cache keying — derived once at insert time so a
     /// re-pull of the same leaf hits the same cache row.
     pub op_id: u64,
+    /// Native decode shrink to pull at (one of the source's
+    /// `native_shrink()` factors). `1` for a plain `source`; set by the
+    /// shrink-on-load planner (`source_scaled`, §7.2). The decode ROI is
+    /// expressed in POST-shrink coordinates, so the scheduler scales the
+    /// requested region down by this factor before `read_region`.
+    pub decode_shrink: u32,
 }
 
-/// A kernel applied to one upstream node (M0 is unary — the binary and
-/// generator arities arrive with the T1/T2 kernels). Carries the frozen
-/// `KernelDef` and the param block bytes (the uniform upload AND the
-/// cache key, per the §6.1 "one definition, three uses" rule).
+/// A kernel applied to upstream node(s). M1 supports unary (`apply`) and
+/// binary (`apply2`, the compose lane — `def.inputs == 2`); generator
+/// arity arrives with T2. Carries the frozen `KernelDef` and the param
+/// block bytes (the uniform upload AND the cache key, per the §6.1 "one
+/// definition, three uses" rule).
 pub struct ApplyNode {
-    pub input: NodeId,
+    /// The first (or only) input. `inputs[1]` is `Some` exactly for
+    /// binary kernels (`def.inputs == 2`); the scheduler folds BOTH
+    /// materialized inputs' content hashes into the cache key.
+    pub inputs: ApplyInputs,
     pub def: &'static KernelDef,
     pub params: Arc<[u8]>,
     /// `ParamsHash::of(params)` — byte identity is param identity (§5.3).
     pub params_hash: ParamsHash,
+}
+
+/// Upstream wiring of an apply node: one input (unary) or two (binary
+/// compose lane). Generator (zero-input) arity is T2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyInputs {
+    Unary(NodeId),
+    Binary(NodeId, NodeId),
+}
+
+impl ApplyInputs {
+    /// `(a, Some(b))` for binary, `(a, None)` for unary — the dispatch
+    /// order in which the materialized input maps are handed to the
+    /// kernel as `TileInput`s.
+    pub fn as_pair(&self) -> (NodeId, Option<NodeId>) {
+        match self {
+            ApplyInputs::Unary(a) => (*a, None),
+            ApplyInputs::Binary(a, b) => (*a, Some(*b)),
+        }
+    }
 }
 
 /// One node of the lazy graph.

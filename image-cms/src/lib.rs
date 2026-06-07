@@ -28,6 +28,7 @@
 
 mod interner;
 mod lut;
+pub mod moxcms_engine;
 pub mod qcms_engine;
 
 pub use interner::ProfileInterner;

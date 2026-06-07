@@ -24,9 +24,11 @@
 //! differential oracle runners (CI containers), the D-4 criterion
 //! bench, and the coverage gate.
 
+pub mod compose_ref;
 pub mod device;
 pub mod harness;
 pub mod psd_builder;
+pub mod psd_render;
 pub mod quantize;
 
 pub use image_kernels::reference_prelude::Px;

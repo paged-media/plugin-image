@@ -19,6 +19,13 @@ thiserror = { workspace = true }
 # plugin does NOT ship lcms2 natively: spec §10.1 keeps lcms2 as a CI
 # differential oracle only (dev-dependency below).
 qcms = { workspace = true }
+# The print-lane engine (D-11 ruling §F.2): pure-Rust CMS with real
+# intent handling (all four) and black-point compensation — the
+# capabilities core's qcms build demonstrably lacks (audit §A). No C
+# FFI, BSD-3-Clause OR Apache-2.0 (license-compatible). 8-bit RGBA
+# apply for the shared ExactTransform contract today; moxcms also
+# offers float transforms (the M2 high-bit-depth lane).
+moxcms = "0.8.1"
 
 [dev-dependencies]
 # The native differential oracle (spec §10.1 / D-11 §F.4): lcms2 is a
@@ -26,3 +33,10 @@ qcms = { workspace = true }
 # plugin's no-C-in-default-build rule, §1.1). Pinned the same way core's
 # parity test carries qcms as a native dev-dep, in reverse.
 lcms2 = "6"
+# lcms2-sys is already in the graph (transitive dep of lcms2 above); the
+# moxcms print-lane test reaches its raw FFI directly to synthesise a
+# hermetic LUT-bearing ICC profile (distinct A2B0/A2B1 tables) — the only
+# way to prove moxcms honors per-intent LUTs, which lcms2's safe Pipeline
+# surface cannot assemble (no stage-insertion entry point). Dev-only,
+# never shipped, exactly like lcms2.
+lcms2-sys = "4"

@@ -74,12 +74,12 @@
 
 - id: image.psd.layer.channel-data.zip
   state_row: image.psd.roundtrip
-  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (opaque; inflate is M1)
+  tier: preserved        # inflate landed (M1) — decode-on-demand to planar; verbatim bytes still canonical
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Channel Image Data, compression 2/3"
   tests:
-    rust: ["image-psd/tests/roundtrip.rs"]
+    rust: ["image-psd/tests/roundtrip.rs", "image-psd/tests/channel_decode.rs"]
 
 - id: image.psd.addl.lsct
   state_row: image.psd.roundtrip
@@ -144,3 +144,13 @@
     - "Adobe Photoshop File Format specification — PSB notes (widened length fields)"
   tests:
     rust: ["image-psd/tests/psb.rs", "image-conformance/tests/psd_fixtures.rs (psb_wide)"]
+
+- id: image.psd.render.flatten
+  state_row: image.psd.roundtrip
+  tier: rendered         # M1: flatten layered PSD through Engine A + compose.* kernels; gpu↔ref within channel_eps_f16 6 (M3 Max Metal: 0 ULP on the layered fixtures)
+  oracle: psd_composite + reference   # scalar flatten_reference is the golden; the embedded merged-composite oracle joins at the M1.5 real-PSD corpus step
+  provenance:
+    - "W3C Compositing and Blending Level 1 — https://www.w3.org/TR/compositing-1/ (the blend/source-over math, shared with compose_ref)"
+    - "Adobe Photoshop File Format specification — Layer Records (blend-mode key) + Channel Image Data (decode) + lsct group markers (skipped: no pixels)"
+  tests:
+    rust: ["image-conformance/tests/psd_render.rs", "image-conformance/src/psd_render.rs"]

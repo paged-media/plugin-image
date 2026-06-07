@@ -44,3 +44,50 @@
     - "PNG (RFC 2083 / W3C PNG 3rd ed.) via zune-png 0.5 (pure-Rust, no_std-capable decode+encode)"
   tests:
     rust: ["image-conformance/tests/codec_png.rs"]
+
+- id: image.codec.jpeg
+  state_row: image.codec.traits
+  tier: shipped          # M0: decode (incl. CMYK/YCCK + APP14) + encode (RGB/Gray); limits below
+  # Decode = zune-jpeg 0.5.15 (baseline + progressive, pure-Rust); encode
+  # = jpeg-encoder 0.7.0 (RGB/Gray, 4:2:0 default). Both pinned by explicit
+  # version in image-codecs/Cargo.toml (no other workspace consumer); zune-
+  # jpeg pins zune-core 0.5.1 so no duplicate zune-core lands.
+  # M0 adapter limits (jpeg/decode.rs, jpeg/encode.rs):
+  #  - 8-bit only.
+  #  - DECODE channel map (zune *input* colorspace, post-APP14):
+  #      Luma→Gray (native_format gray8); YCbCr→Rgba (ycbcr8) & RGB→Rgba
+  #      (rgb8), both widened alpha=255; CMYK→Cmyk (cmyk8+adobe-app14);
+  #      YCCK→Cmyk (ycck8+adobe-app14).
+  #  - ADOBE CMYK INVERSION RULE (spec §10.3): Adobe-authored CMYK/YCCK
+  #      JPEGs store inverted ink (stored = 255 - ink). The adapter
+  #      re-inverts (ink = 255 - stored) for the CMYK/YCCK paths; YCCK is
+  #      first taken to stored-CMY via the inverse JFIF YCbCr→RGB matrix
+  #      then inverted (CMY + K). zune-jpeg exposes no APP14-presence flag,
+  #      so a (rare) non-inverted 4-component JPEG without APP14 would
+  #      decode inverted — documented limitation pending an upstream flag.
+  #  - ICC read = APP2 ICC_PROFILE markers concatenated by zune-jpeg's
+  #      icc_profile() (sequence-ordered) — no M1.5 follow-up on the read
+  #      path. EXIF surfaced via SourceInfo.exif.
+  #  - native_shrink == [1]: zune-jpeg 0.5.15 has no public DCT-scaled
+  #      (1/2,1/4,1/8) decode → the shrink-on-load planner (§7.2) resamples
+  #      post-decode, paying a full-resolution IDCT even for an 1/8 request
+  #      (DCT-scaled fast path is a follow-up gated on a zune-jpeg API).
+  #  - whole-decode-then-window (like PNG); row-streaming is M1.
+  #  - ENCODE: RGB + Gray only (Rgba strips drop alpha — JPEG has no alpha;
+  #      Gray→Luma). Quality is the JpegTarget::new(quality) constructor
+  #      param (frozen TargetInfo carries no codec options). 4:2:0 default.
+  #      CMYK/GrayA encode = Unsupported (no CMYK strip producer at M0).
+  #  - Measured fidelity (image-conformance/tests/codec_jpeg.rs, smooth
+  #      gradient, mean abs error /255): RGB q90 ~1.64; Gray q90 ~0.18;
+  #      RGB q50 ~3.52 vs q95 ~1.48. Bound asserted: MAE < 4/255 @ q90.
+  #  - CMYK round-trip NOT corpus-tested (jpeg-encoder emits RGB/Gray here,
+  #      no CMYK JPEG synthesizable through the adapter); the Adobe APP14
+  #      inversion math is unit-tested directly (hand-built stored-sample
+  #      fixtures in jpeg/decode.rs). Real-CMYK-corpus decode = needs-real-
+  #      corpus follow-up (spec §10.3 corpus rule).
+  # NOTE: jpeg-encoder license is `(MIT OR Apache-2.0) AND IJG`; the IJG
+  # term is not yet in deny.toml's allow-list (cargo-deny follow-up).
+  provenance:
+    - "ITU T.81 / JFIF / Adobe APP14 via zune-jpeg + jpeg-encoder"
+  tests:
+    rust: ["image-conformance/tests/codec_jpeg.rs", "image-codecs/src/jpeg/decode.rs (unit: Adobe inversion)"]

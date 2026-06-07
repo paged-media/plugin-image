@@ -65,14 +65,22 @@ pub(crate) fn materialize_node(
 
     // The input-hash component of the cache key. A leaf source binds its
     // own decoded identity (op id ⊕ requested ROI); an apply node binds
-    // its upstream's content hash. Both are computed BEFORE the heavy
-    // work so a hit short-circuits it.
+    // its upstream content hash(es) — BOTH inputs for a binary kernel, so
+    // a re-pull is a hit only when neither subtree changed. All computed
+    // BEFORE the heavy work so a hit short-circuits it.
     let (input_hash, materialized_input) = match node {
         OpNode::Source(_) => (source_identity_hash(node, roi), None),
         OpNode::Apply(apply) => {
             let in_roi = required_input_roi(apply.def.class, roi);
-            let (in_map, in_hash) = materialize_node(nodes, cache, apply.input, in_roi, ctx)?;
-            (in_hash, Some(in_map))
+            let (a_id, b_id) = apply.inputs.as_pair();
+            let (a_map, a_hash) = materialize_node(nodes, cache, a_id, in_roi, ctx)?;
+            match b_id {
+                None => (a_hash, Some((a_map, None))),
+                Some(b) => {
+                    let (b_map, b_hash) = materialize_node(nodes, cache, b, in_roi, ctx)?;
+                    (fold_hashes(a_hash, b_hash), Some((a_map, Some(b_map))))
+                }
+            }
         }
     };
 
@@ -88,7 +96,10 @@ pub(crate) fn materialize_node(
 
     let map = match node {
         OpNode::Source(_) => materialize_source(node, roi)?,
-        OpNode::Apply(apply) => materialize_apply(apply, materialized_input.unwrap(), roi, ctx)?,
+        OpNode::Apply(apply) => {
+            let (a_map, b_map) = materialized_input.unwrap();
+            materialize_apply(apply, a_map, b_map, roi, ctx)?
+        }
     };
     let out_hash = content_hash_of(&map);
     cache.insert(key, map.clone());
@@ -106,12 +117,20 @@ fn materialize_source(node: &OpNode, roi: Region) -> Result<TileMap, PipelineErr
     let OpNode::Source(src) = node else {
         unreachable!("materialize_source on non-source node")
     };
+    let shrink = src.decode_shrink.max(1);
     let mut guard = src
         .source
         .lock()
         .map_err(|_| PipelineError::Graph("source mutex poisoned".into()))?;
     let info = guard.probe()?;
-    let bounds = Region::new(0, 0, info.width, info.height);
+    // Post-shrink bounds: the decode coordinate space the pipeline tiles
+    // over (shrink == 1 for PNG/raw today, so this is the native extent).
+    let bounds = Region::new(
+        0,
+        0,
+        info.width.div_ceil(shrink),
+        info.height.div_ceil(shrink),
+    );
 
     let mut map = TileMap::new(PixelFormat::GPU_WORKING);
     for coord in roi.tiles_at(0) {
@@ -122,27 +141,39 @@ fn materialize_source(node: &OpNode, roi: Region) -> Result<TileMap, PipelineErr
         // stays transparent-black background (the §5.3 sparse default).
         let mut f16_bytes = vec![0u8; (work.w as usize * work.h as usize) * WORKING_BPP];
         if let Some(decode_roi) = work.intersect(bounds) {
-            decode_tile_to_working(&mut **guard, &info.format, work, decode_roi, &mut f16_bytes)?;
+            decode_tile_to_working(
+                &mut **guard,
+                &info.format,
+                shrink,
+                work,
+                decode_roi,
+                &mut f16_bytes,
+            )?;
         }
         map.insert(coord, heap_tile(f16_bytes));
     }
     Ok(map)
 }
 
-/// Run one unary kernel over `roi` against the already-materialized
-/// input map: dispatch per covered tile at the tile's work extent.
+/// Run a unary OR binary kernel over `roi` against the already-
+/// materialized input map(s): dispatch per covered tile at the tile's
+/// work extent. `b` is `Some` exactly for binary kernels (`apply2`, the
+/// compose lane); its tiles are passed as the second `TileInput`.
 fn materialize_apply(
     apply: &ApplyNode,
-    input: TileMap,
+    a: TileMap,
+    b: Option<TileMap>,
     roi: Region,
     ctx: &GpuContext,
 ) -> Result<TileMap, PipelineError> {
-    if apply.def.inputs != 1 {
-        // Binary/generator arities arrive with the T1/T2 kernels; M0's
-        // skeleton is unary (the only registered classes are pointwise).
+    let arity = apply.def.inputs;
+    let provided = if b.is_some() { 2 } else { 1 };
+    if arity as usize != provided {
+        // Generator (0) is T2; a kernel/wiring arity mismatch is a graph
+        // construction error (use `apply` for unary, `apply2` for binary).
         return Err(PipelineError::Graph(format!(
-            "kernel {} arity {} unsupported in M0 (unary only)",
-            apply.def.id, apply.def.inputs
+            "kernel {} arity {} wired with {provided} input(s)",
+            apply.def.id, arity
         )));
     }
 
@@ -155,20 +186,40 @@ fn materialize_apply(
         // tile itself. An absent upstream tile reads as transparent-black
         // background, so the kernel runs over a zeroed input of the same
         // extent.
-        let zeros;
-        let in_bytes: &[u8] = match input.get(coord) {
+        let zero_len = (work.w as usize * work.h as usize) * WORKING_BPP;
+        let zeros_a;
+        let a_bytes: &[u8] = match a.get(coord) {
             Some(tile) => heap_bytes(tile)?,
             None => {
-                zeros = vec![0u8; (work.w as usize * work.h as usize) * WORKING_BPP];
-                &zeros
+                zeros_a = vec![0u8; zero_len];
+                &zeros_a
             }
         };
+
+        // Build the input list: one for unary, two for binary. The second
+        // input's absent tiles also read as zeroed background.
+        let zeros_b;
+        let inputs: Vec<TileInput> = match &b {
+            None => vec![TileInput { f16_bytes: a_bytes }],
+            Some(b_map) => {
+                let b_bytes: &[u8] = match b_map.get(coord) {
+                    Some(tile) => heap_bytes(tile)?,
+                    None => {
+                        zeros_b = vec![0u8; zero_len];
+                        &zeros_b
+                    }
+                };
+                vec![
+                    TileInput { f16_bytes: a_bytes },
+                    TileInput { f16_bytes: b_bytes },
+                ]
+            }
+        };
+
         let out_bytes = execute_tile_once(
             ctx,
             apply.def,
-            &[TileInput {
-                f16_bytes: in_bytes,
-            }],
+            &inputs,
             &apply.params,
             None, // constant-1 mask: the Engine A binding (§6.1)
             work.w,
@@ -177,6 +228,16 @@ fn materialize_apply(
         map.insert(coord, heap_tile(out_bytes));
     }
     Ok(map)
+}
+
+/// Fold two input content hashes into one cache-key component for a
+/// binary apply, order-sensitively (`a + b` and `b + a` are different
+/// graphs and must key differently). FNV-1a over the two `u64`s.
+fn fold_hashes(a: ContentHash, b: ContentHash) -> ContentHash {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&a.0.to_le_bytes());
+    bytes[8..].copy_from_slice(&b.0.to_le_bytes());
+    ContentHash::of(&bytes)
 }
 
 /// `ParamsHash` for a node — sources carry no params (zero), apply nodes
@@ -249,6 +310,7 @@ fn tile_work_region(coord: TileCoord, roi: Region) -> Option<Region> {
 fn decode_tile_to_working(
     source: &mut dyn ImageSource,
     src_format: &PixelFormat,
+    shrink: u32,
     work: Region,
     decode_roi: Region,
     out: &mut [u8],
@@ -263,7 +325,10 @@ fn decode_tile_to_working(
             bytes: &mut raw,
             row_stride,
         };
-        source.read_region(decode_roi, 1, &mut slice)?;
+        // `decode_roi` is already in post-shrink coordinates (the bounds
+        // and tiling were computed there), matching the `read_region`
+        // contract; the decoder applies the native `shrink` itself.
+        source.read_region(decode_roi, shrink, &mut slice)?;
     }
 
     let channels = src_format.channels;
