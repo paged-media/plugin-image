@@ -26,6 +26,13 @@ use crate::device::test_device;
 use crate::quantize::{f16_ulp_distance, f32_to_f16_bits};
 
 /// A test tile in reference precision (f32 rgba), row-major.
+///
+/// STIMULUS RULE (M0): values must be FINITE. The ABI applies
+/// `mix(in, result, mask)` on the GPU; with NaN/Inf inputs that flow
+/// is fast-math/driver-dependent (Metal may fold `x*0` ≠ IEEE), so
+/// NaN/Inf probes are excluded from parity stimulus until the D-10
+/// hardware-divergence policy takes them up. Kernel-body NaN semantics
+/// (relational/boolean helpers) remain deterministic by construction.
 #[derive(Debug, Clone)]
 pub struct RefTile {
     pub w: u32,

@@ -127,3 +127,365 @@ pub struct LayerAndMaskInfo {
     /// `None` re-encodes everything from the model.
     pub section_raw: Raw,
 }
+
+use super::addl::{parse_addl_run, AddlPad};
+use super::channel::Compression;
+use crate::container::{Container, LenWidth};
+use crate::reader::ByteReader;
+use crate::writer::ByteWriter;
+use crate::{PsdError, Result};
+
+const BLEND_SIGNATURE: [u8; 4] = *b"8BIM";
+
+impl LayerAndMaskInfo {
+    /// Parse the length-framed layer & mask info section. The full payload
+    /// is captured into `section_raw` for the zero-edit verbatim path; the
+    /// typed sub-structure is parsed in parallel for the re-encode path.
+    pub fn parse(r: &mut ByteReader, container: Container) -> Result<LayerAndMaskInfo> {
+        let width = container.section_len_width();
+        let total = r.len_field(width)? as usize;
+        let section_bytes = r.take(total)?.to_vec();
+
+        let mut sub = ByteReader::new(&section_bytes);
+        let (layers, transparency_in_merged) = parse_layer_info(&mut sub, container)?;
+        let global_mask = if sub.remaining() >= 4 {
+            Some(GlobalLayerMask::parse(&mut sub)?)
+        } else {
+            None
+        };
+        // Document-level additional layer info blocks, padded to 4.
+        let addl_global = parse_addl_run(&mut sub, container, AddlPad::Four)?;
+
+        Ok(LayerAndMaskInfo {
+            layers,
+            transparency_in_merged,
+            global_mask,
+            addl_global,
+            section_raw: Some(section_bytes),
+        })
+    }
+
+    /// Emit the section: verbatim when `section_raw` is present, else
+    /// re-encode the whole section length-framed.
+    pub fn emit(&self, w: &mut ByteWriter, container: Container) {
+        let width = container.section_len_width();
+        if let Some(raw) = &self.section_raw {
+            w.len_field(width, raw.len() as u64);
+            w.bytes(raw);
+            return;
+        }
+        w.framed(width, |w| {
+            emit_layer_info(self, w, container);
+            match &self.global_mask {
+                Some(gm) => gm.emit(w),
+                // The zero-length global mask is common and meaningful; emit
+                // the 4-byte zero length explicitly (brief §4b).
+                None => w.u32(0),
+            }
+            for a in &self.addl_global {
+                a.emit(w, container, AddlPad::Four);
+            }
+        });
+    }
+}
+
+/// Parse the layer info sub-block: its own length frame, the signed layer
+/// count, all layer records, then all channel image data in layer/channel
+/// order. Returns the records and the transparency flag.
+fn parse_layer_info(r: &mut ByteReader, container: Container) -> Result<(Vec<LayerRecord>, bool)> {
+    let width = container.section_len_width();
+    // The layer info length may be zero (no layers) — then the section is
+    // composite-only and there is nothing more here.
+    if r.remaining() < width.bytes() {
+        return Ok((Vec::new(), false));
+    }
+    let len = r.len_field(width)? as usize;
+    if len == 0 {
+        return Ok((Vec::new(), false));
+    }
+    let mut sub = r.sub(len)?;
+    let raw_count = sub.i16()?;
+    let transparency_in_merged = raw_count < 0;
+    let count = raw_count.unsigned_abs() as usize;
+
+    let mut layers = Vec::with_capacity(count);
+    for _ in 0..count {
+        layers.push(LayerRecord::parse(&mut sub, container)?);
+    }
+    // Channel image data follows in layer/channel order. Each channel's
+    // declared `data_len` includes the 2-byte compression tag.
+    for layer in &mut layers {
+        for ci in 0..layer.channels.len() {
+            let data_len = layer.channels[ci].data_len as usize;
+            let cd = ChannelData::parse(&mut sub, data_len)?;
+            layer.channel_data.push(cd);
+        }
+    }
+    Ok((layers, transparency_in_merged))
+}
+
+/// Emit the layer info sub-block (length-framed), the signed count, all
+/// records, then all channel image data.
+fn emit_layer_info(info: &LayerAndMaskInfo, w: &mut ByteWriter, container: Container) {
+    let width = container.section_len_width();
+    // An empty layer list re-encodes as a zero-length layer info block (no
+    // count word) — the form the parser treats as "no layers", so the
+    // round-trip is symmetric. The count word + records form is only
+    // emitted when there is at least one layer.
+    if info.layers.is_empty() {
+        w.len_field(width, 0);
+        return;
+    }
+    let anchor = w.len() + width.bytes();
+    w.framed(width, |w| {
+        let count = info.layers.len() as i16;
+        let signed = if info.transparency_in_merged {
+            -count
+        } else {
+            count
+        };
+        w.i16(signed);
+        for layer in &info.layers {
+            layer.emit_record(w, container);
+        }
+        for layer in &info.layers {
+            for cd in &layer.channel_data {
+                cd.emit(w);
+            }
+        }
+        // Layer info content is rounded up to even (brief §4a). Anchor on
+        // the content start (just after the length field).
+        w.pad_to(2, anchor);
+    });
+}
+
+impl ChannelData {
+    /// Read one channel's image data of exactly `data_len` bytes
+    /// (compression tag + payload). The payload is kept verbatim; M0 never
+    /// decodes it (preservation + streaming budget).
+    fn parse(r: &mut ByteReader, data_len: usize) -> Result<ChannelData> {
+        if data_len < 2 {
+            return Err(PsdError::Malformed {
+                section: "channel image data",
+                detail: format!("channel data length {data_len} < 2"),
+            });
+        }
+        let comp_code = r.u16()?;
+        let compression = Compression::from_code(comp_code).ok_or_else(|| PsdError::Malformed {
+            section: "channel image data",
+            detail: format!("unknown compression {comp_code}"),
+        })?;
+        let bytes = r.take(data_len - 2)?.to_vec();
+        Ok(ChannelData { compression, bytes })
+    }
+
+    fn emit(&self, w: &mut ByteWriter) {
+        w.u16(self.compression.code());
+        w.bytes(&self.bytes);
+    }
+}
+
+impl GlobalLayerMask {
+    fn parse(r: &mut ByteReader) -> Result<GlobalLayerMask> {
+        let len = r.u32()? as usize;
+        let raw = r.take(len)?.to_vec();
+        Ok(GlobalLayerMask { raw })
+    }
+
+    fn emit(&self, w: &mut ByteWriter) {
+        w.u32(self.raw.len() as u32);
+        w.bytes(&self.raw);
+    }
+}
+
+impl LayerRecord {
+    fn parse(r: &mut ByteReader, container: Container) -> Result<LayerRecord> {
+        let width = container.section_len_width();
+        let top = r.i32()?;
+        let left = r.i32()?;
+        let bottom = r.i32()?;
+        let right = r.i32()?;
+        let channel_count = r.u16()? as usize;
+        let mut channels = Vec::with_capacity(channel_count);
+        for _ in 0..channel_count {
+            let id = r.i16()?;
+            let data_len = r.len_field(width)?;
+            channels.push(ChannelInfo { id, data_len });
+        }
+        let blend_sig = r.fourcc()?;
+        if blend_sig != BLEND_SIGNATURE {
+            return Err(PsdError::Malformed {
+                section: "layer record",
+                detail: format!(
+                    "bad blend signature {}",
+                    String::from_utf8_lossy(&blend_sig)
+                ),
+            });
+        }
+        let blend_key = r.fourcc()?;
+        let opacity = r.u8()?;
+        let clipping = r.u8()?;
+        let flags = r.u8()?;
+        let filler = r.u8()?;
+
+        // Extra data: u32 length frame holding mask + blend ranges + name +
+        // addl blocks. Capture it verbatim AND parse it.
+        let extra_len = r.u32()? as usize;
+        let extra_bytes = r.take(extra_len)?.to_vec();
+        let (mask, blend_ranges, name_legacy, addl) = parse_extra(&extra_bytes, container)?;
+
+        Ok(LayerRecord {
+            top,
+            left,
+            bottom,
+            right,
+            channels,
+            blend_sig,
+            blend_key,
+            opacity,
+            clipping,
+            flags,
+            filler,
+            mask,
+            blend_ranges,
+            name_legacy,
+            addl,
+            extra_raw: Some(extra_bytes),
+            channel_data: Vec::new(),
+        })
+    }
+
+    fn emit_record(&self, w: &mut ByteWriter, container: Container) {
+        let width = container.section_len_width();
+        w.i32(self.top);
+        w.i32(self.left);
+        w.i32(self.bottom);
+        w.i32(self.right);
+        w.u16(self.channels.len() as u16);
+        for ch in &self.channels {
+            w.i16(ch.id);
+            w.len_field(width, ch.data_len);
+        }
+        w.fourcc(self.blend_sig);
+        w.fourcc(self.blend_key);
+        w.u8(self.opacity);
+        w.u8(self.clipping);
+        w.u8(self.flags);
+        w.u8(self.filler);
+        // Extra data: verbatim when present, else re-encode the components.
+        if let Some(extra) = &self.extra_raw {
+            w.u32(extra.len() as u32);
+            w.bytes(extra);
+        } else {
+            w.framed(LenWidth::U32, |w| emit_extra(self, w, container));
+        }
+    }
+}
+
+/// Parse a layer record's extra-data span: layer mask data, blending
+/// ranges, the legacy Pascal name (padded to a multiple of 4 INCLUDING the
+/// length byte), then additional-layer-info blocks (each padded to even).
+fn parse_extra(
+    bytes: &[u8],
+    container: Container,
+) -> Result<(
+    Option<LayerMaskData>,
+    BlendRanges,
+    PascalString,
+    Vec<AdditionalLayerInfo>,
+)> {
+    let mut r = ByteReader::new(bytes);
+    let mask = LayerMaskData::parse(&mut r)?;
+    let blend_ranges = BlendRanges::parse(&mut r)?;
+    let name_legacy = read_pascal_pad4(&mut r)?;
+    let addl = parse_addl_run(&mut r, container, AddlPad::Even)?;
+    Ok((mask, blend_ranges, name_legacy, addl))
+}
+
+fn emit_extra(layer: &LayerRecord, w: &mut ByteWriter, container: Container) {
+    match &layer.mask {
+        Some(m) => m.emit(w),
+        None => w.u32(0),
+    }
+    layer.blend_ranges.emit(w);
+    write_pascal_pad4(&layer.name_legacy, w);
+    for a in &layer.addl {
+        a.emit(w, container, AddlPad::Even);
+    }
+}
+
+impl LayerMaskData {
+    /// `u32 size` (0 | 20 | 36). 0 ⇒ no mask. Otherwise the rect + default
+    /// color + flags are typed; the rest of the size-framed payload (the
+    /// real-mask / parameter variants) lives in `raw` verbatim.
+    fn parse(r: &mut ByteReader) -> Result<Option<LayerMaskData>> {
+        let size = r.u32()? as usize;
+        if size == 0 {
+            return Ok(None);
+        }
+        let payload = r.take(size)?;
+        let mut pr = ByteReader::new(payload);
+        let top = pr.i32()?;
+        let left = pr.i32()?;
+        let bottom = pr.i32()?;
+        let right = pr.i32()?;
+        let default_color = pr.u8()?;
+        let flags = pr.u8()?;
+        Ok(Some(LayerMaskData {
+            top,
+            left,
+            bottom,
+            right,
+            default_color,
+            flags,
+            raw: payload.to_vec(),
+        }))
+    }
+
+    fn emit(&self, w: &mut ByteWriter) {
+        // `raw` is the full size-framed payload; re-emit it under its own
+        // length so the 20/36-byte variants survive untouched.
+        w.u32(self.raw.len() as u32);
+        w.bytes(&self.raw);
+    }
+}
+
+impl BlendRanges {
+    /// `u32 length` + opaque payload.
+    fn parse(r: &mut ByteReader) -> Result<BlendRanges> {
+        let len = r.u32()? as usize;
+        let raw = r.take(len)?.to_vec();
+        Ok(BlendRanges { raw })
+    }
+
+    fn emit(&self, w: &mut ByteWriter) {
+        w.u32(self.raw.len() as u32);
+        w.bytes(&self.raw);
+    }
+}
+
+/// Read the legacy Pascal name, padded to a multiple of 4 INCLUDING the
+/// length byte (brief §5). The stored `PascalString` is trimmed (len byte +
+/// content); padding is re-applied by `write_pascal_pad4`.
+fn read_pascal_pad4(r: &mut ByteReader) -> Result<PascalString> {
+    // The length byte + content is at most 256 bytes; capture it as a slice
+    // before consuming the pad so we keep only [len][content].
+    let n = r.u8()? as usize;
+    let content = r.take(n)?;
+    let mut raw = Vec::with_capacity(1 + n);
+    raw.push(n as u8);
+    raw.extend_from_slice(content);
+    // Pad the (length byte + content) span to a multiple of 4.
+    let field = 1 + n;
+    let pad = (4 - (field % 4)) % 4;
+    if pad != 0 {
+        r.take(pad)?;
+    }
+    Ok(PascalString { raw })
+}
+
+fn write_pascal_pad4(name: &PascalString, w: &mut ByteWriter) {
+    let start = w.len();
+    w.bytes(&name.raw);
+    w.pad_to(4, start);
+}

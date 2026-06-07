@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 qcms = { workspace = true }
 
 [dev-dependencies]
-# lcms2 = "6" — the native differential oracle lands with the M0
-# fan-out CMS unit (kept out of phase 0 so the freeze builds without
-# the C toolchain dependency).
+# The native differential oracle (spec §10.1 / D-11 §F.4): lcms2 is a
+# CI-only ΔE reference for the qcms display backend — NEVER shipped (the
+# plugin's no-C-in-default-build rule, §1.1). Pinned the same way core's
+# parity test carries qcms as a native dev-dep, in reverse.
+lcms2 = "6"

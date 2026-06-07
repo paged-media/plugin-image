@@ -22,11 +22,13 @@
 #![forbid(unsafe_code)]
 
 mod bytesource;
+pub mod png;
 pub mod raw;
 mod source;
 mod target;
 
 pub use bytesource::{ByteSource, MemoryByteSource};
+pub use png::{PngSource, PngTarget};
 pub use source::{ImageSource, SourceInfo};
 pub use target::{EncodedStats, ImageTarget, TargetInfo};
 

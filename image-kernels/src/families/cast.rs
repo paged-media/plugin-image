@@ -12,8 +12,42 @@
  *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
  */
 
-//! cast family (T0, spec §11) — lands with the M0 fan-out.
+//! cast family (T0, spec §11) — the alpha-association casts: associate
+//! colour with alpha (`premultiply`) and dissociate it (`unpremultiply`).
+//! Both reduce to the orchestrator-owned prelude primitives, where the
+//! divide-by-zero contract lives: `unpremul4` maps zero alpha to all-zero
+//! deterministically (no Inf/NaN leak), so the cast is total.
+//!
+//! Provenance: elementary pointwise algebra (rgb·α and rgb/α with the
+//! zero-alpha guard); GEGL-equivalent behaviour verified through the
+//! differential oracle harness (M0 fan-out), not by reference reading.
 
-use crate::KernelDef;
+use crate::{KernelClass, KernelDef, Tolerance};
 
-pub static FAMILY: &[&KernelDef] = &[];
+kernel_family! {
+    /// out = (rgb · a, a) — associate colour with alpha.
+    static CAST_PREMULTIPLY, params CastPremultiplyParams, ref cast_premultiply {
+        id: "cast.premultiply",
+        class: KernelClass::Point,
+        inputs: 1,
+        params: {},
+        eval: |a, b, p| premul4(a),
+        mip_exact: true,
+        tolerance: Tolerance::ChannelEpsF16(1),
+    }
+}
+
+kernel_family! {
+    /// out = (rgb / a, a); zero alpha → all-zero (no Inf/NaN leak).
+    static CAST_UNPREMULTIPLY, params CastUnpremultiplyParams, ref cast_unpremultiply {
+        id: "cast.unpremultiply",
+        class: KernelClass::Point,
+        inputs: 1,
+        params: {},
+        eval: |a, b, p| unpremul4(a),
+        mip_exact: true,
+        tolerance: Tolerance::ChannelEpsF16(2),
+    }
+}
+
+pub static FAMILY: &[&KernelDef] = &[&CAST_PREMULTIPLY, &CAST_UNPREMULTIPLY];

@@ -55,6 +55,21 @@ pub struct GlobalImageData {
     pub raw: Vec<u8>,
 }
 
+impl GlobalImageData {
+    /// The merged composite is the LAST section and is NOT length-framed —
+    /// it runs to EOF (brief §11). A 2-byte compression tag + the rest.
+    pub fn parse(r: &mut crate::reader::ByteReader) -> crate::Result<GlobalImageData> {
+        let compression = r.u16()?;
+        let raw = r.take(r.remaining())?.to_vec();
+        Ok(GlobalImageData { compression, raw })
+    }
+
+    pub fn emit(&self, w: &mut crate::writer::ByteWriter) {
+        w.u16(self.compression);
+        w.bytes(&self.raw);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PsdFile {
     pub container: Container,

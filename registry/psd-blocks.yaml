@@ -10,7 +10,7 @@
 
 - id: image.psd.header
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: round-trips (typed re-encode, byte-identical)
+  tier: preserved        # M0 green (fixtures + proptest); target was: round-trips (typed re-encode, byte-identical)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — File Header Section"
@@ -19,7 +19,7 @@
 
 - id: image.psd.color-mode-data
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (opaque-verbatim)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (opaque-verbatim)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Color Mode Data Section"
@@ -28,7 +28,7 @@
 
 - id: image.psd.resource.icc
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved + typed view (id 1039)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved + typed view (id 1039)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Image Resources Section, id 1039"
@@ -37,7 +37,7 @@
 
 - id: image.psd.resource.resolution
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved + typed view (id 1005)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved + typed view (id 1005)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Image Resources Section, id 1005 (ResolutionInfo)"
@@ -46,7 +46,7 @@
 
 - id: image.psd.resource.opaque
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (the invariant itself)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (the invariant itself)
   oracle: byte_roundtrip
   provenance:
     - "preservation invariant (spec §10.4) — black-box: synthesized unknown-id fixture"
@@ -55,7 +55,7 @@
 
 - id: image.psd.layer.records
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (scalars typed; extra-data verbatim)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (scalars typed; extra-data verbatim)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Layer Records"
@@ -64,7 +64,7 @@
 
 - id: image.psd.layer.channel-data.raw-rle
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved + RAW/RLE decode↔encode
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved + RAW/RLE decode↔encode
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Channel Image Data"
@@ -74,7 +74,7 @@
 
 - id: image.psd.layer.channel-data.zip
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (opaque; inflate is M1)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (opaque; inflate is M1)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Channel Image Data, compression 2/3"
@@ -83,7 +83,7 @@
 
 - id: image.psd.addl.lsct
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved + typed (group tree derives from it)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved + typed (group tree derives from it)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Additional Layer Information, lsct"
@@ -92,7 +92,7 @@
 
 - id: image.psd.addl.luni
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved + typed (count/padding variants pinned)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved + typed (count/padding variants pinned)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Additional Layer Information, luni"
@@ -102,7 +102,7 @@
 
 - id: image.psd.addl.lyid
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved + typed
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved + typed
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Additional Layer Information, lyid"
@@ -111,7 +111,7 @@
 
 - id: image.psd.addl.opaque
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (Adobe-private/undocumented blocks)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (Adobe-private/undocumented blocks)
   oracle: byte_roundtrip
   provenance:
     - "preservation invariant (spec §10.4) — synthesized unknown-key fixture"
@@ -120,7 +120,7 @@
 
 - id: image.psd.layer.mask.raster
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (typed view + verbatim payload)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (typed view + verbatim payload)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Layer Mask / Adjustment Layer Data"
@@ -129,7 +129,7 @@
 
 - id: image.psd.global.merged-composite
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (opaque; the embedded oracle, decoded M1)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (opaque; the embedded oracle, decoded M1)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — Image Data Section"
@@ -138,7 +138,7 @@
 
 - id: image.psd.container.psb
   state_row: image.psd.roundtrip
-  tier: planned          # target M0: preserved (one writer, two containers)
+  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (one writer, two containers)
   oracle: byte_roundtrip
   provenance:
     - "Adobe Photoshop File Format specification — PSB notes (widened length fields)"

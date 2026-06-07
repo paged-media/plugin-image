@@ -13,6 +13,9 @@ workspace = true
 [dependencies]
 image-core = { path = "../image-core" }
 thiserror = { workspace = true }
-# D-4 (zune-png vs image-rs/png) is benchmarked in image-conformance;
-# the provisional adapter dependency lands with the png module (M0
-# fan-out), not with the trait freeze.
+# D-4 winner (zune-png vs image-rs/png; bench in image-conformance):
+# zune-png. Pure-Rust decode+encode, no_std-capable, fastest decode and
+# competitive encode in the synthetic sweep. Provisional until the Links
+# corpus audit (pre-M1 freeze) — see registry/codecs.yaml.
+zune-png = { workspace = true }
+zune-core = { workspace = true }

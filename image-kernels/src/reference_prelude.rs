@@ -90,6 +90,17 @@ impl core::ops::Index<u32> for Px {
     }
 }
 
+/// Literal channel indexing (`a[0]`, `a[3]`): a bare Rust integer
+/// literal is i32, and with multiple Index impls in scope it will NOT
+/// coerce — this impl is what lets the DSL form stay identical in both
+/// languages (WGSL accepts the literal natively).
+impl core::ops::Index<i32> for Px {
+    type Output = f32;
+    fn index(&self, i: i32) -> &f32 {
+        &self.0[i as usize]
+    }
+}
+
 /// WGSL `splat4` (see `abi::WGSL_PRELUDE`).
 pub fn splat4(x: f32) -> Px {
     Px([x; 4])

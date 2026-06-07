@@ -1,0 +1,107 @@
+# Evidence for the state matrix (stage plugin.image): run the unit suites
+# and publish normalized results to paged-media/state via the shared
+# publish-results action. Runs on main only — this is the post-merge
+# evidence feed, distinct from ci.yml's pre-merge gate.
+#
+# The (source, suite) pairs published here — (plugin-image, vitest) and
+# (plugin-image, nextest) — must be registered in the state repo's
+# ingest/suites.yaml; publish-results' convert step requires that pair to
+# exist there (using the registered name is load-bearing). Both suites'
+# junit carries no @feat: tags yet, so `map: "true"` applies state's
+# ingest/test-map.yaml bridge at convert time. The action self-conditions
+# the cross-repo dispatch on a non-empty token, so an unset
+# STATE_DISPATCH_TOKEN degrades to "convert + gate + upload, no dispatch".
+name: publish-state
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-state-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # TS unit evidence: vitest with the JUnit reporter, per workspace package,
+  # concatenated into one report. The link: chain (glue/manifest →
+  # ../../plugin-sdk/packages/*) needs plugin-sdk as a sibling, so both
+  # repos are nested checkouts (this repo at plugin-image/, the SDK at
+  # plugin-sdk/) — mirrors plugin-draw's vitest.yml.
+  vitest:
+    name: vitest evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin-image
+      - uses: actions/checkout@v4
+        with:
+          repository: paged-media/plugin-sdk
+          path: plugin-sdk
+          token: ${{ secrets.STATE_DISPATCH_TOKEN || github.token }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install (plugin-sdk sibling satisfies the link chain)
+        run: pnpm install --frozen-lockfile --dir plugin-image
+
+      - name: vitest (junit per package; red results still publish)
+        # The state matrix wants every red row, so don't let a failing
+        # test abort before the junit emits (|| true). --no-bail keeps a
+        # failing package from stopping the rest. Only the glue package
+        # runs vitest; manifest's "test" is a manifest validate — its
+        # absence of junit.xml is fine, the concat globs whatever exists.
+        run: |
+          set -uo pipefail
+          pnpm -r --no-bail --dir plugin-image exec \
+            vitest run --reporter=junit --outputFile=junit.xml || true
+          cat plugin-image/*/junit.xml > junit-all.xml 2>/dev/null || true
+          [ -s junit-all.xml ] # at least one package must have produced results
+
+      - uses: paged-media/state/actions/publish-results@main
+        if: ${{ !cancelled() }}
+        with:
+          source: plugin-image
+          suite: vitest
+          format: nextest-junit
+          path: junit-all.xml
+          map: "true"
+          dispatch-token: ${{ secrets.STATE_DISPATCH_TOKEN }}
+
+  # Rust unit evidence: cargo-nextest under the [profile.ci] in
+  # .config/nextest.toml (fail-fast off, junit.path = junit.xml →
+  # target/nextest/ci/junit.xml). dtolnay/rust-toolchain reads the pinned
+  # channel from rust-toolchain.toml.
+  nextest:
+    name: nextest evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No toolchain: input — reads the pinned channel (1.93.0) from
+      # rust-toolchain.toml, same as ci.yml.
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: nextest (workspace) → JUnit
+        # Red results must still publish (the state matrix wants the ✗), so
+        # don't let a test failure abort before the junit emits. nextest
+        # writes target/nextest/ci/junit.xml from [profile.ci.junit].
+        run: cargo nextest run --workspace --profile ci || true
+
+      - uses: paged-media/state/actions/publish-results@main
+        if: ${{ !cancelled() }}
+        with:
+          source: plugin-image
+          suite: nextest
+          format: nextest-junit
+          path: target/nextest/ci/junit.xml
+          map: "true"
+          dispatch-token: ${{ secrets.STATE_DISPATCH_TOKEN }}

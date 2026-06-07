@@ -16,3 +16,6 @@ image-kernels = { path = "../image-kernels" }
 image-gpu = { path = "../image-gpu" }
 image-codecs = { path = "../image-codecs" }
 thiserror = { workspace = true }
+# The M0 decode→upload bridge converts decoded straight pixels to the
+# rgba16float working bytes the GPU ABI consumes (the cms/cast lane is M1).
+half = { workspace = true }

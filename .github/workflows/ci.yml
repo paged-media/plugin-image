@@ -1,0 +1,176 @@
+# Gate CI for paged.image: the Rust engine (rust job) and the TS bundle
+# (ts job). Evidence publishing to paged-media/state lives in the sibling
+# publish-state.yml; this file is the merge gate — every step here is
+# `-D warnings`-strict and must be green before a PR lands.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The Rust engine: fmt + clippy + test, the three isolation-contract
+  # dependency guards (spec §2.1 / §4 dep rule 3), and the wasm size
+  # report against the 8 MiB budget (BREAKAGE I-07). dtolnay/rust-toolchain
+  # reads the channel straight from rust-toolchain.toml (`channel = 1.93.0`)
+  # — same single-source-of-truth posture as core's resolved `toolchain`
+  # job, without a separate channel-resolver script in this repo.
+  rust:
+    name: rust engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No toolchain: input — dtolnay/rust-toolchain reads the pinned
+      # channel (1.93.0) from rust-toolchain.toml at the repo root, so the
+      # file is the single source of truth (a bump is one line, no
+      # workflow edit). This is core's resolve-from-file intent without a
+      # separate channel-resolver script.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # GPU parity tests self-skip when no wgpu adapter is present (no GPU
+      # on ubuntu-latest), so this exercises the CPU-side logic + the
+      # scalar reference twins only. The pinned-swrast lane that would make
+      # the GPU↔ref parity tests actually execute headless is a follow-up
+      # (spec §9.3).
+      - name: test
+        run: cargo test --workspace
+
+      # --- Isolation-contract dependency guards (spec §2.1 / §4) ---------
+      # Each guard asserts an EMPTY match: grep exits 1 on no-match, which
+      # is the success condition, so we invert it and fail loudly on a hit.
+
+      # Guard 1 (§6 GPU-only / layering): image-kernels is the leaf kernel
+      # crate — it must not pull in any engine/host crate. A normal-edge
+      # path into pipeline/graph/gpu/cms/js means a layering inversion.
+      - name: guard — image-kernels has no engine deps
+        run: |
+          if cargo tree -p image-kernels --edges normal \
+               | grep -E 'image-(pipeline|graph|gpu|cms|js)'; then
+            echo "::error::image-kernels reached an engine crate (pipeline/graph/gpu/cms/js)"
+            exit 1
+          fi
+
+      # Guard 2 (§6 GPU-only): the shipped wasm must prove by construction
+      # that no scalar reference / proptest code is reachable — those are
+      # TEST-ONLY (image-conformance dev-dep). Their presence in image-js's
+      # wasm32 tree would mean reference kernels could ship.
+      - name: guard — image-js wasm tree excludes test-only deps
+        run: |
+          if cargo tree -p image-js --target wasm32-unknown-unknown \
+               | grep -E 'image-conformance|proptest'; then
+            echo "::error::image-js wasm32 tree reaches image-conformance/proptest (TEST-ONLY)"
+            exit 1
+          fi
+
+      # Guard 3 (§4 dep rule 3): deny.toml [sources] forbids a path/git
+      # reach-around into core/editor internals; licenses + advisories +
+      # bans round out the SDK-only Rust posture.
+      - name: install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: guard — cargo deny check
+        run: cargo deny check
+
+      # --- wasm artifact size report (BREAKAGE I-07) --------------------
+      # The bundle's compute artifact is image-js. The wasm packaging
+      # contract caps each artifact at 8 MiB; report both the raw and the
+      # brotli-compressed (over-the-wire) size against that budget. This is
+      # a REPORT, not yet a hard gate — the real gate flips once the engine
+      # has substance to measure (spec §9.3 / I-07 follow-up).
+      - name: wasm32 release build of image-js
+        run: cargo build --release --target wasm32-unknown-unknown -p image-js
+      - name: install brotli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y brotli
+      - name: wasm size report (vs 8 MiB budget)
+        run: |
+          set -euo pipefail
+          WASM=target/wasm32-unknown-unknown/release/image_js.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "::warning::$WASM not found — image-js may not yet emit a cdylib; skipping size report"
+            exit 0
+          fi
+          BUDGET=$((8 * 1024 * 1024))   # 8 MiB per-artifact cap (I-07)
+          RAW=$(stat -c '%s' "$WASM")
+          brotli -q 11 -f -o "$WASM.br" "$WASM"
+          BR=$(stat -c '%s' "$WASM.br")
+          echo "image_js.wasm        raw: $RAW bytes"
+          echo "image_js.wasm.br  brotli: $BR bytes"
+          echo "budget (per artifact): $BUDGET bytes (8 MiB)"
+          if [ "$RAW" -gt "$BUDGET" ]; then
+            echo "::warning title=wasm budget::raw image_js.wasm ($RAW bytes) exceeds the 8 MiB budget — see BREAKAGE I-07"
+          fi
+
+  # The TS bundle: the contract-import lint (isolation §2.1), typecheck,
+  # vitest, and manifest validation. The link: chain (glue/manifest →
+  # ../../plugin-sdk/packages/*) requires plugin-sdk as a SIBLING under the
+  # workspace, so both repos are nested checkouts: this repo at
+  # plugin-image/, the SDK at plugin-sdk/ — matching the link: paths in
+  # glue/package.json (link:../../plugin-sdk/...). Mirrors plugin-draw's
+  # vitest.yml sibling-checkout pattern.
+  ts:
+    name: ts bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin-image
+      - uses: actions/checkout@v4
+        with:
+          repository: paged-media/plugin-sdk
+          path: plugin-sdk
+          token: ${{ secrets.STATE_DISPATCH_TOKEN || github.token }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: install (plugin-sdk sibling satisfies the link chain)
+        run: pnpm install --frozen-lockfile --dir plugin-image
+
+      # Isolation contract, TS half: every import must come through the
+      # sanctioned contract surface (spec §2.1). An editor-internal import
+      # fails here with a pointer to BREAKAGE_LOG.md.
+      - name: contract-import lint
+        run: node scripts/check-contract-imports.mjs
+        working-directory: plugin-image
+
+      - name: typecheck
+        run: pnpm -r typecheck
+        working-directory: plugin-image
+
+      - name: test
+        run: pnpm -r test
+        working-directory: plugin-image
+
+      # Validate the bundle manifest with the sibling plugin-cli (the same
+      # binary the package.json validate:manifest script invokes).
+      - name: validate manifest
+        run: >-
+          node ../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs
+          validate manifest/manifest.json
+        working-directory: plugin-image

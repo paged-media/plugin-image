@@ -48,3 +48,428 @@
     - "photometric negate in linear working space (1 - x); no reference reading"
   tests:
     rust: ["image-conformance/tests/family_linear.rs"]
+
+# ── arithmetic family ────────────────────────────────────────
+
+- id: math.add
+  rust_path: families::arithmetic::MATH_ADD
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.sub
+  rust_path: families::arithmetic::MATH_SUB
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.mul
+  rust_path: families::arithmetic::MATH_MUL
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.div
+  rust_path: families::arithmetic::MATH_DIV
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.add_const
+  rust_path: families::arithmetic::MATH_ADD_CONST
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.mul_const
+  rust_path: families::arithmetic::MATH_MUL_CONST
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.abs
+  rust_path: families::arithmetic::MATH_ABS
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.sign
+  rust_path: families::arithmetic::MATH_SIGN
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+- id: math.neg
+  rust_path: families::arithmetic::MATH_NEG
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_arithmetic.rs"]
+
+# ── relational family ────────────────────────────────────────
+
+- id: rel.eq
+  rust_path: families::relational::REL_EQ
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "differential oracle harness (vips)"
+  tests:
+    rust: ["image-conformance/tests/family_relational.rs"]
+
+- id: rel.ne
+  rust_path: families::relational::REL_NE
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "differential oracle harness (vips)"
+  tests:
+    rust: ["image-conformance/tests/family_relational.rs"]
+
+- id: rel.lt
+  rust_path: families::relational::REL_LT
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "differential oracle harness (vips)"
+  tests:
+    rust: ["image-conformance/tests/family_relational.rs"]
+
+- id: rel.le
+  rust_path: families::relational::REL_LE
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "differential oracle harness (vips)"
+  tests:
+    rust: ["image-conformance/tests/family_relational.rs"]
+
+- id: rel.gt
+  rust_path: families::relational::REL_GT
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "differential oracle harness (vips)"
+  tests:
+    rust: ["image-conformance/tests/family_relational.rs"]
+
+- id: rel.ge
+  rust_path: families::relational::REL_GE
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "differential oracle harness (vips)"
+  tests:
+    rust: ["image-conformance/tests/family_relational.rs"]
+
+# ── boolean family ───────────────────────────────────────────
+
+- id: bool.and
+  rust_path: families::boolean::BOOL_AND
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips boolean-equivalent behavior verified via the differential oracle harness (M0 fan-out), not reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_boolean.rs"]
+
+- id: bool.or
+  rust_path: families::boolean::BOOL_OR
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips boolean-equivalent behavior verified via the differential oracle harness (M0 fan-out), not reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_boolean.rs"]
+
+- id: bool.xor
+  rust_path: families::boolean::BOOL_XOR
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips boolean-equivalent behavior verified via the differential oracle harness (M0 fan-out), not reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_boolean.rs"]
+
+- id: bool.not
+  rust_path: families::boolean::BOOL_NOT
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips boolean-equivalent behavior verified via the differential oracle harness (M0 fan-out), not reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_boolean.rs"]
+
+# ── cast family ──────────────────────────────────────────────
+
+- id: cast.premultiply
+  rust_path: families::cast::CAST_PREMULTIPLY
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra (rgb*alpha, alpha through)"
+    - "GEGL-equivalent behavior via differential oracle harness (M0 fan-out); no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_cast.rs"]
+
+- id: cast.unpremultiply
+  rust_path: families::cast::CAST_UNPREMULTIPLY
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra (rgb/alpha with zero-alpha->all-zero guard)"
+    - "GEGL-equivalent behavior via differential oracle harness (M0 fan-out); no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_cast.rs"]
+
+# ── band family ──────────────────────────────────────────────
+
+- id: band.copy
+  rust_path: families::band::BAND_COPY
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "cache-identity op: materialize a node's pixels (spec §11)"
+  tests:
+    rust: ["image-conformance/tests/family_band.rs"]
+
+- id: band.extract
+  rust_path: families::band::BAND_EXTRACT
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "single-channel extraction -> gray, opaque alpha; spec §11"
+    - "oracle: libvips per-channel band extraction (channels 0..3)"
+  tests:
+    rust: ["image-conformance/tests/family_band.rs"]
+
+- id: band.set_alpha
+  rust_path: families::band::BAND_SET_ALPHA
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "rgb passthrough with alpha override; spec §11"
+    - "oracle: libvips alpha set/replace"
+  tests:
+    rust: ["image-conformance/tests/family_band.rs"]
+
+- id: band.broadcast_alpha
+  rust_path: families::band::BAND_BROADCAST_ALPHA
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "alpha broadcast to all four channels (coverage map); spec §11"
+  tests:
+    rust: ["image-conformance/tests/family_band.rs"]
+
+# ── minmax family ────────────────────────────────────────────
+
+- id: math.min
+  rust_path: families::minmax::MATH_MIN
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips-equivalent behavior verified via differential oracle harness (M0 fan-out)"
+  tests:
+    rust: ["image-conformance/tests/family_minmax.rs"]
+
+- id: math.max
+  rust_path: families::minmax::MATH_MAX
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips-equivalent behavior verified via differential oracle harness (M0 fan-out)"
+  tests:
+    rust: ["image-conformance/tests/family_minmax.rs"]
+
+- id: math.clamp
+  rust_path: families::minmax::MATH_CLAMP
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips-equivalent behavior verified via differential oracle harness (M0 fan-out)"
+  tests:
+    rust: ["image-conformance/tests/family_minmax.rs"]
+
+- id: math.min_const
+  rust_path: families::minmax::MATH_MIN_CONST
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips-equivalent behavior verified via differential oracle harness (M0 fan-out)"
+  tests:
+    rust: ["image-conformance/tests/family_minmax.rs"]
+
+- id: math.max_const
+  rust_path: families::minmax::MATH_MAX_CONST
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra / no reference reading"
+    - "libvips-equivalent behavior verified via differential oracle harness (M0 fan-out)"
+  tests:
+    rust: ["image-conformance/tests/family_minmax.rs"]

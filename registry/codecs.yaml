@@ -4,7 +4,7 @@
 
 - id: image.codec.traits
   state_row: image.codec.traits
-  tier: planned          # target M0: frozen (ImageSource/ImageTarget/ByteSource)
+  tier: shipped          # M0: frozen + exercised by raw/png adapters
   provenance:
     - "spec §10.2 verbatim trait surface; sans-IO design"
   tests:
@@ -12,7 +12,7 @@
 
 - id: image.codec.raw
   state_row: image.codec.traits
-  tier: planned          # target M0: decode (in-memory test/bring-up source)
+  tier: shipped          # M0: decode (in-memory test/bring-up source)
   provenance:
     - "trivial interleaved buffer adapter; no container"
   tests:
@@ -20,9 +20,27 @@
 
 - id: image.codec.png
   state_row: image.codec.traits
-  tier: planned          # target M0: decode+encode; D-4 picks the crate
-  decision: "D-4 — zune-png vs image-rs/png; criterion bench image-conformance/benches/png_d4.rs; provisional until the Links corpus audit (pre-M1 freeze)"
+  tier: shipped          # M0: decode+encode (PngSource/PngTarget; 8-bit; limits below)
+  # D-4 RESOLVED → zune-png (0.5). criterion bench
+  # image-conformance/benches/png_d4.rs (synthetic 256²/1024², RGBA8 +
+  # RGB8, gradient+checkerboard so filters do real work). Measured
+  # (Apple M-series, --quick, median):
+  #   decode 1024² RGBA8 : zune 0.66 ms  vs image/png 5.50 ms  (~8.4×)
+  #   decode 1024² RGB8  : zune 0.31 ms  vs image/png 4.22 ms  (~13.6×)
+  #   decode  256² RGBA8 : zune 36.6 µs  vs image/png  354 µs  (~9.7×)
+  #   encode 1024² RGBA8 : zune 2.69 ms  vs image/png 6.78 ms  (~2.5×)
+  #   encode 1024² RGB8  : zune 2.03 ms  vs image/png 4.56 ms  (~2.3×)
+  #   encode  256² RGBA8 : zune  142 µs  vs image/png  527 µs  (~3.7×)
+  # zune-png wins every cell, decode and encode. Provisional until the
+  # Links corpus audit (pre-M1 freeze, spec §10.3 corpus rule).
+  decision: "D-4 RESOLVED → zune-png (wins every decode+encode cell, 2.3×–13.6×); bench image-conformance/benches/png_d4.rs; provisional until the Links corpus audit (pre-M1 freeze)"
+  # M0 adapter limits (decode.rs/encode.rs): 8-bit only (U16 errors
+  # Unsupported, M1 lane); RGB widened to Rgba (alpha=255) at the slice
+  # boundary; PNG-without-gamma → Transfer::Gamma(Srgb)/space Srgb/
+  # AlphaMode::Straight; native_shrink == [1]; whole-decode-then-window
+  # (row-streaming is M1); ICC embed NOT supported by zune-png 0.5 (no
+  # iCCP writer) — TargetInfo.icc is dropped on encode (M1 follow-up).
   provenance:
-    - "PNG (RFC 2083 / W3C PNG spec) via the D-4-selected pure-Rust crate"
+    - "PNG (RFC 2083 / W3C PNG 3rd ed.) via zune-png 0.5 (pure-Rust, no_std-capable decode+encode)"
   tests:
     rust: ["image-conformance/tests/codec_png.rs"]

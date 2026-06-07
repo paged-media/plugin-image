@@ -17,6 +17,7 @@ workspace = true
 image-core = { path = "../image-core" }
 image-kernels = { path = "../image-kernels", features = ["reference"] }
 image-gpu = { path = "../image-gpu" }
+image-pipeline = { path = "../image-pipeline" }
 image-codecs = { path = "../image-codecs" }
 image-psd = { path = "../image-psd" }
 half = { workspace = true }
@@ -26,6 +27,12 @@ bytemuck = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+# D-4 bench (png_d4): zune-png is the chosen adapter; image/png is the
+# loser kept here ONLY as the bench comparison baseline (dev-dep, never
+# reachable from a production crate).
+zune-png = { workspace = true }
+zune-core = { workspace = true }
+png = { workspace = true }
 
 [[bench]]
 name = "png_d4"

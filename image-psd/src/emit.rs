@@ -12,15 +12,25 @@
  *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
  */
 
-//! Write orchestration with the lazy-verbatim guard: nodes carrying
-//! their source bytes (`Raw = Some`) re-emit them verbatim (zero-edit ⇒
-//! byte-identical); `None` nodes re-encode canonically via `framed()`
-//! back-patching. Lands with M0 fan-out unit U7.
+//! Write orchestration with the lazy-verbatim guard: nodes carrying their
+//! source bytes (`Raw = Some`) re-emit them verbatim (zero-edit ⇒
+//! byte-identical); `None` nodes re-encode canonically via the per-section
+//! emitters (`framed()` back-patching, canonical padding).
 
 use crate::model::PsdFile;
+use crate::writer::ByteWriter;
 use crate::Result;
 
 pub fn write(file: &PsdFile) -> Result<Vec<u8>> {
-    let _ = file;
-    unimplemented!("M0 fan-out: write orchestration (unit U7)")
+    let mut w = ByteWriter::new();
+    let container = file.container;
+
+    file.header.emit(&mut w, container);
+    file.color_mode.emit(&mut w);
+    file.resources.emit(&mut w);
+    file.layer_mask.emit(&mut w, container);
+    // The merged composite closes the file — un-framed, runs to EOF.
+    file.composite.emit(&mut w);
+
+    Ok(w.into_bytes())
 }

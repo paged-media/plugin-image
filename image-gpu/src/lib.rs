@@ -24,12 +24,18 @@
 //! conformance harness drives.
 
 mod device;
+mod dispatch;
 mod execute;
 mod pipeline;
+mod pool;
+mod residency;
 
 pub use device::GpuContext;
+pub use dispatch::{BatchTile, DispatchBatch};
 pub use execute::{execute_tile_once, TileInput};
 pub use pipeline::KernelPipeline;
+pub use pool::{PoolSlot, TexturePool};
+pub use residency::{ResidencyManager, Tier, HEAP_TILE_BYTES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
@@ -44,4 +50,8 @@ pub enum GpuError {
         kernel: &'static str,
         detail: String,
     },
+    /// Tier 2 (OPFS scratch) needs the storage capability the plugin SDK
+    /// does not yet expose — see BREAKAGE I-03.
+    #[error("Tier 2 (OPFS scratch) unavailable: storage capability pending (BREAKAGE I-03)")]
+    Tier2Unsupported,
 }
