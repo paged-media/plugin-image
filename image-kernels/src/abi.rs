@@ -38,12 +38,40 @@ pub const GROUPS_PER_TILE: u32 = image_core::TILE / WORKGROUP_SIZE;
 
 /// Helper functions available to every kernel body — the WGSL half of
 /// the restricted DSL. The Rust half lives in `reference_prelude`; the
-/// two are kept in lock-step (the golden-expansion conformance test
-/// guards drift). WGSL builtins (`clamp`, `mix`, `min`, `max`, `abs`,
-/// `floor`, `select`) are part of the DSL whitelist and need no
-/// preamble entry.
+/// two are kept in lock-step (the golden-expansion conformance test +
+/// every family's parity tests guard drift), and BOTH are
+/// orchestrator-owned: family agents use the prelude, they never
+/// extend it. WGSL builtins (`clamp`, `mix`, `min`, `max`, `abs`,
+/// `floor`) plus vector indexing (`a[0]`, `a[p.channel]`) are part of
+/// the DSL whitelist and need no preamble entry.
+///
+/// Determinism notes (§6.3): relational helpers return exact 0.0/1.0;
+/// boolean helpers read truthiness as `> 0.5` so NaN inputs are
+/// deterministically false on BOTH lanes (IEEE comparisons with NaN
+/// are false everywhere); no helper uses `pow`/transcendentals (their
+/// WGSL precision is implementation-defined — they enter with T1 and
+/// per-kernel tolerances).
 pub const WGSL_PRELUDE: &str = "\
 fn splat4(x: f32) -> vec4<f32> { return vec4<f32>(x); }
+fn pack4(x: f32, y: f32, z: f32, w: f32) -> vec4<f32> { return vec4<f32>(x, y, z, w); }
+fn eq4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), a == b); }
+fn ne4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), a != b); }
+fn lt4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), a < b); }
+fn le4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), a <= b); }
+fn gt4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), a > b); }
+fn ge4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), a >= b); }
+fn truthy4(a: vec4<f32>) -> vec4<bool> { return a > splat4(0.5); }
+fn and4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), truthy4(a) & truthy4(b)); }
+fn or4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), truthy4(a) | truthy4(b)); }
+fn xor4(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(splat4(0.0), splat4(1.0), truthy4(a) != truthy4(b)); }
+fn not4(a: vec4<f32>) -> vec4<f32> { return select(splat4(1.0), splat4(0.0), truthy4(a)); }
+fn sign4(a: vec4<f32>) -> vec4<f32> { return gt4(a, splat4(0.0)) - lt4(a, splat4(0.0)); }
+fn neg4(a: vec4<f32>) -> vec4<f32> { return -a; }
+fn premul4(c: vec4<f32>) -> vec4<f32> { return vec4<f32>(c.rgb * c.a, c.a); }
+fn unpremul4(c: vec4<f32>) -> vec4<f32> {
+    if (c.a == 0.0) { return splat4(0.0); }
+    return vec4<f32>(c.rgb / c.a, c.a);
+}
 ";
 
 /// Assemble the complete WGSL compute module for a kernel: ABI

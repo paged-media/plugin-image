@@ -26,6 +26,7 @@
 
 pub mod device;
 pub mod harness;
+pub mod psd_builder;
 pub mod quantize;
 
 pub use image_kernels::reference_prelude::Px;

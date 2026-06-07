@@ -17,14 +17,28 @@
 //! (`registry/kernels.yaml`), and its conformance tests — the
 //! conflict-free fan-out unit (spec §16.3 rule 5).
 //!
-//! M0 fan-out adds: arithmetic, relational, boolean, cast, band,
-//! minmax. `linear` is the phase-0 codegen proof.
+//! `linear` was the phase-0 codegen proof; the other six land with the
+//! M0 fan-out (one agent per file).
 
+pub mod arithmetic;
+pub mod band;
+pub mod boolean;
+pub mod cast;
 pub mod linear;
+pub mod minmax;
+pub mod relational;
 
 use crate::KernelDef;
 
 /// Every family's definition slice — `all_defined()` concatenates
 /// these; the conformance gate asserts set-equality with the
 /// registry-generated dispatch table.
-pub static ALL_FAMILIES: &[&[&KernelDef]] = &[linear::FAMILY];
+pub static ALL_FAMILIES: &[&[&KernelDef]] = &[
+    arithmetic::FAMILY,
+    band::FAMILY,
+    boolean::FAMILY,
+    cast::FAMILY,
+    linear::FAMILY,
+    minmax::FAMILY,
+    relational::FAMILY,
+];
