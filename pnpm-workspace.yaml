@@ -1,0 +1,7 @@
+# The TS side of the bundle. The spec (§4) names manifest/ and glue/ as
+# top-level dirs; they are pnpm workspace packages directly (no packages/
+# indirection). The Rust crates are a separate Cargo workspace, invisible
+# to pnpm.
+packages:
+  - "glue"
+  - "manifest"

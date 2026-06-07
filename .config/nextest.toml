@@ -1,0 +1,14 @@
+# cargo-nextest configuration (mirrors core's .config/nextest.toml).
+#
+# The `ci` profile emits JUnit XML that the publish-state workflow hands
+# to paged-media/state's publish-results action (format: nextest-junit,
+# source: plugin-image, suite: nextest). The default profile is
+# unchanged — local `cargo nextest run` behaves as before.
+
+[profile.ci]
+# Don't stop at the first failure: the state matrix wants every red row.
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "paged-image-nextest"

@@ -1,0 +1,26 @@
+[package]
+name = "image-cms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "paged.image color management (spec §10.1): swappable CmsEngine, compile-on-CPU / apply-on-GPU LUT baking. D-11 ruling: hybrid — qcms display path now, moxcms print lane M1."
+
+[lints]
+workspace = true
+
+[dependencies]
+image-core = { path = "../image-core" }
+thiserror = { workspace = true }
+# The display-consistency engine: the EXACT build core uses (qcms 0.3,
+# cmyk + iccv4-enabled) on BOTH targets — cross-engine consistency with
+# the page render by construction (A-0 audit §F.1). Unlike core, the
+# plugin does NOT ship lcms2 natively: spec §10.1 keeps lcms2 as a CI
+# differential oracle only (dev-dependency below).
+qcms = { workspace = true }
+
+[dev-dependencies]
+# lcms2 = "6" — the native differential oracle lands with the M0
+# fan-out CMS unit (kept out of phase 0 so the freeze builds without
+# the C toolchain dependency).

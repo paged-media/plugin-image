@@ -1,0 +1,18 @@
+[package]
+name = "image-codecs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "paged.image codec adapter contract (ImageSource/ImageTarget over sans-IO ByteSource) + format adapters. Codecs are inherently CPU work (spec §10.2)."
+
+[lints]
+workspace = true
+
+[dependencies]
+image-core = { path = "../image-core" }
+thiserror = { workspace = true }
+# D-4 (zune-png vs image-rs/png) is benchmarked in image-conformance;
+# the provisional adapter dependency lands with the png module (M0
+# fan-out), not with the trait freeze.

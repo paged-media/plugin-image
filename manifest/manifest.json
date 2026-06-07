@@ -1,0 +1,41 @@
+{
+  "id": "media.paged.image",
+  "name": "paged.image",
+  "version": "0.0.1",
+  "apiVersion": "^0.2",
+  "publisher": "paged.media",
+  "capabilities": {
+    "document": {
+      "read": "broad",
+      "write": "scoped"
+    },
+    "rendering": [
+      "hitTest"
+    ],
+    "network": false,
+    "clipboard": "full",
+    "wasm": [
+      {
+        "name": "compute",
+        "path": "wasm/image_js_bg.wasm",
+        "purpose": "compute",
+        "maxBytes": 6291456
+      },
+      {
+        "name": "codecs",
+        "path": "wasm/image_codecs_bg.wasm",
+        "purpose": "codec",
+        "maxBytes": 6291456
+      }
+    ]
+  },
+  "contributes": {
+    "panels": [
+      "media.paged.image.panel.adjustments",
+      "panels/image-adjustments.panel.json"
+    ],
+    "commands": [
+      "media.paged.image.command.openImage"
+    ]
+  }
+}

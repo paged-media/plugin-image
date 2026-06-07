@@ -1,0 +1,27 @@
+[package]
+name = "image-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "TEST-ONLY (spec §4): scalar reference kernels, gpu↔ref parity harness, oracle runners, PSD fixture builder, perf gates. Never shipped; never reachable from wasm32 release builds."
+
+[lints]
+workspace = true
+
+[dependencies]
+# This crate IS the dev-dependency tree: it's the only crate allowed to
+# activate image-kernels' `reference` feature (spec §4 dep rule 2; CI
+# proves no production crate reaches it via cargo-tree).
+image-core = { path = "../image-core" }
+image-kernels = { path = "../image-kernels", features = ["reference"] }
+image-gpu = { path = "../image-gpu" }
+image-codecs = { path = "../image-codecs" }
+image-psd = { path = "../image-psd" }
+half = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

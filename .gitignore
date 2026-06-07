@@ -1,0 +1,14 @@
+# Reference checkouts — third-party material studied during incubation
+# (read-only mounts; never committed, never vendored into this repo).
+references/
+
+# Rust
+/target
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Optional psd-tools ecosystem-oracle venv (test-only, machine-local)
+.venv/

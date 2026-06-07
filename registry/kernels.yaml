@@ -1,0 +1,50 @@
+# paged.image LOCAL kernel registry — the build-consumed half of the
+# two-registry split (see CLAUDE.md):
+#
+#   * paged-media/state registry/features/plugin-image.yaml = STATUS
+#     ledger (stage plugin.image; aggregate rows like
+#     image.kernel.family-t0). `state_row` below joins onto it.
+#   * THIS file = per-kernel dispatch + conformance metadata.
+#     image-kernels/build.rs generates the dispatch table from the
+#     (id, rust_path) pairs — a kernel without a row here is
+#     UNREACHABLE BY CONSTRUCTION (spec §12.2.1); the conformance gate
+#     asserts the reverse (no orphan KernelDef statics) and that every
+#     row's claimed tiers have tests.
+#
+# Row schema:
+#   id            dispatch id (KernelDef.id) — immutable
+#   rust_path     path of the KernelDef static inside image-kernels
+#   state_row     the aggregating status row in state/
+#   class         point | windowed | resample | reduction | generator
+#   mip_exact     bool (§8.3)
+#   gpu_tolerance { kind: channel_eps_f16 | perceptual_delta_e | exact, value }
+#   oracle        none | vips | gegl | both | psd_composite (§12.4)
+#   status        planned | implemented | parity-gpu-ref | parity-ref-oracle
+#   provenance    list of sources (spec §3 provenance log)
+#   tests         rust test paths / @feat tags
+
+- id: math.linear
+  rust_path: families::linear::MATH_LINEAR
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "elementary pointwise algebra (a*x + b); no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_linear.rs"]
+
+- id: math.invert
+  rust_path: families::linear::MATH_INVERT
+  state_row: image.kernel.family-t0
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: both
+  status: implemented
+  provenance:
+    - "photometric negate in linear working space (1 - x); no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_linear.rs"]

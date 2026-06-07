@@ -1,0 +1,41 @@
+{
+  "$comment": "DESIGN PROTOTYPE (the plugin-draw panels/ convention) — not interpreted by any host. The M0 runtime panel is the expert React leaf in glue/src/panels/image-panel.tsx; this JSON sketches the M2 adjustments panel (T2 kernels: curves/levels/HSL/exposure) so the binding surface is designed against the catalog ceiling early. Sliders drive GESTURES (param overrides on the live graph, never serialized); commit on release submits ONE SetParams Operation through the SDK mutation surface (spec §8.5).",
+  "panel": "media.paged.image.panel.adjustments",
+  "title": { "key": "panel.image.adjustments.title" },
+  "icon": "panel-canvas",
+  "sections": [
+    {
+      "title": { "key": "image.exposure" },
+      "rows": [
+        {
+          "type": "numeric",
+          "bind": { "kind": "derived", "key": "exposureEv" },
+          "min": -5,
+          "max": 5,
+          "label": { "key": "image.exposure.ev" }
+        },
+        {
+          "type": "numeric",
+          "bind": { "kind": "derived", "key": "gain" },
+          "min": 0,
+          "max": 4,
+          "label": { "key": "image.linear.gain" }
+        },
+        {
+          "type": "numeric",
+          "bind": { "kind": "derived", "key": "bias" },
+          "min": -1,
+          "max": 1,
+          "label": { "key": "image.linear.bias" }
+        }
+      ]
+    },
+    {
+      "title": { "key": "image.color" },
+      "$comment": "T2 (M2): curves/levels/HSL land with image.kernel.t2; the LUT-backed soft-proof toggle is the cms.apply lane (M1).",
+      "rows": [
+        { "type": "toggle", "bind": { "kind": "derived", "key": "invert" }, "label": { "key": "image.invert" } }
+      ]
+    }
+  ]
+}

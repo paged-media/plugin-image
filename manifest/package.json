@@ -1,0 +1,13 @@
+{
+  "name": "@paged-media/image-manifest",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    "./manifest.json": "./manifest.json"
+  },
+  "scripts": {
+    "typecheck": "node ../../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs validate manifest.json",
+    "test": "node ../../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs validate manifest.json"
+  }
+}

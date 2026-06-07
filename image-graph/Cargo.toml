@@ -1,0 +1,15 @@
+[package]
+name = "image-graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "paged.image Engine B — persistent tiled buffer graph (spec §8). M0: types and stubs; the incremental engine lands in M2."
+
+[lints]
+workspace = true
+
+[dependencies]
+image-core = { path = "../image-core" }
+image-kernels = { path = "../image-kernels" }

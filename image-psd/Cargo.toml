@@ -1,0 +1,22 @@
+[package]
+name = "image-psd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "PSD/PSB structural parse, PSD-faithful layer model, preservation-invariant writer (spec §10.4). Plain data — no engine dependencies."
+
+[lints]
+workspace = true
+
+[dependencies]
+image-core = { path = "../image-core" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Round-trip / model tests consume the INDEPENDENT fixture builder from
+# image-conformance? No — that would be a dependency cycle (conformance
+# dev-depends on this crate). The fixtures are built in
+# image-conformance's own tests; image-psd/tests keeps self-contained
+# byte-level cases (framing, padding, packbits).

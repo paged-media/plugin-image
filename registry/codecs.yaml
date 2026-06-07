@@ -1,0 +1,28 @@
+# paged.image LOCAL codec registry (spec §10.3 format matrix; M0 lands
+# the traits + the M0 adapters, the matrix fills through M1). state_row
+# joins onto paged-media/state rows.
+
+- id: image.codec.traits
+  state_row: image.codec.traits
+  tier: planned          # target M0: frozen (ImageSource/ImageTarget/ByteSource)
+  provenance:
+    - "spec §10.2 verbatim trait surface; sans-IO design"
+  tests:
+    rust: ["image-codecs/src/raw.rs (unit)", "image-conformance/tests/codec_traits.rs"]
+
+- id: image.codec.raw
+  state_row: image.codec.traits
+  tier: planned          # target M0: decode (in-memory test/bring-up source)
+  provenance:
+    - "trivial interleaved buffer adapter; no container"
+  tests:
+    rust: ["image-codecs/src/raw.rs (unit)"]
+
+- id: image.codec.png
+  state_row: image.codec.traits
+  tier: planned          # target M0: decode+encode; D-4 picks the crate
+  decision: "D-4 — zune-png vs image-rs/png; criterion bench image-conformance/benches/png_d4.rs; provisional until the Links corpus audit (pre-M1 freeze)"
+  provenance:
+    - "PNG (RFC 2083 / W3C PNG spec) via the D-4-selected pure-Rust crate"
+  tests:
+    rust: ["image-conformance/tests/codec_png.rs"]

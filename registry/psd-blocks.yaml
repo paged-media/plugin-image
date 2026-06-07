@@ -1,0 +1,146 @@
+# paged.image LOCAL PSD block registry — fidelity-ladder tracking per
+# block family (spec §10.4): parsed → preserved → rendered → mutatable
+# → round-trips. state_row joins onto the aggregating status row in
+# paged-media/state (image.psd.roundtrip). Every block handler records
+# its provenance here (spec §3); the preservation invariant means
+# UNLISTED blocks are still safe — they ride the opaque-verbatim path.
+#
+# Tiers claimed here are CI-checked against the test pointers (the
+# coverage gate, M0 fan-out).
+
+- id: image.psd.header
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: round-trips (typed re-encode, byte-identical)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — File Header Section"
+  tests:
+    rust: ["image-psd/tests/roundtrip.rs", "image-conformance/tests/psd_fixtures.rs"]
+
+- id: image.psd.color-mode-data
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (opaque-verbatim)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Color Mode Data Section"
+  tests:
+    rust: ["image-psd/tests/roundtrip.rs"]
+
+- id: image.psd.resource.icc
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved + typed view (id 1039)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Image Resources Section, id 1039"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs"]
+
+- id: image.psd.resource.resolution
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved + typed view (id 1005)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Image Resources Section, id 1005 (ResolutionInfo)"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs"]
+
+- id: image.psd.resource.opaque
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (the invariant itself)
+  oracle: byte_roundtrip
+  provenance:
+    - "preservation invariant (spec §10.4) — black-box: synthesized unknown-id fixture"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs"]
+
+- id: image.psd.layer.records
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (scalars typed; extra-data verbatim)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Layer Records"
+  tests:
+    rust: ["image-psd/tests/roundtrip.rs", "image-conformance/tests/psd_fixtures.rs"]
+
+- id: image.psd.layer.channel-data.raw-rle
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved + RAW/RLE decode↔encode
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Channel Image Data"
+    - "TIFF 6.0 specification — PackBits appendix"
+  tests:
+    rust: ["image-psd/src/compression/packbits.rs (unit matrix)", "image-conformance/tests/psd_fixtures.rs"]
+
+- id: image.psd.layer.channel-data.zip
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (opaque; inflate is M1)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Channel Image Data, compression 2/3"
+  tests:
+    rust: ["image-psd/tests/roundtrip.rs"]
+
+- id: image.psd.addl.lsct
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved + typed (group tree derives from it)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Additional Layer Information, lsct"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs (multilayer_groups)"]
+
+- id: image.psd.addl.luni
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved + typed (count/padding variants pinned)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Additional Layer Information, luni"
+    - "black-box: trailing-null-in-count producer variance, synthesized both ways"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs (unicode_names)"]
+
+- id: image.psd.addl.lyid
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved + typed
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Additional Layer Information, lyid"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs (layer_ids)"]
+
+- id: image.psd.addl.opaque
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (Adobe-private/undocumented blocks)
+  oracle: byte_roundtrip
+  provenance:
+    - "preservation invariant (spec §10.4) — synthesized unknown-key fixture"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs (unknown_addl)"]
+
+- id: image.psd.layer.mask.raster
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (typed view + verbatim payload)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Layer Mask / Adjustment Layer Data"
+  tests:
+    rust: ["image-conformance/tests/psd_fixtures.rs (raster_masks)"]
+
+- id: image.psd.global.merged-composite
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (opaque; the embedded oracle, decoded M1)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — Image Data Section"
+  tests:
+    rust: ["image-psd/tests/roundtrip.rs"]
+
+- id: image.psd.container.psb
+  state_row: image.psd.roundtrip
+  tier: planned          # target M0: preserved (one writer, two containers)
+  oracle: byte_roundtrip
+  provenance:
+    - "Adobe Photoshop File Format specification — PSB notes (widened length fields)"
+  tests:
+    rust: ["image-psd/tests/psb.rs", "image-conformance/tests/psd_fixtures.rs (psb_wide)"]

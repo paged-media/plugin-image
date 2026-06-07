@@ -1,0 +1,7 @@
+# Pinned for reproducible local + CI builds. 1.93.0 is the toolchain
+# installed on the primary dev machine; bump deliberately (core pins
+# 1.94.1 — converge when this machine updates).
+[toolchain]
+channel = "1.93.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]

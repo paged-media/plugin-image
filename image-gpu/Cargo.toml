@@ -1,0 +1,20 @@
+[package]
+name = "image-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "paged.image GPU execution layer (spec §9) — wgpu device mgmt, tile residency, dispatch batching. The ONLY execution layer; kernels run as WGSL compute."
+
+[lints]
+workspace = true
+
+[dependencies]
+image-core = { path = "../image-core" }
+image-kernels = { path = "../image-kernels" }
+wgpu = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "image-kernels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "paged.image kernel definitions: WGSL source of truth + typed param blocks + metadata (spec §6). Depends ONLY on image-core (dep rule 1)."
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The scalar reference twins (test-only golden source, spec §6.3).
+# Enabled SOLELY by image-conformance's dev-dependency; a wasm32 release
+# build must never activate it (CI cargo-tree guard).
+reference = []
+
+[dependencies]
+image-core = { path = "../image-core" }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+# WGSL validation of every assembled kernel module (test-time seam —
+# generated WGSL can't be validated in build.rs because assembly lives
+# in this crate).
+naga = { workspace = true }

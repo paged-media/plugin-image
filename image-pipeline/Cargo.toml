@@ -1,0 +1,18 @@
+[package]
+name = "image-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "paged.image Engine A — demand-driven streaming pipeline (spec §7): lazy DAG, region-propagated pull evaluation, operation cache, sinks."
+
+[lints]
+workspace = true
+
+[dependencies]
+image-core = { path = "../image-core" }
+image-kernels = { path = "../image-kernels" }
+image-gpu = { path = "../image-gpu" }
+image-codecs = { path = "../image-codecs" }
+thiserror = { workspace = true }

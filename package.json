@@ -1,0 +1,16 @@
+{
+  "name": "paged-media-plugin-image",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm -r run typecheck",
+    "lint:contract": "node scripts/check-contract-imports.mjs",
+    "test": "node scripts/check-contract-imports.mjs && pnpm -r run test",
+    "validate:manifest": "node ../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs validate manifest/manifest.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
