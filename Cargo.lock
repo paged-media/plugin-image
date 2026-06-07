@@ -640,6 +640,7 @@ dependencies = [
  "image-codecs",
  "image-core",
  "image-gpu",
+ "image-graph",
  "image-kernels",
  "image-pipeline",
  "image-psd",
@@ -669,8 +670,12 @@ dependencies = [
 name = "image-graph"
 version = "0.0.0"
 dependencies = [
+ "half",
  "image-core",
+ "image-gpu",
  "image-kernels",
+ "image-pipeline",
+ "thiserror",
 ]
 
 [[package]]

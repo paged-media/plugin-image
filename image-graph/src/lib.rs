@@ -12,42 +12,58 @@
  *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
  */
 
-//! Engine B — the persistent buffer graph (spec §8): incremental
-//! re-evaluation over `PersistentBuffer`s, damage propagation,
-//! mip-aware evaluation, the viewport sink.
+//! Engine B — the persistent buffer graph (spec §8): persistent mutable
+//! state, incremental re-evaluation, sub-frame interactive updates.
 //!
-//! **M2 milestone.** M0 carries the node-shape types only, so the §8
-//! vocabulary is frozen alongside the §5 core types it builds on
-//! (`PersistentBuffer`, tile generations, `Region` damage). The
-//! Gesture/Operation lowering (§8.5) arrives with the SDK mutation
-//! integration.
+//! # M2 interface freeze
+//!
+//! `BufferGraph` holds source/op/sink nodes. A `SinkNode` (the viewport)
+//! requests exactly the `(level, coord)` tiles it needs; only invalid
+//! tiles recompute, upstream-first. Invalidation is generation-driven
+//! (§5.3): every op-node output tile is tagged with the input tile
+//! generations + the params hash it was computed from; a param change or
+//! buffer write bumps generations, and a cached tile whose recorded
+//! input generations no longer match is stale (§8.2).
+//!
+//! ## What M2 implements
+//!
+//! - Point and windowed unary/binary op nodes, evaluated at a requested
+//!   mip level (mip-aware eval, §8.3 — the graph evaluates AT the
+//!   viewing level, requesting source tiles at that level).
+//! - Per-node sparse output cache keyed on `TileCoord`; entry carries
+//!   `(params_hash, input_generations)`; a miss/staleness recomputes via
+//!   the GPU (`image_gpu::execute_tile_once` / `execute_windowed_once`).
+//! - `set_params` (the committed-Operation path, §8.5) and `gesture`
+//!   (the ephemeral override) both route through the same param update;
+//!   damage propagates downstream, `Windowed` kernels inflating it by
+//!   radius (the `region_prop` rule in the push direction).
+//! - The incremental-correctness invariant (§12.4): `request` after any
+//!   damage sequence equals `evaluate_from_scratch` — the non-negotiable
+//!   Engine-B gate (its failure mode is stale tiles, not wrong math).
+//!
+//! ## Deferred (documented)
+//!
+//! - `WriteBuffer` undo journaling (COW `Arc<Tile>` snapshots, §8.5) —
+//!   the types exist (`PersistentBuffer`'s COW `TileMap`); the op-log
+//!   integration rides the SDK mutation surface.
+//! - The viewport sink's presentation is degraded until the GPU-surface
+//!   RFC (BREAKAGE I-01); M2 returns tiles as heap bytes.
+//! - Batched multi-tile dispatch per node (image-gpu `DispatchBatch`
+//!   exists) — M2 evaluates tile-by-tile for clarity; batching is a
+//!   perf follow-up, not a correctness one.
 
-use image_core::{PersistentBuffer, Region};
-use image_kernels::KernelDef;
+mod cache;
+mod eval;
+mod graph;
 
-pub type NodeId = u32;
+pub use cache::{CachedTile, NodeCache};
+pub use eval::EvaluatedTile;
+pub use graph::{BufferGraph, GraphError, NodeId, SourceData};
 
-/// §8.1 node kinds — type skeleton (the engine lands in M2).
-pub enum GraphNode {
-    Source(PersistentBuffer),
-    Op {
-        kernel: &'static KernelDef,
-        /// Param block bytes (`Params::as_bytes()`); identity = bytes.
-        params: Vec<u8>,
-        inputs: Vec<NodeId>,
-    },
-    /// Viewport sink: owns the visible tile set and requests exactly
-    /// those (§8.1). The GPU-surface contract it presents through is
-    /// BREAKAGE I-01.
-    Sink {
-        input: NodeId,
-    },
-}
+use image_core::Region;
 
-/// Damage computation vocabulary (§8.2): a param change or buffer
-/// write produces a damage region; `Windowed` kernels inflate damage
-/// by their radius downstream (the same `region_prop` rule Engine A
-/// uses, applied in the push direction).
+/// Damage region (§8.2). A param change/buffer write produces one;
+/// `Windowed` kernels inflate it by radius as it propagates downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Damage {
     pub region: Region,

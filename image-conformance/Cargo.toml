@@ -20,6 +20,7 @@ image-gpu = { path = "../image-gpu" }
 image-pipeline = { path = "../image-pipeline" }
 image-codecs = { path = "../image-codecs" }
 image-psd = { path = "../image-psd" }
+image-graph = { path = "../image-graph" }
 half = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
