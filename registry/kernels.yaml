@@ -473,3 +473,19 @@
     - "libvips-equivalent behavior verified via differential oracle harness (M0 fan-out)"
   tests:
     rust: ["image-conformance/tests/family_minmax.rs"]
+
+# ── conv family (T1; ABI v1.1 module lane) ───────────────────
+
+- id: conv.box
+  rust_path: families::conv::CONV_BOX
+  state_row: image.kernel.family-t1
+  class: windowed
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "box filtering: standard literature; no reference reading"
+    - "ABI v1.1 amendment proof — first handwritten windowed module"
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]

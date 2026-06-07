@@ -32,7 +32,7 @@ mod residency;
 
 pub use device::GpuContext;
 pub use dispatch::{BatchTile, DispatchBatch};
-pub use execute::{execute_tile_once, TileInput};
+pub use execute::{execute_tile_once, execute_windowed_once, TileInput};
 pub use pipeline::KernelPipeline;
 pub use pool::{PoolSlot, TexturePool};
 pub use residency::{ResidencyManager, Tier, HEAP_TILE_BYTES};

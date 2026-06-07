@@ -92,6 +92,7 @@ macro_rules! kernel_family {
                 ],
             },
             wgsl: stringify!($body),
+            module: false,
             mip_exact: $mip,
             gpu_tolerance: $tol,
         };

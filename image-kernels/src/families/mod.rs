@@ -24,9 +24,12 @@ pub mod arithmetic;
 pub mod band;
 pub mod boolean;
 pub mod cast;
+pub mod compose;
+pub mod conv;
 pub mod linear;
 pub mod minmax;
 pub mod relational;
+pub mod resample;
 
 use crate::KernelDef;
 
@@ -38,7 +41,10 @@ pub static ALL_FAMILIES: &[&[&KernelDef]] = &[
     band::FAMILY,
     boolean::FAMILY,
     cast::FAMILY,
+    compose::FAMILY,
+    conv::FAMILY,
     linear::FAMILY,
     minmax::FAMILY,
     relational::FAMILY,
+    resample::FAMILY,
 ];

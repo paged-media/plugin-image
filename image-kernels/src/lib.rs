@@ -94,10 +94,17 @@ pub struct KernelDef {
     /// 0 = generator.
     pub inputs: u8,
     pub params: ParamsLayout,
-    /// The kernel body — a single `vec4<f32>` expression in the
-    /// restricted DSL (valid WGSL after splicing into the ABI template;
-    /// see `abi::assemble`). The WGSL is the production implementation.
+    /// The kernel WGSL — interpreted per `module`: an expression body
+    /// in the restricted DSL spliced into the ABI template
+    /// (`kernel_family!` output), or a complete handwritten compute
+    /// module conforming to the ABI binding interface (T1
+    /// windowed/resample kernels, spec §9.2 "handwritten WGSL"). The
+    /// WGSL is the production implementation either way.
     pub wgsl: &'static str,
+    /// ABI v1.1 amendment (M1): `true` = `wgsl` is a complete module
+    /// (see `abi` docs for the module-authoring contract); `false` =
+    /// expression body. `kernel_family!` always emits `false`.
+    pub module: bool,
     /// Safe to evaluate at mip levels with scaled params? (§8.3)
     pub mip_exact: bool,
     pub gpu_tolerance: Tolerance,

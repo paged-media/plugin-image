@@ -76,8 +76,34 @@ fn unpremul4(c: vec4<f32>) -> vec4<f32> {
 
 /// Assemble the complete WGSL compute module for a kernel: ABI
 /// preamble + the 1:1 `Params` struct from `ParamsLayout` + the body
-/// expression spliced into the fixed entry point.
+/// expression spliced into the fixed entry point — or, for
+/// `module: true` kernels (ABI v1.1), the handwritten module verbatim.
+///
+/// # Module-authoring contract (ABI v1.1, frozen)
+///
+/// A handwritten module MUST declare exactly the v1 binding interface
+/// (`in0` per arity at group0, `params : Params` at group1 with a WGSL
+/// struct matching the Rust param block INCLUDING the trailing
+/// `_abi_pad: u32`, `mask` at group2, `outp` rgba16float write at
+/// group3) and `@workgroup_size(16, 16, 1)`. Input-size conventions:
+///
+/// - `Windowed { radius: (rx, ry) }`: `in0` is the output region
+///   expanded by the radius — dims `(out.w + 2·rx, out.h + 2·ry)`;
+///   output texel `(x, y)` corresponds to window center
+///   `(x + rx, y + ry)` in `in0` coords. The module applies the
+///   selection mask itself: `mix(center_sample, result, m)`.
+/// - `Resample { .. }`: `in0` is the full source window; the mapping
+///   (scale/offset) travels in the params. The module writes `result`
+///   directly — masked resample is reserved until the selections
+///   companion spec (M3).
+///
+/// Validation: the wgsl_validate suite naga-checks every module; the
+/// pipeline layout (built from `KernelDef`) enforces the binding
+/// interface and `min_binding_size` enforces the param block size.
 pub fn assemble(def: &KernelDef) -> String {
+    if def.module {
+        return def.wgsl.to_string();
+    }
     assert!(
         def.inputs >= 1 && def.inputs <= 2,
         "ABI v1 assembles unary/binary kernels (generators land with T2)"

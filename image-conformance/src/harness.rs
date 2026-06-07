@@ -134,6 +134,58 @@ pub fn parity<P: bytemuck::Pod>(
     Some(ParityResult { max_ulp, worst_at })
 }
 
+/// Windowed/resample parity (ABI v1.1 module kernels): the GPU lane
+/// runs `execute_windowed_once` over the f16-quantized `window`; the
+/// reference computes each output texel from the SAME quantized window
+/// (`reference(window_px, win_w, win_h, out_x, out_y, params)` — and
+/// must model the kernel's own mask handling: windowed kernels mix
+/// against the center sample with mask 1, i.e. plain `result`).
+/// `None` when the environment has no GPU adapter.
+#[allow(clippy::too_many_arguments)]
+pub fn parity_windowed<P: bytemuck::Pod>(
+    def: &'static KernelDef,
+    reference: impl Fn(&[Px], u32, u32, u32, u32, &P) -> Px,
+    window: &RefTile,
+    out_w: u32,
+    out_h: u32,
+    params: &P,
+) -> Option<ParityResult> {
+    let ctx = test_device()?;
+    let gpu_out = image_gpu::execute_windowed_once(
+        ctx,
+        def,
+        &window.f16_bytes(),
+        window.w,
+        window.h,
+        bytemuck::bytes_of(params),
+        None,
+        out_w,
+        out_h,
+    )
+    .expect("windowed kernel execution");
+
+    let quant = window.quantized_px();
+    let mut max_ulp = 0u32;
+    let mut worst_at = (0usize, 0usize);
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let i = (oy * out_w + ox) as usize;
+            let want = reference(&quant, window.w, window.h, ox, oy, params);
+            for c in 0..4 {
+                let want_bits = f32_to_f16_bits(want.0[c]);
+                let got_bits =
+                    u16::from_le_bytes([gpu_out[i * 8 + c * 2], gpu_out[i * 8 + c * 2 + 1]]);
+                let d = f16_ulp_distance(want_bits, got_bits);
+                if d > max_ulp {
+                    max_ulp = d;
+                    worst_at = (i, c);
+                }
+            }
+        }
+    }
+    Some(ParityResult { max_ulp, worst_at })
+}
+
 /// Assert a parity result satisfies the kernel's declared tolerance.
 pub fn assert_within(result: ParityResult, def: &KernelDef) {
     let limit = match def.gpu_tolerance {

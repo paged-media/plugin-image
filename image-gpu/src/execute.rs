@@ -77,6 +77,54 @@ fn upload_f16(ctx: &GpuContext, tex: &wgpu::Texture, w: u32, h: u32, bytes: &[u8
     );
 }
 
+/// Execute a `module: true` kernel whose input window differs from the
+/// output region (ABI v1.1: `Windowed` — input = out + 2·radius;
+/// `Resample` — input = the source window). One input only (T1
+/// conv/resample are unary). `win_bytes` is the rgba16float window at
+/// `win_w`×`win_h`; mask + output are `out_w`×`out_h`.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_windowed_once(
+    ctx: &GpuContext,
+    def: &'static KernelDef,
+    win_bytes: &[u8],
+    win_w: u32,
+    win_h: u32,
+    params: &[u8],
+    mask: Option<&[u8]>,
+    out_w: u32,
+    out_h: u32,
+) -> Result<Vec<u8>, GpuError> {
+    if def.inputs != 1 {
+        return Err(GpuError::Kernel {
+            kernel: def.id,
+            detail: "windowed execution is unary (T1)".into(),
+        });
+    }
+    if params.len() != def.params.size {
+        return Err(GpuError::Kernel {
+            kernel: def.id,
+            detail: format!(
+                "param block {} bytes, layout says {}",
+                params.len(),
+                def.params.size
+            ),
+        });
+    }
+    let pipeline = KernelPipeline::build(ctx, def);
+    let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+    let in_tex = make_texture(
+        ctx,
+        &format!("{} window", def.id),
+        win_w,
+        win_h,
+        wgpu::TextureFormat::Rgba16Float,
+        in_usage,
+    );
+    upload_f16(ctx, &in_tex, win_w, win_h, win_bytes);
+    let in_view = in_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    run_common(ctx, &pipeline, &[&in_view], def, params, mask, out_w, out_h)
+}
+
 /// Execute `def` over one `w`×`h` tile. `inputs.len()` must equal
 /// `def.inputs`; `params` must be the param block's bytes
 /// (`Params::as_bytes()`); `mask` is r16float texel bytes or `None`
@@ -133,6 +181,24 @@ pub fn execute_tile_once(
         .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
         .collect();
 
+    run_common(ctx, &pipeline, &in_views, def, params, mask, w, h)
+}
+
+/// The shared dispatch tail: mask + params + output + bind groups +
+/// one dispatch sized by the OUTPUT dims + synchronous readback. Input
+/// views may be any size (point kernels: == output; windowed/resample:
+/// the source window, ABI v1.1).
+fn run_common(
+    ctx: &GpuContext,
+    pipeline: &KernelPipeline,
+    in_views: &[impl std::borrow::Borrow<wgpu::TextureView>],
+    def: &'static KernelDef,
+    params: &[u8],
+    mask: Option<&[u8]>,
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, GpuError> {
+    let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
     // Selection mask (r16float; constant-1 default).
     let one_f16 = 0x3C00u16.to_le_bytes();
     let constant_one: Vec<u8>;
@@ -203,7 +269,7 @@ pub fn execute_tile_once(
         .enumerate()
         .map(|(i, v)| wgpu::BindGroupEntry {
             binding: i as u32,
-            resource: wgpu::BindingResource::TextureView(v),
+            resource: wgpu::BindingResource::TextureView(v.borrow()),
         })
         .collect();
     let g0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
