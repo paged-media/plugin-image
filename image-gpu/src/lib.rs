@@ -35,13 +35,28 @@ mod residency;
 // kernel row and no per-texel WGSL ABI dispatch (see the module docs).
 pub mod reduce;
 
+// Selection-mask plumbing (spec §6.1 / §15 M3): the typed `SelectionMask`
+// builder that produces the r16float bytes `execute_tile_once`'s `mask`
+// argument consumes — the surface the editor's selections lower to.
+pub mod selection;
+
+// T3 breadth op (spec §11): a CPU two-pass chamfer/Euclidean-approx
+// distance transform over a binary mask tile. Sequential/iterative (the
+// GPU jump-flood version is the M3 follow-up — see the module docs), so
+// like `reduce` it runs on the CPU over the working tile bytes and owns
+// its own state-registry row (`image.kernel.distance-transform`), not a
+// per-texel WGSL ABI kernel row.
+pub mod distance;
+
 pub use device::GpuContext;
 pub use dispatch::{BatchTile, DispatchBatch};
+pub use distance::{distance_transform, DistanceParams, MaskChannel};
 pub use execute::{execute_tile_once, execute_windowed_once, TileInput};
 pub use pipeline::KernelPipeline;
 pub use pool::{PoolSlot, TexturePool};
 pub use reduce::{histogram, statistics, Histogram, Stats};
-pub use residency::{ResidencyManager, Tier, HEAP_TILE_BYTES};
+pub use residency::{Acquired, ResidencyManager, Tier, HEAP_TILE_BYTES};
+pub use selection::SelectionMask;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {

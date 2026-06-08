@@ -31,6 +31,7 @@ pub mod gen;
 pub mod geom;
 pub mod linear;
 pub mod minmax;
+pub mod morph;
 pub mod relational;
 pub mod resample;
 
@@ -51,6 +52,7 @@ pub static ALL_FAMILIES: &[&[&KernelDef]] = &[
     geom::FAMILY,
     linear::FAMILY,
     minmax::FAMILY,
+    morph::FAMILY,
     relational::FAMILY,
     resample::FAMILY,
 ];
