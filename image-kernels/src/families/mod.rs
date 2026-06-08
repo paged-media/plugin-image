@@ -20,12 +20,15 @@
 //! `linear` was the phase-0 codegen proof; the other six land with the
 //! M0 fan-out (one agent per file).
 
+pub mod adjust;
 pub mod arithmetic;
 pub mod band;
 pub mod boolean;
 pub mod cast;
 pub mod compose;
 pub mod conv;
+pub mod gen;
+pub mod geom;
 pub mod linear;
 pub mod minmax;
 pub mod relational;
@@ -37,12 +40,15 @@ use crate::KernelDef;
 /// these; the conformance gate asserts set-equality with the
 /// registry-generated dispatch table.
 pub static ALL_FAMILIES: &[&[&KernelDef]] = &[
+    adjust::FAMILY,
     arithmetic::FAMILY,
     band::FAMILY,
     boolean::FAMILY,
     cast::FAMILY,
     compose::FAMILY,
     conv::FAMILY,
+    gen::FAMILY,
+    geom::FAMILY,
     linear::FAMILY,
     minmax::FAMILY,
     relational::FAMILY,

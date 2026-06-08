@@ -52,6 +52,7 @@
 
 pub mod compression;
 pub mod container;
+pub mod edit;
 pub mod model;
 pub mod reader;
 pub mod writer;

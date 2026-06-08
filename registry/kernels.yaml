@@ -821,3 +821,191 @@
     - "PSD blend key 'lum '"
   tests:
     rust: ["image-conformance/tests/family_compose.rs"]
+
+# ── adjust family (T2; tone/color point ops) ─────────────────
+
+- id: adjust.exposure
+  rust_path: families::adjust::ADJUST_EXPOSURE
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "exposure: rgb·exp2(ev); standard tone op; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.brightness_contrast
+  rust_path: families::adjust::ADJUST_BRIGHTNESS_CONTRAST
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "brightness/contrast about mid-gray; standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.levels
+  rust_path: families::adjust::ADJUST_LEVELS
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 16 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "levels: in/out black-white + gamma (pow); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.saturation
+  rust_path: families::adjust::ADJUST_SATURATION
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "saturation: mix toward luma (0.3/0.59/0.11); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.hue_rotate
+  rust_path: families::adjust::ADJUST_HUE_ROTATE
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "luminance-preserving hue-rotation matrix; standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.invert_rgb
+  rust_path: families::adjust::ADJUST_INVERT_RGB
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "per-color invert 1-c, alpha kept; trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+# ── geom family (T2; coordinate remaps) ──────────────────────
+
+- id: geom.flip_h
+  rust_path: families::geom::GEOM_FLIP_H
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "horizontal flip coordinate remap; trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
+- id: geom.flip_v
+  rust_path: families::geom::GEOM_FLIP_V
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "vertical flip coordinate remap; trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
+- id: geom.rotate90_cw
+  rust_path: families::geom::GEOM_ROTATE90_CW
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "90° CW coordinate remap; trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
+- id: geom.rotate90_ccw
+  rust_path: families::geom::GEOM_ROTATE90_CCW
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "90° CCW coordinate remap; trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
+- id: geom.crop
+  rust_path: families::geom::GEOM_CROP
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "crop = clamped offset remap; trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
+# ── gen family (T2; procedural generators, unary-dummy lane) ─
+
+- id: gen.solid
+  rust_path: families::gen::GEN_SOLID
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural solid color; trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]
+
+- id: gen.checker
+  rust_path: families::gen::GEN_CHECKER
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural checkerboard (origin-continuous); trivial; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]
+
+- id: gen.linear_gradient
+  rust_path: families::gen::GEN_LINEAR_GRADIENT
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural linear gradient (projection parameter); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]

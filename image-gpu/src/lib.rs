@@ -30,11 +30,17 @@ mod pipeline;
 mod pool;
 mod residency;
 
+// T2 reductions (spec §11): histogram + statistics. NOT KernelDefs —
+// they collapse a tile to a table/scalars, so they have no registry
+// kernel row and no per-texel WGSL ABI dispatch (see the module docs).
+pub mod reduce;
+
 pub use device::GpuContext;
 pub use dispatch::{BatchTile, DispatchBatch};
 pub use execute::{execute_tile_once, execute_windowed_once, TileInput};
 pub use pipeline::KernelPipeline;
 pub use pool::{PoolSlot, TexturePool};
+pub use reduce::{histogram, statistics, Histogram, Stats};
 pub use residency::{ResidencyManager, Tier, HEAP_TILE_BYTES};
 
 #[derive(Debug, thiserror::Error)]

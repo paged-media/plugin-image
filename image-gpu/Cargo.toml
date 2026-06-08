@@ -15,6 +15,9 @@ image-core = { path = "../image-core" }
 image-kernels = { path = "../image-kernels" }
 wgpu = { workspace = true }
 thiserror = { workspace = true }
+# T2 reductions (reduce.rs) decode rgba16float tile bytes on the CPU
+# (the M2 correctness path; M3 moves the reduce to a compute shader).
+half = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

@@ -145,6 +145,16 @@
   tests:
     rust: ["image-psd/tests/psb.rs", "image-conformance/tests/psd_fixtures.rs (psb_wide)"]
 
+- id: image.psd.mutatable
+  state_row: image.psd.roundtrip
+  tier: mutatable        # M2: edits re-encode through the writer — set_layer_opacity/name, replace_channel_pixels (RAW/RLE), remove_layer; touched subtree dirties its Raw guard, everything else stays verbatim
+  oracle: byte_roundtrip + reparse-stability   # per edit: (1) the edit took on reparse, (2) untouched layers unchanged, (3) write→reparse→write is byte-stable (canonical form idempotent)
+  provenance:
+    - "spec §10.4 — write semantics under editing (the lazy-verbatim guard nulls only the edited subtree)"
+    - "Adobe Photoshop File Format specification — Layer Records (opacity), Additional Layer Information (luni name, lsct divider), Channel Image Data (RAW/RLE re-encode)"
+  tests:
+    rust: ["image-psd/tests/mutatable.rs"]
+
 - id: image.psd.render.flatten
   state_row: image.psd.roundtrip
   tier: rendered         # M1: flatten layered PSD through Engine A + compose.* kernels; gpu↔ref within channel_eps_f16 6 (M3 Max Metal: 0 ULP on the layered fixtures)
