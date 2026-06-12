@@ -17,7 +17,7 @@ consuming ONLY the published plugin SDK.
 
 Spec (the authority): `thoughts/docs/paged/plugin-image/base-idea.md`.
 A-0 audit + D-11 ruling: `thoughts/docs/paged/plugin-image/a0-audit.md`.
-SDK gap punch list: `BREAKAGE_LOG.md` (I-NN; the §2.2 resolution).
+SDK gap tracker: the cross-repo RFI `thoughts/docs/paged/plugin-platform/rfi-core-sdk-gaps.md` (I-NN ids in §6; per-plugin BREAKAGE_LOG retired 2026-06-12).
 
 ## Project State & Feature Matrix (paged-media/state)
 
@@ -65,7 +65,7 @@ Rules for every code change in this repo:
   `core/` or `editor/` internals; the only `@paged-media/*` dependencies
   are `plugin-api`, `plugin-sdk`, and published package contracts
   (TS: `scripts/check-contract-imports.mjs`; Rust: `deny.toml` sources +
-  the cargo-tree CI guards). SDK gaps become `BREAKAGE_LOG.md` entries /
+  the cargo-tree CI guards). SDK gaps become RFI §6 entries /
   plugin-platform RFCs — NEVER core modifications from this project.
 - **GPU-ONLY EXECUTION (§6/§9).** One production backend: WGSL compute
   via wgpu. No CPU kernel path ships. The scalar Rust reference twins are
