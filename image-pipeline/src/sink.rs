@@ -37,7 +37,7 @@ use image_gpu::GpuContext;
 
 use crate::cache::OperationCache;
 use crate::node::OpNode;
-use crate::schedule::materialize_node;
+use crate::schedule::{materialize_node, materialize_node_async};
 use crate::{NodeId, PipelineError};
 
 /// Bytes per pixel of the rgba16float working format (4 × f16).
@@ -56,6 +56,22 @@ pub(crate) fn to_buffer(
         return Ok(TileMap::new(image_core::PixelFormat::GPU_WORKING));
     }
     let (map, _hash) = materialize_node(nodes, cache, node, roi, ctx)?;
+    Ok(map)
+}
+
+/// [`to_buffer`]'s ASYNC twin (the wasm32/WebGPU readback lane) — keep
+/// in LOCKSTEP.
+pub(crate) async fn to_buffer_async(
+    nodes: &[OpNode],
+    cache: &mut OperationCache,
+    node: NodeId,
+    roi: Region,
+    ctx: &GpuContext,
+) -> Result<TileMap, PipelineError> {
+    if roi.is_empty() {
+        return Ok(TileMap::new(image_core::PixelFormat::GPU_WORKING));
+    }
+    let (map, _hash) = materialize_node_async(nodes, cache, node, roi, ctx).await?;
     Ok(map)
 }
 
@@ -105,6 +121,63 @@ pub(crate) fn to_encoder(
 
         // The target's strip coordinates are target-LOCAL (origin 0,0 at
         // the ROI top-left); the demand pull used graph coordinates.
+        let local = Region::new(0, y - roi.y, roi.w, h);
+        let slice = TileSliceRef {
+            region: local,
+            format: fmt,
+            bytes: &strip,
+            row_stride: roi.w as usize * out_bpp,
+        };
+        target
+            .write_strip(local, &slice)
+            .map_err(PipelineError::Codec)?;
+
+        y = strip_bottom as i32;
+    }
+
+    target.finish().map_err(PipelineError::Codec)
+}
+
+/// [`to_encoder`]'s ASYNC twin (the wasm32/WebGPU readback lane) — keep
+/// in LOCKSTEP with the sync strip walk.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn to_encoder_async(
+    nodes: &[OpNode],
+    cache: &mut OperationCache,
+    node: NodeId,
+    roi: Region,
+    ctx: &GpuContext,
+    target: &mut dyn ImageTarget,
+    fmt: PixelFormat,
+) -> Result<EncodedStats, PipelineError> {
+    if fmt.depth != SampleDepth::U8 {
+        return Err(PipelineError::Graph(format!(
+            "to_encoder is U8 only (got {:?}); the depth cast lane is M1",
+            fmt.depth
+        )));
+    }
+    let out_bpp = fmt.bytes_per_pixel();
+
+    target
+        .begin(TargetInfo {
+            width: roi.w,
+            height: roi.h,
+            format: fmt,
+            icc: None,
+        })
+        .map_err(PipelineError::Codec)?;
+
+    let mut y = roi.y;
+    let bottom = roi.bottom();
+    while (y as i64) < bottom {
+        let next_grid = next_tile_boundary(y);
+        let strip_bottom = next_grid.min(bottom);
+        let h = (strip_bottom - y as i64) as u32;
+        let strip_roi = Region::new(roi.x, y, roi.w, h);
+
+        let (map, _hash) = materialize_node_async(nodes, cache, node, strip_roi, ctx).await?;
+        let strip = convert_strip(&map, strip_roi, fmt, out_bpp)?;
+
         let local = Region::new(0, y - roi.y, roi.w, h);
         let slice = TileSliceRef {
             region: local,

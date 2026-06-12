@@ -12,15 +12,18 @@
  *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
  */
 
-//! In-memory raw source — the test/Engine-A-bring-up adapter: an
-//! uncompressed interleaved pixel buffer behind the `ImageSource`
-//! contract. No entropy coding, no container; exists so the pipeline
-//! has a leaf to pull from before real codecs land (and forever after
-//! for synthetic test inputs).
+//! In-memory raw adapters. [`RawSource`] is the test/Engine-A-bring-up
+//! leaf: an uncompressed interleaved pixel buffer behind the
+//! `ImageSource` contract — no entropy coding, no container.
+//! [`RawTarget`] is its sink mirror: an `ImageTarget` that assembles the
+//! `to_encoder` strips into one tightly packed pixel buffer — the
+//! structured-readback path for consumers that want PIXELS, not a
+//! container (the image-js M4 ingest slice hands these to the C-1 image
+//! scene item).
 
-use image_core::{PixelFormat, Region, TileSliceMut};
+use image_core::{PixelFormat, Region, TileSliceMut, TileSliceRef};
 
-use crate::{CodecError, ImageSource, Result, SourceInfo};
+use crate::{CodecError, EncodedStats, ImageSource, ImageTarget, Result, SourceInfo, TargetInfo};
 
 #[derive(Debug, Clone)]
 pub struct RawSource {
@@ -104,6 +107,141 @@ impl ImageSource for RawSource {
     }
 }
 
+/// An `ImageTarget` that assembles strips into one tightly packed,
+/// interleaved pixel buffer — `RawSource`'s sink mirror. The
+/// "container" is no container at all: `into_pixels()` after a
+/// successful `finish` yields `width * height * bpp` bytes in the
+/// `begin` format, row-major.
+#[derive(Debug, Default)]
+pub struct RawTarget {
+    state: RawState,
+}
+
+#[derive(Debug, Default)]
+enum RawState {
+    #[default]
+    Idle,
+    Open {
+        info: TargetInfo,
+        bpp: usize,
+        buffer: Vec<u8>,
+        /// Highest exclusive row covered so far (strips arrive in order).
+        rows_filled: u32,
+    },
+    Done {
+        info: TargetInfo,
+        buffer: Vec<u8>,
+    },
+}
+
+impl RawTarget {
+    pub fn new() -> Self {
+        RawTarget::default()
+    }
+
+    /// The `begin` info, once begun (survives `finish`).
+    pub fn info(&self) -> Option<&TargetInfo> {
+        match &self.state {
+            RawState::Idle => None,
+            RawState::Open { info, .. } | RawState::Done { info, .. } => Some(info),
+        }
+    }
+
+    /// Take the assembled pixels after a successful `finish`. Empty when
+    /// the run never finished (the honest nothing, not a partial frame).
+    pub fn into_pixels(self) -> Vec<u8> {
+        match self.state {
+            RawState::Done { buffer, .. } => buffer,
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl ImageTarget for RawTarget {
+    fn begin(&mut self, info: TargetInfo) -> Result<()> {
+        if !matches!(self.state, RawState::Idle) {
+            return Err(CodecError::Sequencing("begin called twice"));
+        }
+        let bpp = info.format.bytes_per_pixel();
+        let len = info
+            .width
+            .checked_mul(info.height)
+            .and_then(|px| (px as usize).checked_mul(bpp))
+            .ok_or_else(|| CodecError::Malformed {
+                format: "raw",
+                detail: "target extent overflows usize".into(),
+            })?;
+        self.state = RawState::Open {
+            info,
+            bpp,
+            buffer: vec![0u8; len],
+            rows_filled: 0,
+        };
+        Ok(())
+    }
+
+    fn write_strip(&mut self, region: Region, data: &TileSliceRef<'_>) -> Result<()> {
+        let RawState::Open {
+            info,
+            bpp,
+            buffer,
+            rows_filled,
+        } = &mut self.state
+        else {
+            return Err(CodecError::Sequencing(
+                "write_strip before begin / after finish",
+            ));
+        };
+        if data.format != info.format {
+            return Err(CodecError::Unsupported {
+                format: "raw",
+                detail: "strip format mismatch (no implicit conversions)".into(),
+            });
+        }
+        // Full-width, in-order strips (the to_encoder contract) — misuse
+        // is a clean error, never silent corruption.
+        if region.x != 0 || region.w != info.width {
+            return Err(CodecError::Sequencing("strip not full-width"));
+        }
+        if region.y as i64 != *rows_filled as i64 {
+            return Err(CodecError::Sequencing("strip out of order / gapped"));
+        }
+        if region.bottom() > info.height as i64 {
+            return Err(CodecError::Sequencing("strip past target extent"));
+        }
+        let row_bytes = region.w as usize * *bpp;
+        for row in 0..region.h as usize {
+            let src = row * data.row_stride;
+            let dst = (region.y as usize + row) * row_bytes;
+            buffer[dst..dst + row_bytes].copy_from_slice(&data.bytes[src..src + row_bytes]);
+        }
+        *rows_filled = region.bottom() as u32;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<EncodedStats> {
+        // Check BEFORE taking so a misuse never destroys a Done buffer.
+        if !matches!(self.state, RawState::Open { .. }) {
+            return Err(CodecError::Sequencing("finish before begin / twice"));
+        }
+        let RawState::Open {
+            info,
+            buffer,
+            rows_filled,
+            ..
+        } = std::mem::take(&mut self.state)
+        else {
+            unreachable!("matched Open above")
+        };
+        if rows_filled != info.height {
+            return Err(CodecError::Sequencing("strips did not cover the target"));
+        }
+        let bytes_written = buffer.len() as u64;
+        self.state = RawState::Done { info, buffer };
+        Ok(EncodedStats { bytes_written })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +278,72 @@ mod tests {
         src.read_region(roi, 1, &mut out).unwrap();
         assert_eq!(buf[0], 1); // first pixel R = x index 1
         assert_eq!(buf[4], 2);
+    }
+
+    #[test]
+    fn raw_target_assembles_strips() {
+        let mut target = RawTarget::new();
+        target
+            .begin(TargetInfo {
+                width: 2,
+                height: 3,
+                format: FMT_U8,
+                icc: None,
+            })
+            .unwrap();
+        // Two strips: rows 0..2 then row 2, with a padded source stride.
+        let strip0: Vec<u8> = (0u8..16).collect(); // 2 rows × 8 bytes
+        target
+            .write_strip(
+                Region::new(0, 0, 2, 2),
+                &TileSliceRef {
+                    region: Region::new(0, 0, 2, 2),
+                    format: FMT_U8,
+                    bytes: &strip0,
+                    row_stride: 8,
+                },
+            )
+            .unwrap();
+        let strip1: Vec<u8> = (100u8..108).collect();
+        target
+            .write_strip(
+                Region::new(0, 2, 2, 1),
+                &TileSliceRef {
+                    region: Region::new(0, 2, 2, 1),
+                    format: FMT_U8,
+                    bytes: &strip1,
+                    row_stride: 8,
+                },
+            )
+            .unwrap();
+        let stats = target.finish().unwrap();
+        assert_eq!(stats.bytes_written, 24);
+        let px = target.into_pixels();
+        assert_eq!(&px[..16], &(0u8..16).collect::<Vec<u8>>()[..]);
+        assert_eq!(&px[16..], &(100u8..108).collect::<Vec<u8>>()[..]);
+    }
+
+    #[test]
+    fn raw_target_rejects_misuse() {
+        let mut t = RawTarget::new();
+        assert!(t.finish().is_err()); // finish before begin
+        t.begin(TargetInfo {
+            width: 2,
+            height: 2,
+            format: FMT_U8,
+            icc: None,
+        })
+        .unwrap();
+        // Out-of-order strip.
+        let bytes = vec![0u8; 8];
+        let slice = TileSliceRef {
+            region: Region::new(0, 1, 2, 1),
+            format: FMT_U8,
+            bytes: &bytes,
+            row_stride: 8,
+        };
+        assert!(t.write_strip(Region::new(0, 1, 2, 1), &slice).is_err());
+        // Under-covered finish.
+        assert!(t.finish().is_err());
     }
 }

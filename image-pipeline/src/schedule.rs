@@ -30,6 +30,8 @@
 //! content hash of the upstream node's materialized result, so a re-pull
 //! of an unchanged subtree is a cache hit.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use half::f16;
@@ -38,7 +40,7 @@ use image_core::{
     ChannelLayout, ContentHash, PixelFormat, Region, SampleDepth, Tile, TileCoord, TileData,
     TileMap, TileSliceMut, TILE,
 };
-use image_gpu::{execute_tile_once, GpuContext, TileInput};
+use image_gpu::{execute_tile_once, execute_tile_once_async, GpuContext, TileInput};
 
 use crate::cache::{OpKey, OperationCache};
 use crate::node::{ApplyNode, OpNode};
@@ -48,6 +50,11 @@ use crate::{NodeId, PipelineError};
 /// Bytes per pixel of the rgba16float working format the GPU ABI
 /// consumes (4 channels × 2 bytes).
 const WORKING_BPP: usize = 8;
+
+/// The boxed recursion shape of [`materialize_node_async`] (an async fn
+/// cannot recurse unboxed; deliberately non-`Send` — see its docs).
+type MaterializeFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(TileMap, ContentHash), PipelineError>> + 'a>>;
 
 /// Materialize `node`'s output over `roi`, consulting/filling the cache.
 /// Returns the node's `TileMap` plus its content hash (the cache-key
@@ -104,6 +111,66 @@ pub(crate) fn materialize_node(
     let out_hash = content_hash_of(&map);
     cache.insert(key, map.clone());
     Ok((map, out_hash))
+}
+
+/// [`materialize_node`]'s ASYNC twin (the wasm32/WebGPU lane, where a
+/// blocking readback poll cannot pump the map callback) — keep the two
+/// bodies in LOCKSTEP. Recursion is boxed (an async fn cannot recurse
+/// unboxed); the future is deliberately non-`Send` (it holds `&mut
+/// OperationCache` across awaits and runs on one thread in both realms —
+/// pollster natively, the browser microtask queue on wasm). Output is
+/// byte-for-byte the sync lane's (the conformance async-parity test).
+pub(crate) fn materialize_node_async<'a>(
+    nodes: &'a [OpNode],
+    cache: &'a mut OperationCache,
+    node_id: NodeId,
+    roi: Region,
+    ctx: &'a GpuContext,
+) -> MaterializeFuture<'a> {
+    Box::pin(async move {
+        let node = nodes
+            .get(node_id.0)
+            .ok_or_else(|| PipelineError::Graph(format!("dangling node {node_id:?}")))?;
+
+        let (input_hash, materialized_input) = match node {
+            OpNode::Source(_) => (source_identity_hash(node, roi), None),
+            OpNode::Apply(apply) => {
+                let in_roi = required_input_roi(apply.def.class, roi);
+                let (a_id, b_id) = apply.inputs.as_pair();
+                let (a_map, a_hash) =
+                    materialize_node_async(nodes, cache, a_id, in_roi, ctx).await?;
+                match b_id {
+                    None => (a_hash, Some((a_map, None))),
+                    Some(b) => {
+                        let (b_map, b_hash) =
+                            materialize_node_async(nodes, cache, b, in_roi, ctx).await?;
+                        (fold_hashes(a_hash, b_hash), Some((a_map, Some(b_map))))
+                    }
+                }
+            }
+        };
+
+        let key = OpKey {
+            op_id: node.op_key(),
+            params: params_hash(node),
+            input: input_hash,
+        };
+
+        if let Some(hit) = cache.get(key) {
+            return Ok((hit.clone(), content_hash_of(hit)));
+        }
+
+        let map = match node {
+            OpNode::Source(_) => materialize_source(node, roi)?,
+            OpNode::Apply(apply) => {
+                let (a_map, b_map) = materialized_input.unwrap();
+                materialize_apply_async(apply, a_map, b_map, roi, ctx).await?
+            }
+        };
+        let out_hash = content_hash_of(&map);
+        cache.insert(key, map.clone());
+        Ok((map, out_hash))
+    })
 }
 
 /// Decode a source leaf over `roi` and bridge its straight pixels to
@@ -225,6 +292,72 @@ fn materialize_apply(
             work.w,
             work.h,
         )?;
+        map.insert(coord, heap_tile(out_bytes));
+    }
+    Ok(map)
+}
+
+/// [`materialize_apply`]'s ASYNC twin — keep in LOCKSTEP (the only
+/// divergence is the awaited dispatch).
+async fn materialize_apply_async(
+    apply: &ApplyNode,
+    a: TileMap,
+    b: Option<TileMap>,
+    roi: Region,
+    ctx: &GpuContext,
+) -> Result<TileMap, PipelineError> {
+    let arity = apply.def.inputs;
+    let provided = if b.is_some() { 2 } else { 1 };
+    if arity as usize != provided {
+        return Err(PipelineError::Graph(format!(
+            "kernel {} arity {} wired with {provided} input(s)",
+            apply.def.id, arity
+        )));
+    }
+
+    let mut map = TileMap::new(PixelFormat::GPU_WORKING);
+    for coord in roi.tiles_at(0) {
+        let Some(work) = tile_work_region(coord, roi) else {
+            continue;
+        };
+        let zero_len = (work.w as usize * work.h as usize) * WORKING_BPP;
+        let zeros_a;
+        let a_bytes: &[u8] = match a.get(coord) {
+            Some(tile) => heap_bytes(tile)?,
+            None => {
+                zeros_a = vec![0u8; zero_len];
+                &zeros_a
+            }
+        };
+
+        let zeros_b;
+        let inputs: Vec<TileInput> = match &b {
+            None => vec![TileInput { f16_bytes: a_bytes }],
+            Some(b_map) => {
+                let b_bytes: &[u8] = match b_map.get(coord) {
+                    Some(tile) => heap_bytes(tile)?,
+                    None => {
+                        zeros_b = vec![0u8; zero_len];
+                        &zeros_b
+                    }
+                };
+                vec![
+                    TileInput { f16_bytes: a_bytes },
+                    TileInput { f16_bytes: b_bytes },
+                ]
+            }
+        };
+
+        let out_bytes = execute_tile_once_async(
+            ctx,
+            apply.def,
+            &inputs,
+            &apply.params,
+            None, // constant-1 mask: the Engine A binding (§6.1)
+            work.w,
+            work.h,
+        )
+        .await?;
         map.insert(coord, heap_tile(out_bytes));
     }
     Ok(map)

@@ -43,6 +43,7 @@ pollster = "0.4"
 wgpu = "29.0.1"
 naga = { version = "29", features = ["wgsl-in"] }
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = "0.3"
 serde-wasm-bindgen = "0.6"

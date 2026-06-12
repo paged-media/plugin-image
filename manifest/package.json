@@ -4,7 +4,8 @@
   "version": "0.0.1",
   "type": "module",
   "exports": {
-    "./manifest.json": "./manifest.json"
+    "./manifest.json": "./manifest.json",
+    "./wasm/*": "./wasm/*"
   },
   "scripts": {
     "typecheck": "node ../../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs validate manifest.json",

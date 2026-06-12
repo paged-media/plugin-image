@@ -12,11 +12,11 @@
 
 - id: image.codec.raw
   state_row: image.codec.traits
-  tier: shipped          # M0: decode (in-memory test/bring-up source)
+  tier: shipped          # M0: decode (in-memory test/bring-up source); M4: RawTarget encode (strip-assembled packed pixels — the to_encoder_async readback the image-js ingest slice hands to the C-1 image scene item)
   provenance:
     - "trivial interleaved buffer adapter; no container"
   tests:
-    rust: ["image-codecs/src/raw.rs (unit)"]
+    rust: ["image-codecs/src/raw.rs (unit)", "image-conformance/tests/pipeline_async.rs", "image-js/tests/ingest.rs"]
 
 - id: image.codec.png
   state_row: image.codec.traits

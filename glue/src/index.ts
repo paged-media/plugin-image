@@ -12,3 +12,18 @@ export const imageBundle = defineBundle({
 });
 
 export { activate, PANEL_ID };
+export {
+  wrapEngine,
+  isIdentity,
+  IDENTITY_PARAMS,
+  ENGINE_NOT_BUILT,
+  type AdjustParams,
+  type ImageEngine,
+  type ImageWasmModule,
+} from "./engine";
+export {
+  createImageSession,
+  elementIdOf,
+  type ImageSession,
+  type ImageSessionState,
+} from "./session";

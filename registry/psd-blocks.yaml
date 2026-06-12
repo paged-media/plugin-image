@@ -129,12 +129,13 @@
 
 - id: image.psd.global.merged-composite
   state_row: image.psd.roundtrip
-  tier: preserved        # M0 green (fixtures + proptest); target was: preserved (opaque; the embedded oracle, decoded M1)
-  oracle: byte_roundtrip
+  tier: rendered         # M0: preserved opaque-verbatim; M4: DECODED to RGBA8 (composite.rs — 8-bit RGB[A]/Gray[+A], RAW + RLE, PSD/PSB count widths, transparency-in-merged honored; 16/32-bit, CMYK/Lab, ZIP answer Unsupported — the M2 cast/CMS lane). Preservation untouched: decode is a pure read.
+  oracle: byte_roundtrip + decoded-plane equality (synthesized fixtures)
   provenance:
     - "Adobe Photoshop File Format specification — Image Data Section"
+    - "Adobe Photoshop File Format specification — Layer Info (negative layer count = first alpha is merged transparency)"
   tests:
-    rust: ["image-psd/tests/roundtrip.rs"]
+    rust: ["image-psd/tests/roundtrip.rs", "image-psd/tests/composite.rs", "image-js/tests/ingest.rs"]
 
 - id: image.psd.container.psb
   state_row: image.psd.roundtrip

@@ -19,18 +19,21 @@
 //! `loadBundleWasm` has no ambient authority — no `navigator.gpu`. So
 //! this crate is loaded through its wasm-bindgen JS glue in the bundle
 //! realm (the `@paged-media/sdk` pattern), where WebGPU IS reachable;
-//! the engines' GPU device lives behind this surface. Pixels never
-//! cross into plugin JS (spec §2.1.3); the surface speaks handles,
-//! regions, and encoded bytes.
+//! the engines' GPU device lives behind this surface (`init_gpu`).
 //!
-//! M0 keeps the surface to identity/version probes — the engine
-//! methods land milestone by milestone behind it. The release-build
-//! guarantee proven by CI: NO reference code (image-conformance /
-//! `image-kernels` feature `reference`) is reachable from this crate
-//! (cargo-tree guard, spec §4 dep rule 2).
+//! M4 ingest slice: `decode_image` (PSD/PNG/JPEG → an engine-held RGBA8
+//! handle) + `adjust_image` (Engine A adjustments via the ASYNC GPU
+//! sink → RGBA8 bytes for the C-1 Stage-A image scene item). Pixels
+//! held between calls stay engine-side behind handles (spec §2.1.3);
+//! the one RGBA buffer `adjust_image` returns is the Stage-A render
+//! payload destined for the HOST scene channel — the narrowed §2.1.3
+//! contract the C-1 spike records.
+//!
+//! The release-build guarantee proven by CI: NO reference code
+//! (image-conformance / `image-kernels` feature `reference`) is
+//! reachable from this crate (cargo-tree guard, spec §4 dep rule 2).
 
-// Native builds of this crate exist so `cargo test --workspace` covers
-// it; the wasm-bindgen exports are wasm32-only.
+pub mod ingest;
 
 /// The frozen kernel ABI version this artifact was built against.
 pub fn abi_version() -> u32 {
@@ -44,7 +47,24 @@ pub fn kernel_count() -> usize {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use image_gpu::GpuContext;
     use wasm_bindgen::prelude::*;
+
+    use crate::ingest::{adjust_rgba8, decode_rgba8, AdjustParams, DecodedImage};
+
+    thread_local! {
+        /// The bundle-realm GPU device (I-07: created HERE, where
+        /// `navigator.gpu` is reachable; the wasm sandbox has none).
+        static GPU: RefCell<Option<Rc<GpuContext>>> = const { RefCell::new(None) };
+        /// Decoded images held engine-side behind handles (§2.1.3).
+        static IMAGES: RefCell<HashMap<u32, DecodedImage>> =
+            RefCell::new(HashMap::new());
+        static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
+    }
 
     #[wasm_bindgen(start)]
     pub fn init() {
@@ -59,6 +79,124 @@ mod wasm {
     #[wasm_bindgen]
     pub fn kernel_count() -> usize {
         super::kernel_count()
+    }
+
+    /// Does the embedding realm expose WebGPU (`navigator.gpu`)? Probed
+    /// BEFORE touching wgpu so a GPU-less realm (Node tests, an old
+    /// browser) gets a clean rejection instead of a wasm panic that
+    /// would poison the instance for the still-valid decode lanes.
+    fn has_webgpu() -> bool {
+        let global = js_sys::global();
+        let Ok(navigator) = js_sys::Reflect::get(&global, &JsValue::from_str("navigator"))
+        else {
+            return false;
+        };
+        if navigator.is_undefined() || navigator.is_null() {
+            return false;
+        }
+        js_sys::Reflect::get(&navigator, &JsValue::from_str("gpu"))
+            .map(|gpu| !gpu.is_undefined() && !gpu.is_null())
+            .unwrap_or(false)
+    }
+
+    /// Request the WebGPU adapter/device for kernel execution.
+    /// Idempotent. Rejects when the environment has no WebGPU — the
+    /// honest no-GPU state (no CPU kernel path ships, spec §6).
+    #[wasm_bindgen]
+    pub async fn init_gpu() -> Result<(), JsValue> {
+        if GPU.with(|g| g.borrow().is_some()) {
+            return Ok(());
+        }
+        if !has_webgpu() {
+            return Err(JsValue::from_str(
+                "WebGPU unavailable in this realm (no navigator.gpu)",
+            ));
+        }
+        let ctx = GpuContext::new()
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        GPU.with(|g| *g.borrow_mut() = Some(Rc::new(ctx)));
+        Ok(())
+    }
+
+    /// Whether `init_gpu` succeeded (the glue probes this to gate the
+    /// adjust controls honestly).
+    #[wasm_bindgen]
+    pub fn gpu_ready() -> bool {
+        GPU.with(|g| g.borrow().is_some())
+    }
+
+    /// A decoded image's identity on the surface: the handle keys the
+    /// engine-held pixels; width/height are the natural extent.
+    #[wasm_bindgen]
+    #[derive(Clone, Copy)]
+    pub struct DecodedHandle {
+        pub handle: u32,
+        pub width: u32,
+        pub height: u32,
+    }
+
+    /// Decode PSD/PNG/JPEG bytes (sniffed by magic) into an engine-held
+    /// RGBA8 image. Free with `free_image`.
+    #[wasm_bindgen]
+    pub fn decode_image(bytes: &[u8]) -> Result<DecodedHandle, JsValue> {
+        let img = decode_rgba8(bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let handle = NEXT_HANDLE.with(|n| {
+            let h = n.get();
+            n.set(h + 1);
+            h
+        });
+        let (width, height) = (img.width, img.height);
+        IMAGES.with(|m| m.borrow_mut().insert(handle, img));
+        Ok(DecodedHandle {
+            handle,
+            width,
+            height,
+        })
+    }
+
+    /// Run the M4 adjustments chain on a decoded image and return the
+    /// straight-RGBA8 result — the C-1 Stage-A scene-item payload.
+    /// Identity params return the decode verbatim (no dispatch to run);
+    /// anything else requires `init_gpu` to have succeeded.
+    #[wasm_bindgen]
+    pub async fn adjust_image(
+        handle: u32,
+        exposure_ev: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let params = AdjustParams {
+            exposure_ev,
+            brightness,
+            contrast,
+            saturation,
+        };
+        if params.is_identity() {
+            return Ok(js_sys::Uint8Array::from(&img.rgba[..]));
+        }
+        let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
+            JsValue::from_str(
+                "GPU not initialized — await init_gpu() first (kernels are \
+                 GPU-only; no CPU fallback ships)",
+            )
+        })?;
+        let out = adjust_rgba8(&ctx, &img, &params)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(js_sys::Uint8Array::from(&out[..]))
+    }
+
+    /// Release an engine-held decoded image.
+    #[wasm_bindgen]
+    pub fn free_image(handle: u32) {
+        IMAGES.with(|m| {
+            m.borrow_mut().remove(&handle);
+        });
     }
 }
 

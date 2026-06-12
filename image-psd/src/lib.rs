@@ -50,6 +50,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod composite;
 pub mod compression;
 pub mod container;
 pub mod edit;
@@ -60,6 +61,7 @@ pub mod writer;
 mod emit;
 mod parse;
 
+pub use composite::CompositeRgba8;
 pub use container::Container;
 pub use model::PsdFile;
 

@@ -209,6 +209,34 @@ impl Pipeline {
         sink::to_encoder(&self.nodes, &mut self.cache, node, roi, ctx, target, fmt)
     }
 
+    /// [`Self::to_buffer`]'s ASYNC twin — the wasm32/WebGPU lane, where a
+    /// blocking readback poll cannot pump the map callback (the browser
+    /// event loop delivers it; the await suspends until then). Natively
+    /// it runs under pollster and produces byte-for-byte the sync result
+    /// (the conformance async-parity test). Same demand path, same cache.
+    pub async fn to_buffer_async(
+        &mut self,
+        node: NodeId,
+        roi: Region,
+        ctx: &GpuContext,
+    ) -> Result<TileMap, PipelineError> {
+        sink::to_buffer_async(&self.nodes, &mut self.cache, node, roi, ctx).await
+    }
+
+    /// [`Self::to_encoder`]'s ASYNC twin (see [`Self::to_buffer_async`]
+    /// for the lane rationale) — the image-js M4 ingest slice's readback:
+    /// decode → adjust → RGBA8 out, awaited in the bundle realm.
+    pub async fn to_encoder_async(
+        &mut self,
+        node: NodeId,
+        roi: Region,
+        ctx: &GpuContext,
+        target: &mut dyn ImageTarget,
+        fmt: PixelFormat,
+    ) -> Result<EncodedStats, PipelineError> {
+        sink::to_encoder_async(&self.nodes, &mut self.cache, node, roi, ctx, target, fmt).await
+    }
+
     /// Cache hits since construction — the test hook proving a re-pull is
     /// memoized, not recomputed.
     pub fn cache_hits(&self) -> u64 {

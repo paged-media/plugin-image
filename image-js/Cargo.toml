@@ -17,9 +17,19 @@ workspace = true
 image-core = { path = "../image-core" }
 image-kernels = { path = "../image-kernels" }
 image-pipeline = { path = "../image-pipeline" }
+# The M4 ingest slice: codec decode (inherently-CPU work) + the PSD
+# merged-composite decode + the GPU context the async sink drives.
+image-codecs = { path = "../image-codecs" }
+image-gpu = { path = "../image-gpu" }
+image-psd = { path = "../image-psd" }
+thiserror = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
 js-sys = { workspace = true }
 console_error_panic_hook = { workspace = true }
 getrandom = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }

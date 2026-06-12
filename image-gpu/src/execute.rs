@@ -12,12 +12,25 @@
  *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
  */
 
-//! Single-tile synchronous kernel execution — the seed of the batched
-//! dispatcher (M0 fan-out) and the path the conformance parity harness
-//! drives: upload rgba16float input(s) + params + mask, one dispatch,
-//! read the output back. Production batching coalesces all invalid
-//! tiles of a node into one dispatch per pass (§9.2); this function is
+//! Single-tile kernel execution — the seed of the batched dispatcher
+//! (M0 fan-out) and the path the conformance parity harness drives:
+//! upload rgba16float input(s) + params + mask, one dispatch, read the
+//! output back. Production batching coalesces all invalid tiles of a
+//! node into one dispatch per pass (§9.2); this function is
 //! deliberately the simplest correct realization of the same ABI.
+//!
+//! Two readback lanes over ONE recording path: the synchronous map
+//! (native test path — `device.poll(wait)` blocks until the map
+//! callback fired) and the ASYNC map ([`execute_tile_once_async`]) the
+//! wasm32/WebGPU consumer needs — on the web `poll` cannot block (the
+//! browser event loop delivers the callback), so the only correct
+//! readback is to suspend until it does. Both lanes read the identical
+//! recorded dispatch, so async output is byte-for-byte the sync output.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use image_kernels::{abi, KernelDef};
 
@@ -139,6 +152,39 @@ pub fn execute_tile_once(
     w: u32,
     h: u32,
 ) -> Result<Vec<u8>, GpuError> {
+    let (pipeline, in_views) = prepare_tile(ctx, def, inputs, params, w, h)?;
+    run_common(ctx, &pipeline, &in_views, def, params, mask, w, h)
+}
+
+/// [`execute_tile_once`]'s ASYNC twin — the identical recorded dispatch
+/// with an awaited readback map, for the wasm32/WebGPU realm where a
+/// blocking `device.poll` cannot pump the map callback. Byte-for-byte
+/// the sync output (asserted by the conformance async-parity test).
+pub async fn execute_tile_once_async(
+    ctx: &GpuContext,
+    def: &'static KernelDef,
+    inputs: &[TileInput<'_>],
+    params: &[u8],
+    mask: Option<&[u8]>,
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, GpuError> {
+    let (pipeline, in_views) = prepare_tile(ctx, def, inputs, params, w, h)?;
+    record_common(ctx, &pipeline, &in_views, def, params, mask, w, h)?
+        .finish_async(ctx)
+        .await
+}
+
+/// Shared head of the single-tile lanes: validate arity + param block,
+/// build the pipeline, upload the rgba16float inputs.
+fn prepare_tile(
+    ctx: &GpuContext,
+    def: &'static KernelDef,
+    inputs: &[TileInput<'_>],
+    params: &[u8],
+    w: u32,
+    h: u32,
+) -> Result<(KernelPipeline, Vec<wgpu::TextureView>), GpuError> {
     if inputs.len() != def.inputs as usize {
         return Err(GpuError::Kernel {
             kernel: def.id,
@@ -181,7 +227,7 @@ pub fn execute_tile_once(
         .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
         .collect();
 
-    run_common(ctx, &pipeline, &in_views, def, params, mask, w, h)
+    Ok((pipeline, in_views))
 }
 
 /// The shared dispatch tail: mask + params + output + bind groups +
@@ -198,6 +244,113 @@ fn run_common(
     w: u32,
     h: u32,
 ) -> Result<Vec<u8>, GpuError> {
+    record_common(ctx, pipeline, in_views, def, params, mask, w, h)?.finish_sync(ctx)
+}
+
+/// A submitted dispatch whose output awaits readback: the mapped-copy
+/// buffer plus the row geometry to strip the COPY_BYTES_PER_ROW padding.
+struct PendingReadback {
+    readback: wgpu::Buffer,
+    row_bytes: u32,
+    padded_row: u32,
+    h: u32,
+}
+
+impl PendingReadback {
+    /// Native lane: a blocking `poll(wait)` pumps the map callback.
+    fn finish_sync(self, ctx: &GpuContext) -> Result<Vec<u8>, GpuError> {
+        let slice = self.readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv()
+            .map_err(|_| GpuError::Readback("map callback dropped".into()))?
+            .map_err(|e| GpuError::Readback(format!("map_async: {e:?}")))?;
+        Ok(self.collect())
+    }
+
+    /// Async lane: suspend until the map callback fires. On native the
+    /// blocking poll still pumps it (so the await is immediately ready —
+    /// the lane is natively testable under pollster); on wasm32 the
+    /// browser event loop delivers it and the future suspends properly
+    /// (`poll(wait)` cannot block on the web).
+    async fn finish_async(self, ctx: &GpuContext) -> Result<Vec<u8>, GpuError> {
+        let slice = self.readback.slice(..);
+        let shared: Arc<Mutex<MapShared>> = Arc::default();
+        let cb = shared.clone();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let mut s = cb.lock().expect("map waker lock");
+            s.result = Some(result);
+            if let Some(w) = s.waker.take() {
+                w.wake();
+            }
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        #[cfg(target_arch = "wasm32")]
+        let _ = ctx;
+        MapFuture(shared)
+            .await
+            .map_err(|e| GpuError::Readback(format!("map_async: {e:?}")))?;
+        Ok(self.collect())
+    }
+
+    /// Strip the alignment padding out of the mapped rows.
+    fn collect(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity((self.row_bytes * self.h) as usize);
+        {
+            let data = self.readback.slice(..).get_mapped_range();
+            for row in 0..self.h {
+                let start = (row * self.padded_row) as usize;
+                out.extend_from_slice(&data[start..start + self.row_bytes as usize]);
+            }
+        }
+        self.readback.unmap();
+        out
+    }
+}
+
+/// The map-callback rendezvous behind [`MapFuture`]. `Arc<Mutex<..>>`
+/// because wgpu's native callback must be `Send`; the future itself
+/// stays single-threaded.
+#[derive(Default)]
+struct MapShared {
+    result: Option<Result<(), wgpu::BufferAsyncError>>,
+    waker: Option<Waker>,
+}
+
+/// A tiny hand-rolled oneshot over the `map_async` callback — no
+/// executor/futures dependency for one await point.
+struct MapFuture(Arc<Mutex<MapShared>>);
+
+impl Future for MapFuture {
+    type Output = Result<(), wgpu::BufferAsyncError>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut s = self.0.lock().expect("map waker lock");
+        match s.result.take() {
+            Some(r) => Poll::Ready(r),
+            None => {
+                s.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Record + submit the dispatch (everything up to, not including, the
+/// readback map) — the ONE recording path both readback lanes share.
+fn record_common(
+    ctx: &GpuContext,
+    pipeline: &KernelPipeline,
+    in_views: &[impl std::borrow::Borrow<wgpu::TextureView>],
+    def: &'static KernelDef,
+    params: &[u8],
+    mask: Option<&[u8]>,
+    w: u32,
+    h: u32,
+) -> Result<PendingReadback, GpuError> {
     let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
     // Selection mask (r16float; constant-1 default).
     let one_f16 = 0x3C00u16.to_le_bytes();
@@ -357,25 +510,10 @@ fn run_common(
     );
     ctx.queue.submit([encoder.finish()]);
 
-    // Synchronous map (native test path; the engines use async lanes).
-    let slice = readback.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv()
-        .map_err(|_| GpuError::Readback("map callback dropped".into()))?
-        .map_err(|e| GpuError::Readback(format!("map_async: {e:?}")))?;
-
-    let mut out = Vec::with_capacity((row_bytes * h) as usize);
-    {
-        let data = slice.get_mapped_range();
-        for row in 0..h {
-            let start = (row * padded_row) as usize;
-            out.extend_from_slice(&data[start..start + row_bytes as usize]);
-        }
-    }
-    readback.unmap();
-    Ok(out)
+    Ok(PendingReadback {
+        readback,
+        row_bytes,
+        padded_row,
+        h,
+    })
 }

@@ -685,11 +685,17 @@ version = "0.0.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",
+ "image-codecs",
  "image-core",
+ "image-gpu",
  "image-kernels",
  "image-pipeline",
+ "image-psd",
  "js-sys",
+ "pollster",
+ "thiserror",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
