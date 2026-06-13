@@ -191,6 +191,33 @@ mod wasm {
         Ok(js_sys::Uint8Array::from(&out[..]))
     }
 
+    /// C-6 (I-06) — copy a LEVEL-0 tile window `(x, y, w, h)` out of a
+    /// decoded image as tightly packed RGBA8 (`w*h*4` bytes, row-major).
+    /// Edge tiles are clamped to the image extent (the caller passes the
+    /// requested grid origin + size; the returned buffer is the clipped
+    /// intersection). This is the HONEST SUBSET of the resource provider:
+    /// pure windowing of the already-decoded buffer (no resampling kernel,
+    /// no GPU dispatch — orchestration, spec §6). The mip pyramid + the
+    /// Engine B `(node, region, level)` window evaluation
+    /// (`image_graph::BufferGraph::request`, rgba16float) are NOT yet
+    /// wired across this wasm boundary — see the gap note in
+    /// glue/src/tile-provider.ts. Returns an empty buffer when the window
+    /// lies fully outside the image (a transparent miss the provider skips).
+    #[wasm_bindgen]
+    pub fn image_tile_rgba8(
+        handle: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let (bytes, _tw, _th) = img.tile_window_rgba8(x, y, w, h);
+        Ok(js_sys::Uint8Array::from(&bytes[..]))
+    }
+
     /// Release an engine-held decoded image.
     #[wasm_bindgen]
     pub fn free_image(handle: u32) {

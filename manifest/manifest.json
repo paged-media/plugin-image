@@ -11,7 +11,8 @@
     },
     "rendering": [
       "sceneLayer",
-      "hitTest"
+      "hitTest",
+      "resourceProvider"
     ],
     "assets": [
       "images"
@@ -34,7 +35,8 @@
     ],
     "commands": [
       "media.paged.image.command.openImage",
-      "media.paged.image.command.adjustSelected"
+      "media.paged.image.command.adjustSelected",
+      "media.paged.image.command.claimTiles"
     ],
     "importers": [
       "media.paged.image.importer.raster"

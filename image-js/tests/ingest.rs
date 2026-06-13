@@ -24,6 +24,7 @@ use image_core::{
 };
 use image_gpu::GpuContext;
 use image_js::ingest::{adjust_rgba8, decode_rgba8, AdjustParams, IngestError};
+use std::sync::Arc;
 
 const PNG_FMT: PixelFormat = PixelFormat {
     channels: ChannelLayout::Rgba,
@@ -177,6 +178,41 @@ fn image_editor_ingest_decode_png_roundtrip() {
     let img = decode_rgba8(&png_bytes(w, h, &pixels)).expect("decode png");
     assert_eq!((img.width, img.height), (w, h));
     assert_eq!(&img.rgba[..], &pixels[..], "PNG is lossless");
+}
+
+#[test]
+fn image_editor_resource_tile_window_cuts_and_clamps() {
+    // C-6 (I-06) — the LEVEL-0 tile cut (the honest resource-provider
+    // subset). A window inside the image returns exactly its rows; an edge
+    // window clamps to the extent; a fully-outside window returns empty.
+    let (w, h) = (8u32, 6u32);
+    let pixels = test_pixels(w, h);
+    let img = image_js::ingest::DecodedImage {
+        width: w,
+        height: h,
+        rgba: Arc::from(pixels.clone().into_boxed_slice()),
+    };
+
+    // A 4×3 tile at (2,1): row-major copy of the matching window.
+    let (bytes, tw, th) = img.tile_window_rgba8(2, 1, 4, 3);
+    assert_eq!((tw, th), (4, 3));
+    assert_eq!(bytes.len(), (4 * 3 * 4) as usize);
+    for row in 0..3u32 {
+        for col in 0..4u32 {
+            let src = (((row + 1) * w + (col + 2)) * 4) as usize;
+            let dst = ((row * 4 + col) * 4) as usize;
+            assert_eq!(&bytes[dst..dst + 4], &pixels[src..src + 4], "tile pixel");
+        }
+    }
+
+    // An edge tile at (6,4) requesting 4×4 clamps to 2×2.
+    let (_edge, etw, eth) = img.tile_window_rgba8(6, 4, 4, 4);
+    assert_eq!((etw, eth), (2, 2));
+
+    // A fully-outside window is empty (a transparent miss the provider skips).
+    let (out, ow, oh) = img.tile_window_rgba8(100, 100, 4, 4);
+    assert!(out.is_empty());
+    assert_eq!((ow, oh), (0, 0));
 }
 
 #[test]

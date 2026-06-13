@@ -60,6 +60,61 @@ export function makeFakeEditor() {
     submit: vi.fn(async () => {}),
     clear: vi.fn(async () => {}),
   };
+  // C-6 — a fake renderer resource channel (the editor's PagedEditor.images
+  // member). Records claims/releases/submits and lets a test EMIT a
+  // resourceTilesNeeded notification, driving the SDK adapter's
+  // pull→submit plumbing against the bundle's provider.
+  const imageNeededListeners = new Set<
+    (need: {
+      imageId: string;
+      level: number;
+      tiles: [number, number][];
+      generation: number;
+    }) => void
+  >();
+  const imageClaims: unknown[] = [];
+  const imageReleases: string[] = [];
+  const imageSubmits: Array<{
+    imageId: string;
+    level: number;
+    tiles: Array<{ x: number; y: number; width: number; height: number; rgba: number[] }>;
+    generation: number;
+  }> = [];
+  const images = {
+    claim: vi.fn(async (claim: unknown) => {
+      imageClaims.push(claim);
+    }),
+    release: vi.fn(async (imageId: string) => {
+      imageReleases.push(imageId);
+    }),
+    submitTiles: vi.fn(
+      async (
+        imageId: string,
+        level: number,
+        tiles: Array<{
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          rgba: number[];
+        }>,
+        generation: number,
+      ) => {
+        imageSubmits.push({ imageId, level, tiles, generation });
+      },
+    ),
+    onResourceTilesNeeded: (
+      listener: (need: {
+        imageId: string;
+        level: number;
+        tiles: [number, number][];
+        generation: number;
+      }) => void,
+    ) => {
+      imageNeededListeners.add(listener);
+      return () => imageNeededListeners.delete(listener);
+    },
+  };
   /** elementId → placed ORIGINAL bytes (the C-5 store). */
   const placed = new Map<string, Uint8Array>();
   const editor = {
@@ -71,6 +126,7 @@ export function makeFakeEditor() {
     },
     camera: { camera: { scale: 1, tx: 0, ty: 0 } },
     sceneLayers,
+    images,
     client: {
       mutate: async () => ({ kind: "mutationApplied", payload: {} }),
       documentMeta: async () => ({ pageCount: 1, activePage: "pg1" }),
@@ -118,12 +174,28 @@ export function makeFakeEditor() {
       fn({ kind: "elementSelectionApplied", payload: { ids } });
     }
   };
+  /** Drive the worker→main resourceTilesNeeded event; resolves after the
+   *  SDK adapter's async source→submit microtasks settle. */
+  const emitTilesNeeded = async (need: {
+    imageId: string;
+    level: number;
+    tiles: [number, number][];
+    generation: number;
+  }) => {
+    for (const l of [...imageNeededListeners]) l(need);
+    await new Promise((r) => setTimeout(r, 0));
+  };
   return {
     editor: editor as unknown as PagedEditor,
     panels,
     commands,
     importers,
     sceneLayers,
+    images,
+    imageClaims,
+    imageReleases,
+    imageSubmits,
+    emitTilesNeeded,
     placed,
     emitSelection,
   };

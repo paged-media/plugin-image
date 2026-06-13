@@ -51,6 +51,21 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
+  // C-6 (I-06) — claim the ingested image's tile resource so the renderer
+  // pulls level-0 tiles for the placed frame at its current scale (the
+  // honest subset; the mip pyramid + Engine B window eval are the named
+  // gap in tile-provider.ts). Degrades honestly when the host wires no
+  // resource channel (rendering.resourceProvider@1 is false).
+  host.contribute.command({
+    id: "media.paged.image.command.claimTiles",
+    title: "Serve image tiles to the renderer",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      session.claimTiles();
+    },
+  });
+
   // K-2 — the raster importer: opening/dropping a PSD/PNG/JPEG routes
   // its bytes HERE (decode into the session, raise the panel; it does
   // NOT replace the document). Degrades honestly on an older host.

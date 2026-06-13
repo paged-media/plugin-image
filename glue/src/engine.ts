@@ -67,6 +67,12 @@ export interface ImageEngine {
    *  C-1 Stage-A scene-item payload. Identity params return the decode
    *  verbatim without touching the GPU. */
   adjust(handle: number, params: AdjustParams): Promise<Uint8Array>;
+  /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
+   *  image as tightly packed RGBA8. Edge tiles are clamped to the image
+   *  extent; a fully-outside window returns an empty buffer. The honest
+   *  subset of the resource provider (pure windowing — no mip pyramid /
+   *  Engine B window eval yet; see tile-provider.ts). */
+  tile(handle: number, x: number, y: number, w: number, h: number): Uint8Array;
   freeImage(handle: number): void;
 }
 
@@ -96,6 +102,13 @@ export interface ImageWasmModule {
     contrast: number,
     saturation: number,
   ): Promise<Uint8Array>;
+  image_tile_rgba8(
+    handle: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ): Uint8Array;
   free_image(handle: number): void;
 }
 
@@ -126,6 +139,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     adjust: (handle, p) =>
       wasm.adjust_image(handle, p.exposureEv, p.brightness, p.contrast, p.saturation),
+    tile: (handle, x, y, w, h) => wasm.image_tile_rgba8(handle, x, y, w, h),
     freeImage: (h) => wasm.free_image(h),
   };
 }

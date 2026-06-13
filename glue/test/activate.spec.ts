@@ -23,13 +23,14 @@ function load(
 }
 
 describe("imageBundle.activate", () => {
-  it("registers the panel, both commands, and the raster importer", () => {
+  it("registers the panel, the commands, and the raster importer", () => {
     const fake = makeFakeEditor();
     load(fake);
     expect(fake.panels.ids()).toEqual([PANEL_ID]);
     expect(fake.commands.ids()).toEqual([
       "media.paged.image.command.openImage",
       "media.paged.image.command.adjustSelected",
+      "media.paged.image.command.claimTiles",
     ]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);
   });

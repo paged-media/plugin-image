@@ -20,6 +20,7 @@ import {
   type AdjustParams,
   type ImageEngine,
 } from "./engine";
+import { claimImageTiles } from "./tile-provider";
 
 /** The ingested source image (engine-held pixels behind `handle`). */
 export interface SourceImage {
@@ -62,6 +63,13 @@ export interface ImageSession {
   setParams(p: Partial<AdjustParams>): void;
   /** COMMITTED apply: adjust on the GPU + submit the in-frame layer. */
   apply(): Promise<boolean>;
+  /** C-6 — claim the ingested image's tile resource so the renderer
+   *  pulls level-0 tiles for it (the v44 wire). Returns false when there
+   *  is nothing ingested, no target frame, or the host wires no resource
+   *  channel. Disposing the session (or re-ingesting) releases the claim. */
+  claimTiles(): boolean;
+  /** True while a tile resource is claimed (the panel reflects it). */
+  tilesClaimed(): boolean;
   /** Clear the layer + return to identity params. */
   reset(): Promise<void>;
   dispose(): void;
@@ -83,6 +91,8 @@ export function createImageSession(host: BundleHost): ImageSession {
   let engine: ImageEngine | null = null;
   let bootPromise: Promise<ImageEngine | null> | null = null;
   let sceneSurface: ReturnType<typeof host.contribute.sceneLayer> | null = null;
+  // C-6 — the active tile-resource claim (null when nothing is claimed).
+  let tileClaim: { elementId: string; dispose(): void } | null = null;
   let disposed = false;
 
   const state: ImageSessionState = {
@@ -142,7 +152,17 @@ export function createImageSession(host: BundleHost): ImageSession {
     return bootPromise;
   };
 
+  const releaseTiles = () => {
+    if (tileClaim) {
+      tileClaim.dispose();
+      tileClaim = null;
+    }
+  };
+
   const freeSource = () => {
+    // A claim points at THIS source's handle — release it before the
+    // pixels go (the renderer drops to the whole-image fallback lane).
+    releaseTiles();
     if (state.source && engine) engine.freeImage(state.source.handle);
     state.source = null;
   };
@@ -352,6 +372,51 @@ export function createImageSession(host: BundleHost): ImageSession {
       }
     },
 
+    claimTiles() {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      // An import claims the frame it was (or will be) composited into; a
+      // selection ingest already carries its frame.
+      let target = src.elementId;
+      if (!target) {
+        const ids = host.selection.get();
+        target = ids.length === 1 ? elementIdOf(ids[0]) : null;
+        if (!target) {
+          setStatus("Select the frame to claim tiles for.");
+          return false;
+        }
+        src.elementId = target;
+      }
+      if (!host.supports("rendering.resourceProvider@1")) {
+        setStatus(
+          "Host serves no tile resource (rendering.resourceProvider@1 is false).",
+        );
+        return false;
+      }
+      releaseTiles();
+      // The provider reads the LIVE handle on each pull — a re-ingest of
+      // the same frame is picked up without re-claiming.
+      const claim = claimImageTiles(
+        host,
+        { elementId: target, handle: src.handle, width: src.width, height: src.height },
+        engine,
+        () => (state.source ? state.source.handle : null),
+      );
+      tileClaim = { elementId: target, dispose: () => claim.dispose() };
+      setStatus(
+        `Claimed tile resource for the frame (level-0 lane; ${src.width}×${src.height}). ` +
+          "The renderer pulls tiles at its current scale.",
+      );
+      return true;
+    },
+
+    tilesClaimed() {
+      return tileClaim !== null;
+    },
+
     async reset() {
       state.params = { ...IDENTITY_PARAMS };
       await clearLayer();
@@ -361,6 +426,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     dispose() {
       disposed = true;
       selectionSub.dispose();
+      releaseTiles();
       freeSource();
       // The host tears the scene surface down (contribute-tracked); its
       // dispose clears every submitted layer.

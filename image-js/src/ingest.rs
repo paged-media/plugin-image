@@ -91,6 +91,37 @@ impl AdjustParams {
     }
 }
 
+impl DecodedImage {
+    /// C-6 (I-06) — cut a LEVEL-0 tile window `(x, y, w, h)` out of the
+    /// decoded buffer as tightly packed RGBA8 (`w'*h'*4` bytes, row-major,
+    /// where `w'`/`h'` are the window CLIPPED to the image extent). Returns
+    /// `(bytes, w', h')`; an empty `Vec` with `(0, 0)` when the window lies
+    /// fully outside the image. Pure windowing — no resampling kernel, no
+    /// GPU dispatch (orchestration, spec §6); the honest subset of the
+    /// resource provider until the Engine B tiled mip eval is wired to the
+    /// wasm boundary.
+    pub fn tile_window_rgba8(&self, x: u32, y: u32, w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+        let x0 = x.min(self.width);
+        let y0 = y.min(self.height);
+        let x1 = x.saturating_add(w).min(self.width);
+        let y1 = y.saturating_add(h).min(self.height);
+        if x1 <= x0 || y1 <= y0 {
+            return (Vec::new(), 0, 0);
+        }
+        let tw = x1 - x0;
+        let th = y1 - y0;
+        let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
+        let stride = self.width as usize * 4;
+        for row in 0..th as usize {
+            let src_off = (y0 as usize + row) * stride + x0 as usize * 4;
+            let dst_off = row * tw as usize * 4;
+            let len = tw as usize * 4;
+            out[dst_off..dst_off + len].copy_from_slice(&self.rgba[src_off..src_off + len]);
+        }
+        (out, tw, th)
+    }
+}
+
 /// The straight-RGBA8 format the ingest slice speaks on both ends
 /// (mirrors the pipeline conformance stimulus; the M0 bridge maps it
 /// verbatim into the working space).
