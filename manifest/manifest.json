@@ -24,6 +24,9 @@
       "max": 4,
       "sharedMemory": true
     },
+    "gpu": {
+      "realm": "bundle"
+    },
     "wasm": [
       {
         "name": "compute",
