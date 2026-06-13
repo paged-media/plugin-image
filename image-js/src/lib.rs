@@ -297,6 +297,30 @@ mod wasm {
         Ok(js_sys::Uint32Array::from(&hist.to_flat()[..]))
     }
 
+    /// Compute the AUTO-ENHANCE adjustment parameters for an engine-held
+    /// image and return them as `[in_black, in_white, temp, tint]` (4
+    /// `f32`). A single "auto" estimate composing the EXISTING levels +
+    /// white-balance kernels: it builds the RGB+luma histogram (the same
+    /// `histogram_rgba8` reduction the panel reads), derives a percentile-
+    /// clipped auto-levels black/white range (0.5%/99.5% of luma) and a
+    /// gray-world white-balance `temp`/`tint`, and emits the params the
+    /// LEVELS/WB panel commits through `adjust_image_full` (levels
+    /// `in_black`/`in_white`, white-balance `temp`/`tint`; gamma/output
+    /// range stay identity). Pure CPU readout/orchestration (spec §6) —
+    /// deterministic, no GPU, no kernel dispatch row. A flat or already-
+    /// neutral image yields the identity `[0, 1, 0, 0]` (a guaranteed
+    /// no-op), never a wrong-looking auto-correction.
+    #[wasm_bindgen]
+    pub fn image_auto_enhance_params(handle: u32) -> Result<js_sys::Float32Array, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let hist = image_gpu::histogram_rgba8(&img.rgba);
+        let auto = image_gpu::auto_enhance(&hist);
+        let out = [auto.in_black, auto.in_white, auto.temp, auto.tint];
+        Ok(js_sys::Float32Array::from(&out[..]))
+    }
+
     /// Commit a CROP: cut the integer pixel rectangle `(x, y, w, h)`
     /// (clamped to the image extent) out of an engine-held image and
     /// register the result as a NEW engine-held image, returning its

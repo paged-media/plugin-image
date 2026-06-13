@@ -27,7 +27,9 @@
 
 use image_conformance::harness::RefTile;
 use image_conformance::Px;
-use image_gpu::reduce::{histogram, histogram_rgba8, statistics, Histogram};
+use image_gpu::reduce::{
+    auto_enhance, histogram, histogram_rgba8, statistics, AutoEnhance, Histogram,
+};
 
 /// rgba16float bytes for a `w`×`h` tile of one constant texel.
 fn constant_bytes(w: u32, h: u32, px: [f32; 4]) -> Vec<u8> {
@@ -287,4 +289,161 @@ fn image_reduce_histogram_rgba8_flat_layout() {
     assert_eq!(flat[256 + 2], 1, "G bin 2");
     assert_eq!(flat[512 + 3], 1, "B bin 3");
     assert_eq!(flat[768 + 2], 1, "luma bin 2");
+}
+
+// ── auto-enhance (orchestration over the panel histogram) ────────────
+//
+// feat: image.adjust.auto-enhance — the single "auto" adjustment that
+// composes the EXISTING levels + white-balance kernels from the RGB+luma
+// histogram. Pure readout/orchestration math (no kernels.yaml row, spec
+// §6); these tests are its golden.
+
+/// Auto-levels on a LOW-CONTRAST image EXPANDS the input range: a luma
+/// span confined to roughly [64, 192] yields `in_black > 0` near 64/255
+/// and `in_white < 1` near 192/255, so the levels stretch recovers
+/// contrast. (The 0.5%/99.5% clip lands on the populated luma extremes.)
+#[test]
+fn image_adjust_auto_enhance_levels_expand_low_contrast() {
+    // Neutral grays (r==g==b → no WB) spread evenly over [64, 192], so the
+    // luma equals the gray value and the populated range is exactly that.
+    let (w, h) = (32u32, 32u32);
+    let hist = histogram_rgba8(&rgba8_from_fn(w, h, |x, _| {
+        let v = 64 + ((x * 128) / w) as u8; // 64..=191 across the width
+        [v, v, v, 255]
+    }));
+    let auto = auto_enhance(&hist);
+
+    assert!(
+        auto.in_black > 0.0 && auto.in_black <= 80.0 / 255.0,
+        "auto black point lifts off 0 onto the populated low end (got {})",
+        auto.in_black
+    );
+    assert!(
+        auto.in_white < 1.0 && auto.in_white >= 180.0 / 255.0,
+        "auto white point drops below 1 onto the populated high end (got {})",
+        auto.in_white
+    );
+    assert!(
+        auto.in_white - auto.in_black < 0.95,
+        "the recovered range is narrower than full (contrast to gain)"
+    );
+    // Neutral grays → no white-balance correction.
+    assert!(
+        auto.temp.abs() < 1e-3 && auto.tint.abs() < 1e-3,
+        "gray input needs no WB (temp {}, tint {})",
+        auto.temp,
+        auto.tint
+    );
+}
+
+/// Gray-world WB NEUTRALIZES a tinted image: a warm cast (R high, B low)
+/// yields a COOLING correction — `temp < 0` (pull amber→blue) — and a
+/// green cast yields `tint < 0` (pull green→magenta). The sign convention
+/// matches the kernel gains `gr = 1+temp, gb = 1−temp`: an over-red image
+/// must scale R down (temp negative) and B up.
+#[test]
+fn image_adjust_auto_enhance_grayworld_neutralizes_warm_cast() {
+    // Over-red / under-blue (a warm cast); green mid.
+    let warm = histogram_rgba8(&rgba8_from_fn(16, 16, |_, _| [200, 128, 64, 255]));
+    let auto = auto_enhance(&warm);
+    assert!(
+        auto.temp < -1e-2,
+        "warm (R>B) cast → cooling temp < 0 (got {})",
+        auto.temp
+    );
+
+    // A green cast (G well above R≈B) → tint pulls toward magenta (< 0).
+    let green = histogram_rgba8(&rgba8_from_fn(16, 16, |_, _| [110, 200, 110, 255]));
+    let auto_g = auto_enhance(&green);
+    assert!(
+        auto_g.tint < -1e-2,
+        "green cast → tint < 0 (got {})",
+        auto_g.tint
+    );
+    // R≈B in the green-cast image → near-zero temp.
+    assert!(
+        auto_g.temp.abs() < 1e-2,
+        "balanced R/B → temp ≈ 0 (got {})",
+        auto_g.temp
+    );
+}
+
+/// Applying the gray-world gains to the tinted means brings the three
+/// channel means into agreement (the WB fit actually neutralizes). We
+/// reconstruct the kernel gains `(1+temp, 1+tint, 1−temp)` from the
+/// estimate and check the corrected means converge toward each other far
+/// better than the originals.
+#[test]
+fn image_adjust_auto_enhance_grayworld_corrected_means_converge() {
+    let rgb = [180.0f32, 120.0, 70.0];
+    let hist = histogram_rgba8(&rgba8_from_fn(16, 16, |_, _| {
+        [rgb[0] as u8, rgb[1] as u8, rgb[2] as u8, 255]
+    }));
+    let auto = auto_enhance(&hist);
+    let gains = [1.0 + auto.temp, 1.0 + auto.tint, 1.0 - auto.temp];
+    let corrected = [rgb[0] * gains[0], rgb[1] * gains[1], rgb[2] * gains[2]];
+
+    let spread = |m: [f32; 3]| {
+        let max = m[0].max(m[1]).max(m[2]);
+        let min = m[0].min(m[1]).min(m[2]);
+        max - min
+    };
+    assert!(
+        spread(corrected) < spread(rgb) * 0.6,
+        "WB-corrected channel means converge (before {:.1}, after {:.1})",
+        spread(rgb),
+        spread(corrected)
+    );
+}
+
+/// A FLAT (single-value) image has no contrast to recover and is already
+/// neutral → the estimate is the identity no-op `[0, 1, 0, 0]`.
+#[test]
+fn image_adjust_auto_enhance_flat_image_is_identity() {
+    let flat = histogram_rgba8(&rgba8_from_fn(8, 8, |_, _| [128, 128, 128, 255]));
+    let auto = auto_enhance(&flat);
+    assert_eq!(auto, AutoEnhance::default(), "flat neutral → identity");
+    assert!(auto.is_identity());
+}
+
+/// An already-neutral, full-range image (gray ramp 0..=255) needs no WB
+/// and ~no levels lift (black/white already at the extremes within the
+/// clip). The estimate stays at/near identity — auto-enhance never
+/// invents a correction.
+#[test]
+fn image_adjust_auto_enhance_full_range_neutral_no_op() {
+    let ramp = histogram_rgba8(&rgba8_from_fn(256, 1, |x, _| {
+        let v = x as u8;
+        [v, v, v, 255]
+    }));
+    let auto = auto_enhance(&ramp);
+    assert!(
+        auto.temp.abs() < 1e-3 && auto.tint.abs() < 1e-3,
+        "neutral → no WB"
+    );
+    // 0.5% of 256 px = ~2 px clipped each end → black ≈ 1/255, white ≈ 254/255.
+    assert!(
+        auto.in_black <= 3.0 / 255.0,
+        "black stays near 0 (got {})",
+        auto.in_black
+    );
+    assert!(
+        auto.in_white >= 252.0 / 255.0,
+        "white stays near 1 (got {})",
+        auto.in_white
+    );
+}
+
+/// Degenerate inputs are clean no-ops: an empty buffer and a near-black
+/// image (means under the 1-code-value WB floor) both yield identity —
+/// never a divide-by-zero or a runaway gain.
+#[test]
+fn image_adjust_auto_enhance_degenerate_is_identity() {
+    assert_eq!(auto_enhance(&histogram_rgba8(&[])), AutoEnhance::default());
+    let near_black = histogram_rgba8(&rgba8_from_fn(8, 8, |_, _| [0, 0, 0, 255]));
+    let auto = auto_enhance(&near_black);
+    assert!(
+        auto.temp == 0.0 && auto.tint == 0.0,
+        "near-black means below floor → no WB gain blow-up"
+    );
 }

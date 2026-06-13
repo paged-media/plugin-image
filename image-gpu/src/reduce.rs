@@ -249,3 +249,155 @@ pub fn statistics(tile_bytes: &[u8], w: u32, h: u32) -> Stats {
     }
     Stats { min, max, mean }
 }
+
+// ── auto-enhance (orchestration over the panel histogram) ────────────
+//
+// A single "auto" adjustment that composes the EXISTING adjustment
+// kernels (levels + white-balance) from the panel-facing RGB+luma
+// histogram. This is READOUT/ORCHESTRATION math (spec §6), not a kernel:
+// like the histogram it consumes, it owns NO `registry/kernels.yaml`
+// dispatch row and is never executed through the WGSL ABI. It derives
+// PARAMETERS; the pixels are still moved only by the levels and
+// white-balance KernelDefs that already carry their own rows. Pure,
+// fixed-order scalar arithmetic over the histogram counts — deterministic
+// and bit-stable, its own golden (§6.3). The wasm surface maps the result
+// onto `AdjustParams { levels, temp, tint }`; nothing here touches the GPU.
+
+/// The auto-enhance estimate: an auto-levels input range (the percentile-
+/// clipped black/white points, normalized to `[0, 1]`) plus a gray-world
+/// white-balance estimate fitted to the `temp`/`tint` axes of the
+/// `adjust.white_balance` kernel (`gr = 1+temp, gg = 1+tint, gb = 1−temp`).
+///
+/// `in_black`/`in_white` feed the levels kernel's input range (output
+/// range and gamma stay identity — auto-enhance stretches contrast, it
+/// does not tone-curve). When the image is flat or degenerate the estimate
+/// collapses to identity (`in_black = 0`, `in_white = 1`, `temp = tint = 0`)
+/// so applying it is a guaranteed no-op rather than a wrong-looking image.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoEnhance {
+    /// Auto black point in `[0, 1]` (the levels input-black).
+    pub in_black: f32,
+    /// Auto white point in `[0, 1]` (the levels input-white); always `> in_black`.
+    pub in_white: f32,
+    /// Gray-world `temp` (amber↔blue) for `adjust.white_balance`.
+    pub temp: f32,
+    /// Gray-world `tint` (green↔magenta) for `adjust.white_balance`.
+    pub tint: f32,
+}
+
+impl Default for AutoEnhance {
+    fn default() -> Self {
+        AutoEnhance {
+            in_black: 0.0,
+            in_white: 1.0,
+            temp: 0.0,
+            tint: 0.0,
+        }
+    }
+}
+
+impl AutoEnhance {
+    /// Does this estimate change anything (vs. the identity no-op)?
+    pub fn is_identity(&self) -> bool {
+        *self == AutoEnhance::default()
+    }
+}
+
+/// Find the histogram bin (`0..=255`) at the `fraction` cumulative
+/// position from the LOW end (`fraction` in `[0, 1]`). Walks the 256 bins
+/// accumulating counts until the running total first reaches
+/// `ceil(fraction * total)`, returning that bin index. `total == 0`
+/// (empty image) yields 0. Fixed forward scan — deterministic.
+#[inline]
+fn percentile_bin_low(bins: &[u32; 256], total: u64, fraction: f32) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    // round-half-up target rank in [1, total]; clamp the fraction defensively.
+    let f = fraction.clamp(0.0, 1.0) as f64;
+    let target = ((f * total as f64).ceil() as u64).max(1).min(total);
+    let mut acc: u64 = 0;
+    for (k, &c) in bins.iter().enumerate() {
+        acc += c as u64;
+        if acc >= target {
+            return k as u8;
+        }
+    }
+    255
+}
+
+/// The default low/high clip fractions for auto-levels: clip the darkest
+/// 0.5% and brightest 0.5% of luma (the classic "auto contrast" 0.5/99.5
+/// percentile stretch). Public so the call site / tests name the policy.
+pub const AUTO_LEVELS_CLIP_LOW: f32 = 0.005;
+pub const AUTO_LEVELS_CLIP_HIGH: f32 = 0.995;
+
+/// Mean of a 256-bin channel histogram in `[0, 255]` code-value space:
+/// `Σ k·count / Σ count`. `total == 0` yields 0.0.
+#[inline]
+fn channel_mean(bins: &[u32; 256], total: u64) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    let mut sum: u64 = 0;
+    for (k, &c) in bins.iter().enumerate() {
+        sum += k as u64 * c as u64;
+    }
+    (sum as f64 / total as f64) as f32
+}
+
+/// Derive an [`AutoEnhance`] estimate from a panel RGB+luma histogram.
+///
+/// **Auto-levels** (contrast): the black/white input points are the
+/// [`AUTO_LEVELS_CLIP_LOW`]/[`AUTO_LEVELS_CLIP_HIGH`] percentiles of the
+/// LUMA histogram, normalized `bin/255`. If the clipped range is empty or
+/// inverted (a flat / single-value image) the levels collapse to identity
+/// (`0 → 1`) — never a divide-by-near-zero blow-up.
+///
+/// **Gray-world white balance**: with per-channel means `R̄, Ḡ, B̄` and the
+/// neutral gray `(R̄+Ḡ+B̄)/3`, the ideal gains are `gc = gray/c̄`. Fitted to
+/// the kernel's `(1+temp, 1+tint, 1−temp)`: `tint = gg − 1` (green → tint),
+/// and `temp = (gr − gb)/2` (the amber↔blue axis splits red/blue). A
+/// degenerate channel mean (≈0) or an already-neutral image yields
+/// `temp = tint = 0`. Pure fixed-order arithmetic — deterministic (§6.3).
+pub fn auto_enhance(hist: &RgbaLumaHistogram) -> AutoEnhance {
+    // Pixel count (each channel histogram sums to the same total).
+    let total: u64 = hist.luma.iter().map(|&c| c as u64).sum();
+    if total == 0 {
+        return AutoEnhance::default();
+    }
+
+    // ── auto-levels: percentile-clipped luma black/white points ──
+    let lo = percentile_bin_low(&hist.luma, total, AUTO_LEVELS_CLIP_LOW);
+    let hi = percentile_bin_low(&hist.luma, total, AUTO_LEVELS_CLIP_HIGH);
+    let (in_black, in_white) = if hi > lo {
+        (lo as f32 / 255.0, hi as f32 / 255.0)
+    } else {
+        // flat / single-value image — no contrast to recover.
+        (0.0, 1.0)
+    };
+
+    // ── gray-world white balance fitted to (temp, tint) ──
+    let rbar = channel_mean(&hist.r, total);
+    let gbar = channel_mean(&hist.g, total);
+    let bbar = channel_mean(&hist.b, total);
+    let gray = (rbar + gbar + bbar) / 3.0;
+    // Guard degenerate (near-black or a zero channel) images: any mean at
+    // or below a 1-code-value floor makes the gain unstable → skip WB.
+    let floor = 1.0f32;
+    let (temp, tint) = if gray <= floor || rbar <= floor || gbar <= floor || bbar <= floor {
+        (0.0, 0.0)
+    } else {
+        let gr = gray / rbar;
+        let gg = gray / gbar;
+        let gb = gray / bbar;
+        ((gr - gb) / 2.0, gg - 1.0)
+    };
+
+    AutoEnhance {
+        in_black,
+        in_white,
+        temp,
+        tint,
+    }
+}
