@@ -155,6 +155,32 @@ mod wasm {
         })
     }
 
+    /// K-3 (S-07 / I-02) — register a PRE-DECODED straight-RGBA8 buffer
+    /// (from the decode worker pool, which ran the codec/PSD CPU lanes
+    /// off-thread) as an engine-held image, returning a handle for the GPU
+    /// adjust + tile paths. `bytes` must be exactly `width*height*4` RGBA8;
+    /// a length mismatch is a clean error. Free with `free_image`.
+    #[wasm_bindgen]
+    pub fn ingest_rgba8(
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    ) -> Result<DecodedHandle, JsValue> {
+        let img = DecodedImage::from_rgba8(width, height, bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let handle = NEXT_HANDLE.with(|n| {
+            let h = n.get();
+            n.set(h + 1);
+            h
+        });
+        IMAGES.with(|m| m.borrow_mut().insert(handle, img));
+        Ok(DecodedHandle {
+            handle,
+            width,
+            height,
+        })
+    }
+
     /// Run the M4 adjustments chain on a decoded image and return the
     /// straight-RGBA8 result — the C-1 Stage-A scene-item payload.
     /// Identity params return the decode verbatim (no dispatch to run);

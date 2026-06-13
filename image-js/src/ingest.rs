@@ -92,6 +92,28 @@ impl AdjustParams {
 }
 
 impl DecodedImage {
+    /// K-3 (S-07 / I-02) — register a PRE-DECODED straight-RGBA8 buffer as
+    /// an engine-held image. The decode worker pool runs the codec/PSD CPU
+    /// lanes OFF the main thread and hands the raw pixels back; the main
+    /// realm registers them here to get a handle for the GPU adjust + tile
+    /// windowing paths (which require engine-held pixels). `bytes` must be
+    /// exactly `width*height*4` straight RGBA8, row-major — a length
+    /// mismatch is rejected (never a torn image).
+    pub fn from_rgba8(width: u32, height: u32, bytes: Vec<u8>) -> Result<Self, IngestError> {
+        let expected = (width as usize) * (height as usize) * 4;
+        if bytes.len() != expected {
+            return Err(IngestError::Decode(format!(
+                "ingest_rgba8: {} bytes for {width}x{height} (expected {expected})",
+                bytes.len()
+            )));
+        }
+        Ok(DecodedImage {
+            width,
+            height,
+            rgba: Arc::from(bytes),
+        })
+    }
+
     /// C-6 (I-06) — cut a LEVEL-0 tile window `(x, y, w, h)` out of the
     /// decoded buffer as tightly packed RGBA8 (`w'*h'*4` bytes, row-major,
     /// where `w'`/`h'` are the window CLIPPED to the image extent). Returns
@@ -420,5 +442,27 @@ mod tests {
             assert_eq!((w, h), (2, 3), "transpose/transverse swap dims for {o:?}");
             assert_eq!(out.len(), (w * h * 4) as usize);
         }
+    }
+
+    // K-3 (I-02) — the decode worker pool runs the CPU decode off-thread
+    // and hands raw RGBA8 back; from_rgba8 registers it as an engine image
+    // (feature image.editor.ingest). The naming carries the feature tag
+    // until the state feature_test macro ships.
+    #[test]
+    fn image_editor_ingest_from_rgba8_registers_pre_decoded_pixels() {
+        let pixels = grid(2, 1); // 8 bytes
+        let img = DecodedImage::from_rgba8(2, 1, pixels.clone()).expect("valid rgba8");
+        assert_eq!((img.width, img.height), (2, 1));
+        // The whole-image window cut round-trips the pixels verbatim.
+        let (out, w, h) = img.tile_window_rgba8(0, 0, 2, 1);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn image_editor_ingest_from_rgba8_rejects_a_length_mismatch() {
+        // 2×1 needs 8 bytes; give 6 → a clean error, never a torn image.
+        let err = DecodedImage::from_rgba8(2, 1, vec![0u8; 6]).unwrap_err();
+        assert!(matches!(err, IngestError::Decode(_)), "got {err:?}");
     }
 }

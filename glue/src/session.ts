@@ -21,6 +21,7 @@ import {
   type ImageEngine,
 } from "./engine";
 import { claimImageTiles } from "./tile-provider";
+import { createDecodePool, type DecodePool } from "./decode-pool";
 
 /** The ingested source image (engine-held pixels behind `handle`). */
 export interface SourceImage {
@@ -93,6 +94,10 @@ export function createImageSession(host: BundleHost): ImageSession {
   let sceneSurface: ReturnType<typeof host.contribute.sceneLayer> | null = null;
   // C-6 — the active tile-resource claim (null when nothing is claimed).
   let tileClaim: { elementId: string; dispose(): void } | null = null;
+  // K-3 — the decode worker pool (null when the host wires no workers /
+  // grants none → the session decodes on the main thread instead).
+  let decodePool: DecodePool | null = null;
+  let decodePoolPromise: Promise<DecodePool | null> | null = null;
   let disposed = false;
 
   const state: ImageSessionState = {
@@ -152,6 +157,46 @@ export function createImageSession(host: BundleHost): ImageSession {
     return bootPromise;
   };
 
+  // K-3 — boot the decode worker pool once, on first ingest. The pool is
+  // an OPTIONAL accelerator: when the host wires no workers (or grants
+  // none) createDecodePool returns null and decode falls back to the
+  // main-thread engine — same pixels, just on-thread (the honest
+  // degradation; never fake parallelism).
+  const ensureDecodePool = async (): Promise<DecodePool | null> => {
+    if (decodePool) return decodePool;
+    if (!decodePoolPromise) {
+      decodePoolPromise = createDecodePool(host).then((pool) => {
+        if (disposed) {
+          pool?.dispose();
+          return null;
+        }
+        decodePool = pool;
+        return pool;
+      });
+    }
+    return decodePoolPromise;
+  };
+
+  /** Decode bytes to an engine-held handle. K-3 fast path: when the worker
+   *  pool is available, the codec/PSD CPU decode runs OFF the main thread
+   *  and the raw RGBA is registered into the engine here; otherwise the
+   *  engine decodes on the main thread. Both yield the same handle the
+   *  adjust + tile paths consume. */
+  const decodeToHandle = async (
+    bytes: Uint8Array,
+  ): Promise<{ handle: number; width: number; height: number }> => {
+    if (!engine) throw new Error("engine not booted");
+    const pool = await ensureDecodePool();
+    if (pool) {
+      // The pool transfers the input buffer — copy first so the caller's
+      // bytes survive (the importer may reuse them).
+      const copy = bytes.slice();
+      const decoded = await pool.decode(copy);
+      return engine.ingestRgba8(decoded.width, decoded.height, decoded.rgba);
+    }
+    return engine.decode(bytes);
+  };
+
   const releaseTiles = () => {
     if (tileClaim) {
       tileClaim.dispose();
@@ -175,15 +220,17 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
   };
 
-  const decodeInto = (
+  const decodeInto = async (
     name: string,
     bytes: Uint8Array,
     origin: "selection" | "import",
     elementId: string | null,
-  ): boolean => {
+  ): Promise<boolean> => {
     if (!engine) return false;
     try {
-      const info = engine.decode(bytes);
+      // K-3 — off-main-thread decode when the worker pool is available;
+      // honest main-thread fallback otherwise.
+      const info = await decodeToHandle(bytes);
       freeSource();
       state.source = {
         name,
@@ -193,7 +240,8 @@ export function createImageSession(host: BundleHost): ImageSession {
         origin,
         elementId,
       };
-      setStatus(`${name} — ${info.width}×${info.height} decoded.`);
+      const lane = decodePool ? " (off-thread)" : "";
+      setStatus(`${name} — ${info.width}×${info.height} decoded${lane}.`);
       return true;
     } catch (err) {
       // The engine's honest unsupported/decode message (16-bit, CMYK, …).
@@ -253,7 +301,7 @@ export function createImageSession(host: BundleHost): ImageSession {
           setStatus("No placed image on this frame (or the link is unresolved).");
           return false;
         }
-        return decodeInto(asset.uri || "placed image", asset.bytes, "selection", id);
+        return await decodeInto(asset.uri || "placed image", asset.bytes, "selection", id);
       } finally {
         state.busy = false;
         emit();
@@ -268,7 +316,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       state.busy = true;
       emit();
       try {
-        const ok = decodeInto(name, bytes, "import", null);
+        const ok = await decodeInto(name, bytes, "import", null);
         if (ok) {
           setStatus(
             `${name} — ${state.source?.width}×${state.source?.height} decoded. ` +
@@ -427,6 +475,11 @@ export function createImageSession(host: BundleHost): ImageSession {
       disposed = true;
       selectionSub.dispose();
       releaseTiles();
+      // K-3 — terminate the decode pool's workers (the host ALSO
+      // auto-terminates them on bundle dispose; this is the explicit,
+      // earlier teardown, and terminate is idempotent).
+      decodePool?.dispose();
+      decodePool = null;
       freeSource();
       // The host tears the scene surface down (contribute-tracked); its
       // dispose clears every submitted layer.

@@ -63,6 +63,11 @@ export interface ImageEngine {
    *  image. Throws with the engine's honest message on unsupported
    *  inputs (16-bit, CMYK, ZIP composites, …). */
   decode(bytes: Uint8Array): DecodedInfo;
+  /** K-3 — register PRE-DECODED straight RGBA8 (from the decode worker
+   *  pool, which ran the CPU decode off-thread) as an engine-held image,
+   *  returning a handle for the GPU adjust + tile paths. `rgba` must be
+   *  `width*height*4` bytes; a mismatch throws. */
+  ingestRgba8(width: number, height: number, rgba: Uint8Array): DecodedInfo;
   /** Run the adjustments chain (GPU) and return straight RGBA8 — the
    *  C-1 Stage-A scene-item payload. Identity params return the decode
    *  verbatim without touching the GPU. */
@@ -95,6 +100,7 @@ export interface ImageWasmModule {
   init_gpu(): Promise<void>;
   gpu_ready(): boolean;
   decode_image(bytes: Uint8Array): DecodedHandleWasm;
+  ingest_rgba8(width: number, height: number, bytes: Uint8Array): DecodedHandleWasm;
   adjust_image(
     handle: number,
     exposure_ev: number,
@@ -133,6 +139,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     gpuReady: () => wasm.gpu_ready(),
     decode(bytes) {
       const h = wasm.decode_image(bytes);
+      const info = { handle: h.handle, width: h.width, height: h.height };
+      h.free();
+      return info;
+    },
+    ingestRgba8(width, height, rgba) {
+      const h = wasm.ingest_rgba8(width, height, rgba);
       const info = { handle: h.handle, width: h.width, height: h.height };
       h.free();
       return info;

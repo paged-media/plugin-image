@@ -19,6 +19,10 @@
     ],
     "network": false,
     "clipboard": "full",
+    "workers": {
+      "max": 4,
+      "sharedMemory": true
+    },
     "wasm": [
       {
         "name": "compute",

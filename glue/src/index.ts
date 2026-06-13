@@ -27,3 +27,10 @@ export {
   type ImageSession,
   type ImageSessionState,
 } from "./session";
+export {
+  createDecodePool,
+  DECODE_WORKER_MODULE,
+  type DecodePool,
+  type DecodedRGBA,
+} from "./decode-pool";
+export type { DecodeReply, DecodeRequest } from "./decode-worker";
