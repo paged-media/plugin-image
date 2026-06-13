@@ -283,16 +283,69 @@ pub fn apply_drag(
         b = (rect.bottom() + dy).max(t + MIN_EXTENT);
     }
 
-    let mut out = CropRect {
+    let out = CropRect {
         x: l,
         y: t,
         w: r - l,
         h: b - t,
     };
-    if let Some(ratio) = aspect.ratio() {
-        out = lock_aspect(&out, handle, ratio);
+    match aspect.ratio() {
+        // Aspect-locked: lock the ratio, then fit RATIO-PRESERVINGLY into
+        // the image (a plain per-axis clamp would clip one side and break
+        // the ratio). The anchor (the fixed corner) stays put.
+        Some(ratio) => fit_aspect_to_image(
+            &lock_aspect(&out, handle, ratio),
+            handle,
+            ratio,
+            image_w,
+            image_h,
+        ),
+        // Free: a plain per-axis image clamp is correct.
+        None => out.clamp_to_image(image_w, image_h),
     }
-    out.clamp_to_image(image_w, image_h)
+}
+
+/// Fit an aspect-LOCKED rect inside the image WITHOUT breaking its ratio:
+/// when the rect exceeds the image on either axis, shrink both axes by the
+/// same factor (so `w/h` is preserved) and re-anchor at the resize
+/// handle's fixed corner. Then snap any out-of-bounds origin back in.
+fn fit_aspect_to_image(
+    rect: &CropRect,
+    handle: Handle,
+    ratio: f32,
+    image_w: u32,
+    image_h: u32,
+) -> CropRect {
+    let iw = image_w as f32;
+    let ih = image_h as f32;
+    // Largest ratio-true (w, h) that fits the image.
+    let max_w = iw.min(ih * ratio);
+    let max_h = max_w / ratio;
+    let mut w = rect.w.min(max_w).max(MIN_EXTENT);
+    let mut h = rect.h.min(max_h).max(MIN_EXTENT);
+    // Re-tie w/h after the per-axis min so the ratio is exact.
+    if (w / h - ratio).abs() > 1e-4 {
+        if w / ratio <= max_h {
+            h = w / ratio;
+        } else {
+            w = h * ratio;
+        }
+    }
+    // Anchor at the handle's fixed corner, then nudge fully in-bounds.
+    let (anchor_x, anchor_y) = anchor_of(rect, handle);
+    let mut x = if anchor_x <= rect.x {
+        anchor_x
+    } else {
+        anchor_x - w
+    };
+    let mut y = if anchor_y <= rect.y {
+        anchor_y
+    } else {
+        anchor_y - h
+    };
+    x = x.clamp(0.0, (iw - w).max(0.0));
+    y = y.clamp(0.0, (ih - h).max(0.0));
+    CropRect { x, y, w, h }
 }
 
 /// Move-clamp: translate the rect fully back inside the image (preserving
@@ -542,6 +595,30 @@ mod tests {
             out.w,
             out.h
         );
+    }
+
+    #[test]
+    fn image_editor_crop_aspect_fits_image_preserving_ratio() {
+        // A 2×1 image with a 1:1 lock: the square must FIT (1×1), ratio
+        // preserved — not a per-axis clip that would leave 2×1.
+        let r = CropRect::full(2, 1);
+        let out = apply_drag(
+            &r,
+            Handle::BottomRight,
+            (2.0, 1.0),
+            (2.0, 1.0),
+            AspectLock::Square,
+            2,
+            1,
+        );
+        assert!(
+            (out.w - out.h).abs() < 1e-3,
+            "ratio preserved: {}x{}",
+            out.w,
+            out.h
+        );
+        assert!(out.w <= 2.0 + 1e-3 && out.h <= 1.0 + 1e-3, "fits the image");
+        assert!((out.w - 1.0).abs() < 1e-3, "largest 1:1 in 2×1 is 1×1");
     }
 
     #[test]

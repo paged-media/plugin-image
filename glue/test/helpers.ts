@@ -7,7 +7,7 @@
 
 import { vi } from "vitest";
 
-import type { PagedEditor } from "@paged-media/plugin-api";
+import type { ElementGeometryItem, PagedEditor } from "@paged-media/plugin-api";
 
 export function fakeRegistry() {
   const byId = new Map<string, { id: string }>();
@@ -55,6 +55,15 @@ export function makeFakeEditor() {
   const panels = fakeRegistry();
   const commands = fakeRegistry();
   const importers = fakeRegistry();
+  const tools = fakeRegistry();
+  // The overlay signal sink (host.overlay.setToolPreview forwards here);
+  // records the last published shape so a test can assert the crop frame.
+  const overlayShapes: unknown[] = [];
+  const overlaySignals = {
+    setToolPreview: (shape: unknown) => {
+      overlayShapes.push(shape);
+    },
+  };
   const subscribers = new Set<(msg: unknown) => void>();
   const sceneLayers = {
     submit: vi.fn(async () => {}),
@@ -117,8 +126,11 @@ export function makeFakeEditor() {
   };
   /** elementId → placed ORIGINAL bytes (the C-5 store). */
   const placed = new Map<string, Uint8Array>();
+  /** elementId → element geometry (the crop tool's frame-box read). */
+  const geometry = new Map<string, ElementGeometryItem>();
   const editor = {
-    registries: { panels, commands, importers },
+    registries: { panels, commands, importers, tools },
+    overlaySignals,
     selection: {
       elementSelection: [] as unknown[],
       setElementSelection: () => {},
@@ -132,7 +144,10 @@ export function makeFakeEditor() {
       documentMeta: async () => ({ pageCount: 1, activePage: "pg1" }),
       collection: async () => [],
       setElementSelection: async (ids: unknown[]) => ids,
-      elementGeometry: async () => [],
+      elementGeometry: async (ids: Array<{ id?: string }>) =>
+        ids
+          .map((i) => (i.id ? geometry.get(i.id) : undefined))
+          .filter((g): g is ElementGeometryItem => g !== undefined),
       subscribe: (fn: (msg: unknown) => void) => {
         subscribers.add(fn);
         return () => subscribers.delete(fn);
@@ -190,8 +205,11 @@ export function makeFakeEditor() {
     panels,
     commands,
     importers,
+    tools,
     sceneLayers,
     images,
+    overlayShapes,
+    geometry,
     imageClaims,
     imageReleases,
     imageSubmits,

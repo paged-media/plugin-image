@@ -12,7 +12,8 @@
     "rendering": [
       "sceneLayer",
       "hitTest",
-      "resourceProvider"
+      "resourceProvider",
+      "overlay"
     ],
     "assets": [
       "images"
@@ -40,7 +41,11 @@
     "commands": [
       "media.paged.image.command.openImage",
       "media.paged.image.command.adjustSelected",
-      "media.paged.image.command.claimTiles"
+      "media.paged.image.command.claimTiles",
+      "media.paged.image.command.commitCrop"
+    ],
+    "tools": [
+      "media.paged.image.tool.crop"
     ],
     "importers": [
       "media.paged.image.importer.raster"

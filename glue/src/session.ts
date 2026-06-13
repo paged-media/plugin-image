@@ -19,9 +19,22 @@ import {
   IDENTITY_PARAMS,
   type AdjustParams,
   type ImageEngine,
+  type ImageHistogram,
+  type LevelsParams,
 } from "./engine";
 import { claimImageTiles } from "./tile-provider";
 import { createDecodePool, type DecodePool } from "./decode-pool";
+import { createCropMachine, type CropMachine } from "./crop-machine";
+
+/** A deep clone of the identity adjustment params (the nested `levels`
+ *  object must not be shared between the live params and the constant). */
+function freshIdentityParams(): AdjustParams {
+  return {
+    ...IDENTITY_PARAMS,
+    levels: { ...IDENTITY_PARAMS.levels },
+    curveLut: null,
+  };
+}
 
 /** The ingested source image (engine-held pixels behind `handle`). */
 export interface SourceImage {
@@ -47,6 +60,10 @@ export interface ImageSessionState {
   gpu: boolean;
   source: SourceImage | null;
   params: AdjustParams;
+  /** The active image's RGB + luma histogram (the levels/curves panel
+   *  readout), or null until an image is ingested. Recomputed on ingest
+   *  and after a crop commit (it follows the engine-held pixels). */
+  histogram: ImageHistogram | null;
   /** A scene layer is currently submitted for `compositedFrame`. */
   compositedFrame: string | null;
   busy: boolean;
@@ -62,6 +79,20 @@ export interface ImageSession {
   /** Ingest opened/dropped file bytes (the K-2 importer path). */
   importBytes(name: string, bytes: Uint8Array): Promise<boolean>;
   setParams(p: Partial<AdjustParams>): void;
+  /** Set the composite levels (merged into params.levels). */
+  setLevels(l: Partial<LevelsParams>): void;
+  /** Build + set the curves tone LUT from `(input, output)` control points
+   *  in [0,1] (an empty / identity set clears the curve). */
+  setCurvePoints(points: Array<[number, number]>): void;
+  /** The crop interaction machine for the ingested image (null until an
+   *  image is ingested + the engine is ready). The crop tool's gesture and
+   *  the panel's crop controls drive it. */
+  cropMachine(): CropMachine | null;
+  /** Commit the crop: cut the machine's rect out of the source image, swap
+   *  the engine-held source to the cropped result, recompute the
+   *  histogram, and re-composite in-frame. Returns false when there is
+   *  nothing to crop or the rect is empty. */
+  commitCrop(): Promise<boolean>;
   /** COMMITTED apply: adjust on the GPU + submit the in-frame layer. */
   apply(): Promise<boolean>;
   /** C-6 — claim the ingested image's tile resource so the renderer
@@ -98,6 +129,8 @@ export function createImageSession(host: BundleHost): ImageSession {
   // grants none → the session decodes on the main thread instead).
   let decodePool: DecodePool | null = null;
   let decodePoolPromise: Promise<DecodePool | null> | null = null;
+  // The crop interaction machine for the live source (rebuilt on ingest).
+  let cropMachineRef: CropMachine | null = null;
   let disposed = false;
 
   const state: ImageSessionState = {
@@ -105,7 +138,8 @@ export function createImageSession(host: BundleHost): ImageSession {
     engineDetail: null,
     gpu: false,
     source: null,
-    params: { ...IDENTITY_PARAMS },
+    params: freshIdentityParams(),
+    histogram: null,
     compositedFrame: null,
     busy: false,
     status: "Select a placed image frame, then ingest.",
@@ -210,6 +244,24 @@ export function createImageSession(host: BundleHost): ImageSession {
     releaseTiles();
     if (state.source && engine) engine.freeImage(state.source.handle);
     state.source = null;
+    state.histogram = null;
+    cropMachineRef = null;
+  };
+
+  /** Recompute the histogram + (re)build the crop machine for the live
+   *  engine-held source. Called after a decode/ingest and after a crop
+   *  commit (both change the source pixels). The histogram is the panel's
+   *  levels/curves readout. A histogram-read failure is non-fatal (the
+   *  panel just shows no histogram). */
+  const refreshSourceReadout = () => {
+    if (!engine || !state.source) return;
+    try {
+      state.histogram = engine.histogram(state.source.handle);
+    } catch (err) {
+      host.log.debug("histogram read failed", err);
+      state.histogram = null;
+    }
+    cropMachineRef = createCropMachine(engine, state.source.width, state.source.height);
   };
 
   const clearLayer = async () => {
@@ -240,6 +292,8 @@ export function createImageSession(host: BundleHost): ImageSession {
         origin,
         elementId,
       };
+      // Compute the levels/curves histogram + build the crop machine.
+      refreshSourceReadout();
       const lane = decodePool ? " (off-thread)" : "";
       setStatus(`${name} — ${info.width}×${info.height} decoded${lane}.`);
       return true;
@@ -262,7 +316,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
   });
 
-  return {
+  const api: ImageSession = {
     state: () => state,
 
     onDidChange(listener) {
@@ -333,6 +387,65 @@ export function createImageSession(host: BundleHost): ImageSession {
     setParams(p) {
       state.params = { ...state.params, ...p };
       emit();
+    },
+
+    setLevels(l) {
+      state.params = {
+        ...state.params,
+        levels: { ...state.params.levels, ...l },
+      };
+      emit();
+    },
+
+    setCurvePoints(points) {
+      if (!engine) return;
+      // The identity curve [(0,0),(1,1)] clears the LUT (no curve pass).
+      const isIdentityCurve =
+        points.length === 2 &&
+        points[0][0] === 0 &&
+        points[0][1] === 0 &&
+        points[1][0] === 1 &&
+        points[1][1] === 1;
+      state.params = {
+        ...state.params,
+        curveLut: isIdentityCurve ? null : engine.curveLut(points),
+      };
+      emit();
+    },
+
+    cropMachine() {
+      return cropMachineRef;
+    },
+
+    async commitCrop() {
+      const src = state.source;
+      if (!src || !engine || !cropMachineRef) {
+        setStatus("Nothing to crop — ingest a placed image first.");
+        return false;
+      }
+      let cropped: { handle: number; width: number; height: number };
+      try {
+        cropped = cropMachineRef.commit(engine, src.handle);
+      } catch (err) {
+        setStatus(`Crop failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      // Swap the engine-held source to the cropped image (free the old
+      // pixels; a tile claim points at the old handle, so release it).
+      releaseTiles();
+      engine.freeImage(src.handle);
+      src.handle = cropped.handle;
+      src.width = cropped.width;
+      src.height = cropped.height;
+      refreshSourceReadout();
+      setStatus(
+        `Cropped to ${cropped.width}×${cropped.height} ` +
+          "(document unchanged — engine source only; Apply to recomposite).",
+      );
+      // Re-composite the cropped pixels in-frame when a frame is targeted.
+      if (src.elementId) await api.apply();
+      else emit();
+      return true;
     },
 
     async apply() {
@@ -466,7 +579,8 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
 
     async reset() {
-      state.params = { ...IDENTITY_PARAMS };
+      state.params = freshIdentityParams();
+      cropMachineRef?.reset(state.source?.width ?? 0, state.source?.height ?? 0);
       await clearLayer();
       setStatus("Reset — in-frame preview cleared.");
     },
@@ -486,4 +600,5 @@ export function createImageSession(host: BundleHost): ImageSession {
       listeners.clear();
     },
   };
+  return api;
 }

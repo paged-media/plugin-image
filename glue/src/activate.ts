@@ -9,14 +9,16 @@
 // loadBundleWasm's no-authority sandbox (BREAKAGE I-07).
 
 import type { BundleHandle, BundleHost } from "@paged-media/plugin-api";
-import { contributePanel } from "@paged-media/plugin-sdk";
+import { contributePanel, contributeTool } from "@paged-media/plugin-sdk";
 
 import manifest from "@paged-media/image-manifest/manifest.json";
 
 import { createImageSession } from "./session";
 import { makeImagePanel } from "./panels/image-panel";
+import { makeCropGesture } from "./crop-tool";
 
 const PANEL_ID = "media.paged.image.panel.adjustments";
+const CROP_TOOL_ID = "media.paged.image.tool.crop";
 
 export function activate(host: BundleHost): BundleHandle {
   const session = createImageSession(host);
@@ -63,6 +65,32 @@ export function activate(host: BundleHost): BundleHandle {
     handler: () => {
       host.shell.openPanel(PANEL_ID);
       session.claimTiles();
+    },
+  });
+
+  // Crop + straighten TOOL (the on-canvas crop affordance). Registers
+  // into the transform rail; its gesture drives the session's crop machine
+  // (image_core::crop geometry) and renders the crop frame through the
+  // LIVE host.overlay door. The COMMIT rides the commitCrop command (and
+  // the panel button) so it's a deliberate, single action.
+  contributeTool(host, {
+    id: CROP_TOOL_ID,
+    title: "Crop",
+    icon: "tool-crop",
+    group: CROP_TOOL_ID,
+    section: "transform",
+    shortcut: "c",
+    gesture: () => makeCropGesture(host, session),
+  });
+
+  // The crop commit command (also surfaced as the panel's "Apply crop"
+  // button): cut the machine's rect out of the engine source + recomposite.
+  host.contribute.command({
+    id: "media.paged.image.command.commitCrop",
+    title: "Apply crop",
+    category: "Image",
+    handler: () => {
+      void session.commitCrop();
     },
   });
 

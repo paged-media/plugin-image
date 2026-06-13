@@ -17,12 +17,40 @@
 // import REJECTS — bootEngine surfaces that honestly so the panel can
 // say "engine wasm not built".
 
-/** The committed adjustment parameters (identity: 0 / 0 / 1 / 1). */
+/** Levels (the panel's black/white/gamma + output range), composite over
+ *  all channels. Identity: in 0/1, gamma 1, out 0/1. */
+export interface LevelsParams {
+  inBlack: number;
+  inWhite: number;
+  gamma: number;
+  outBlack: number;
+  outWhite: number;
+}
+
+export const IDENTITY_LEVELS: LevelsParams = {
+  inBlack: 0,
+  inWhite: 1,
+  gamma: 1,
+  outBlack: 0,
+  outWhite: 1,
+};
+
+/** The committed adjustment parameters. Identity = every field neutral:
+ *  exposure 0 / brightness 0 / contrast 1 / saturation 1, white balance
+ *  0/0, levels identity, no curve LUT. */
 export interface AdjustParams {
   exposureEv: number;
   brightness: number;
   contrast: number;
   saturation: number;
+  /** White balance: temp (amber↔blue), tint (green↔magenta); 0/0 = off. */
+  temp: number;
+  tint: number;
+  /** Composite levels (all channels). */
+  levels: LevelsParams;
+  /** Curves: a 256-byte tone LUT (built from the curve editor's control
+   *  points via `engine.curveLut`), or null for the identity curve. */
+  curveLut: Uint8Array | null;
 }
 
 export const IDENTITY_PARAMS: AdjustParams = {
@@ -30,16 +58,70 @@ export const IDENTITY_PARAMS: AdjustParams = {
   brightness: 0,
   contrast: 1,
   saturation: 1,
+  temp: 0,
+  tint: 0,
+  levels: { ...IDENTITY_LEVELS },
+  curveLut: null,
 };
+
+function levelsIdentity(l: LevelsParams): boolean {
+  return (
+    l.inBlack === 0 &&
+    l.inWhite === 1 &&
+    l.gamma === 1 &&
+    l.outBlack === 0 &&
+    l.outWhite === 1
+  );
+}
 
 export function isIdentity(p: AdjustParams): boolean {
   return (
     p.exposureEv === 0 &&
     p.brightness === 0 &&
     p.contrast === 1 &&
-    p.saturation === 1
+    p.saturation === 1 &&
+    p.temp === 0 &&
+    p.tint === 0 &&
+    levelsIdentity(p.levels) &&
+    p.curveLut === null
   );
 }
+
+/** True when ONLY the base exposure/brightness/contrast/saturation are set
+ *  (no WB / levels / curves) — the legacy `adjust_image` fast path. */
+function isBaseOnly(p: AdjustParams): boolean {
+  return (
+    p.temp === 0 &&
+    p.tint === 0 &&
+    levelsIdentity(p.levels) &&
+    p.curveLut === null
+  );
+}
+
+/** The RGB + luma histogram of an image (4 × 256 bins; the panel renders
+ *  it). Each channel's bins sum to the pixel count. */
+export interface ImageHistogram {
+  r: Uint32Array;
+  g: Uint32Array;
+  b: Uint32Array;
+  luma: Uint32Array;
+}
+
+/** The 8 crop grips + the body Move (discriminants mirror the Rust
+ *  `image_core::Handle`); -1 = a miss (outside the chrome). */
+export type CropHandle = number;
+
+/** An axis-aligned crop rectangle in image-pixel space. */
+export interface CropRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Aspect-ratio lock encoded for the wasm geometry: `null` (free) or a
+ *  `w:h` ratio pair. */
+export type AspectLock = { w: number; h: number } | null;
 
 /** A decoded image held ENGINE-SIDE behind a handle (spec §2.1.3 —
  *  pixels stay in wasm between calls). */
@@ -68,10 +150,40 @@ export interface ImageEngine {
    *  returning a handle for the GPU adjust + tile paths. `rgba` must be
    *  `width*height*4` bytes; a mismatch throws. */
   ingestRgba8(width: number, height: number, rgba: Uint8Array): DecodedInfo;
-  /** Run the adjustments chain (GPU) and return straight RGBA8 — the
-   *  C-1 Stage-A scene-item payload. Identity params return the decode
-   *  verbatim without touching the GPU. */
+  /** Run the adjustments chain (GPU for the kernel stages + a CPU curve
+   *  LUT pass) and return straight RGBA8 — the C-1 Stage-A scene-item
+   *  payload. Identity params return the decode verbatim without touching
+   *  the GPU; the FULL panel set (WB / levels / curves) routes through the
+   *  extended surface. */
   adjust(handle: number, params: AdjustParams): Promise<Uint8Array>;
+  /** Compute the RGB + luma 256-bin histogram of an engine-held image
+   *  (the LEVELS / CURVES panel readout). Pure CPU reduction; no GPU. */
+  histogram(handle: number): ImageHistogram;
+  /** Commit a CROP: cut the integer pixel rectangle out of an engine-held
+   *  image and register the result as a NEW engine-held image, returning
+   *  its handle. The source handle is left intact. Throws on an empty /
+   *  out-of-bounds rectangle. */
+  crop(handle: number, rect: CropRect): DecodedInfo;
+  /** Hit-test the crop chrome (the nearest grip within `tol`, else Move
+   *  inside the body, else -1). Pure geometry from `image_core::crop`. */
+  cropHitHandle(rect: CropRect, point: [number, number], tol: number): CropHandle;
+  /** Apply a pointer drag at `handle` to the crop rect, with the aspect
+   *  lock + image-extent clamp. Returns the new rect. */
+  cropApplyDrag(
+    rect: CropRect,
+    handle: CropHandle,
+    start: [number, number],
+    point: [number, number],
+    aspect: AspectLock,
+    imageW: number,
+    imageH: number,
+  ): CropRect;
+  /** The four crop-FRAME corners rotated by the straighten `degrees`
+   *  (TL, TR, BR, BL) — the closed polyline the overlay draws. */
+  cropFrameCorners(rect: CropRect, degrees: number): Array<[number, number]>;
+  /** Build a 256-byte tone LUT from the curve editor's `(input, output)`
+   *  control points in [0,1] (the LUT `adjust` consumes for curves). */
+  curveLut(points: Array<[number, number]>): Uint8Array;
   /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
    *  image as tightly packed RGBA8. Edge tiles are clamped to the image
    *  extent; a fully-outside window returns an empty buffer. The honest
@@ -108,6 +220,61 @@ export interface ImageWasmModule {
     contrast: number,
     saturation: number,
   ): Promise<Uint8Array>;
+  adjust_image_full(
+    handle: number,
+    exposure_ev: number,
+    brightness: number,
+    contrast: number,
+    saturation: number,
+    temp: number,
+    tint: number,
+    in_black: number,
+    in_white: number,
+    gamma: number,
+    out_black: number,
+    out_white: number,
+    curve_lut: Uint8Array,
+  ): Promise<Uint8Array>;
+  image_histogram(handle: number): Uint32Array;
+  crop_image(
+    handle: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ): DecodedHandleWasm;
+  crop_hit_handle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    px: number,
+    py: number,
+    tol: number,
+  ): number;
+  crop_apply_drag(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    handle: number,
+    sx: number,
+    sy: number,
+    px: number,
+    py: number,
+    aspect_w: number,
+    aspect_h: number,
+    image_w: number,
+    image_h: number,
+  ): Float32Array;
+  crop_frame_corners(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    degrees: number,
+  ): Float32Array;
+  curve_lut(points: Float32Array): Uint8Array;
   image_tile_rgba8(
     handle: number,
     x: number,
@@ -149,8 +316,81 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       h.free();
       return info;
     },
-    adjust: (handle, p) =>
-      wasm.adjust_image(handle, p.exposureEv, p.brightness, p.contrast, p.saturation),
+    adjust: (handle, p) => {
+      // Base-only params take the legacy 4-scalar fast path; anything in
+      // the FULL panel set (WB / levels / curves) routes to the extended
+      // surface, passing the curve LUT (empty = no curve).
+      if (isBaseOnly(p)) {
+        return wasm.adjust_image(handle, p.exposureEv, p.brightness, p.contrast, p.saturation);
+      }
+      return wasm.adjust_image_full(
+        handle,
+        p.exposureEv,
+        p.brightness,
+        p.contrast,
+        p.saturation,
+        p.temp,
+        p.tint,
+        p.levels.inBlack,
+        p.levels.inWhite,
+        p.levels.gamma,
+        p.levels.outBlack,
+        p.levels.outWhite,
+        p.curveLut ?? new Uint8Array(0),
+      );
+    },
+    histogram(handle) {
+      const flat = wasm.image_histogram(handle);
+      return {
+        r: flat.slice(0, 256),
+        g: flat.slice(256, 512),
+        b: flat.slice(512, 768),
+        luma: flat.slice(768, 1024),
+      };
+    },
+    crop(handle, rect) {
+      const h = wasm.crop_image(handle, rect.x, rect.y, rect.w, rect.h);
+      const info = { handle: h.handle, width: h.width, height: h.height };
+      h.free();
+      return info;
+    },
+    cropHitHandle: (rect, point, tol) =>
+      wasm.crop_hit_handle(rect.x, rect.y, rect.w, rect.h, point[0], point[1], tol),
+    cropApplyDrag(rect, handle, start, point, aspect, imageW, imageH) {
+      const out = wasm.crop_apply_drag(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        handle,
+        start[0],
+        start[1],
+        point[0],
+        point[1],
+        aspect ? aspect.w : 0,
+        aspect ? aspect.h : 0,
+        imageW,
+        imageH,
+      );
+      return { x: out[0], y: out[1], w: out[2], h: out[3] };
+    },
+    cropFrameCorners(rect, degrees) {
+      const f = wasm.crop_frame_corners(rect.x, rect.y, rect.w, rect.h, degrees);
+      return [
+        [f[0], f[1]],
+        [f[2], f[3]],
+        [f[4], f[5]],
+        [f[6], f[7]],
+      ];
+    },
+    curveLut(points) {
+      const flat = new Float32Array(points.length * 2);
+      for (let i = 0; i < points.length; i++) {
+        flat[i * 2] = points[i][0];
+        flat[i * 2 + 1] = points[i][1];
+      }
+      return wasm.curve_lut(flat);
+    },
     tile: (handle, x, y, w, h) => wasm.image_tile_rgba8(handle, x, y, w, h),
     freeImage: (h) => wasm.free_image(h),
   };

@@ -331,6 +331,105 @@ mod wasm {
         })
     }
 
+    // ── crop interaction GEOMETRY (pure view math; the TS crop machine
+    // forwards pointer points + renders the frame the overlay draws) ──
+    //
+    // These wrap `image_core::crop` so the deterministic, Rust-tested
+    // geometry is the ONE source of truth (the TS stays thin). A crop rect
+    // crosses the boundary as `[x, y, w, h]`; the aspect lock is encoded as
+    // `aspect_w`/`aspect_h` (0/0 = free, equal = square, else the ratio).
+
+    /// Decode an aspect lock from the `(aspect_w, aspect_h)` wire pair:
+    /// `(0, _)`/`(_, 0)` → free; otherwise the `w:h` ratio.
+    fn decode_aspect(aspect_w: f32, aspect_h: f32) -> image_core::AspectLock {
+        if aspect_w <= 0.0 || aspect_h <= 0.0 {
+            image_core::AspectLock::Free
+        } else {
+            image_core::AspectLock::Ratio(aspect_w, aspect_h)
+        }
+    }
+
+    /// Hit-test the crop chrome at `(px, py)` (image-px) against the rect
+    /// `[x, y, w, h]` with grab radius `tol`. Returns the [`image_core::
+    /// Handle`] discriminant (0..=7 grips, 8 = body Move) or `-1` for a
+    /// miss — the TS machine maps it to a cursor + the active grip.
+    #[wasm_bindgen]
+    pub fn crop_hit_handle(x: f32, y: f32, w: f32, h: f32, px: f32, py: f32, tol: f32) -> i32 {
+        let rect = image_core::CropRect { x, y, w, h };
+        match image_core::hit_handle(&rect, (px, py), tol) {
+            Some(handle) => handle as i32,
+            None => -1,
+        }
+    }
+
+    /// Apply a pointer drag from `(sx, sy)` to `(px, py)` (image-px) to the
+    /// rect `[x, y, w, h]` at `handle` (the [`crop_hit_handle`]
+    /// discriminant), with the aspect lock + image-extent clamp. Returns
+    /// the new rect as `[x, y, w, h]`. An unknown handle returns the rect
+    /// unchanged (defensive).
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn crop_apply_drag(
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        handle: i32,
+        sx: f32,
+        sy: f32,
+        px: f32,
+        py: f32,
+        aspect_w: f32,
+        aspect_h: f32,
+        image_w: u32,
+        image_h: u32,
+    ) -> Vec<f32> {
+        let rect = image_core::CropRect { x, y, w, h };
+        let handle = match handle {
+            0 => image_core::Handle::TopLeft,
+            1 => image_core::Handle::Top,
+            2 => image_core::Handle::TopRight,
+            3 => image_core::Handle::Right,
+            4 => image_core::Handle::BottomRight,
+            5 => image_core::Handle::Bottom,
+            6 => image_core::Handle::BottomLeft,
+            7 => image_core::Handle::Left,
+            8 => image_core::Handle::Move,
+            _ => return vec![rect.x, rect.y, rect.w, rect.h],
+        };
+        let out = image_core::apply_drag(
+            &rect,
+            handle,
+            (sx, sy),
+            (px, py),
+            decode_aspect(aspect_w, aspect_h),
+            image_w,
+            image_h,
+        );
+        vec![out.x, out.y, out.w, out.h]
+    }
+
+    /// The four corners of the crop FRAME rotated by the straighten
+    /// `degrees`, as a flat `[x0,y0, x1,y1, x2,y2, x3,y3]` (TL, TR, BR, BL)
+    /// the overlay draws as a closed polyline.
+    #[wasm_bindgen]
+    pub fn crop_frame_corners(x: f32, y: f32, w: f32, h: f32, degrees: f32) -> Vec<f32> {
+        let rect = image_core::CropRect { x, y, w, h };
+        let c = image_core::frame_corners(&rect, degrees);
+        vec![
+            c[0].0, c[0].1, c[1].0, c[1].1, c[2].0, c[2].1, c[3].0, c[3].1,
+        ]
+    }
+
+    /// Build a 256-byte tone LUT from flat `[i0,o0, i1,o1, …]` curve
+    /// control points in `[0,1]` (the CURVES editor's points) — the LUT
+    /// `adjust_image_full` consumes. Wraps `image_core::curve_lut`.
+    #[wasm_bindgen]
+    pub fn curve_lut(points: &[f32]) -> Vec<u8> {
+        let pts: Vec<(f32, f32)> = points.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+        image_core::curve_lut(&pts).to_vec()
+    }
+
     /// C-6 (I-06) — copy a LEVEL-0 tile window `(x, y, w, h)` out of a
     /// decoded image as tightly packed RGBA8 (`w*h*4` bytes, row-major).
     /// Edge tiles are clamped to the image extent (the caller passes the

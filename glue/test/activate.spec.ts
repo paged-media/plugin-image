@@ -23,7 +23,7 @@ function load(
 }
 
 describe("imageBundle.activate", () => {
-  it("registers the panel, the commands, and the raster importer", () => {
+  it("registers the panel, the commands, the crop tool, and the raster importer", () => {
     const fake = makeFakeEditor();
     load(fake);
     expect(fake.panels.ids()).toEqual([PANEL_ID]);
@@ -31,7 +31,9 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.openImage",
       "media.paged.image.command.adjustSelected",
       "media.paged.image.command.claimTiles",
+      "media.paged.image.command.commitCrop",
     ]);
+    expect(fake.tools.ids()).toEqual(["media.paged.image.tool.crop"]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);
   });
 
@@ -63,6 +65,7 @@ describe("imageBundle.activate", () => {
     loaded.dispose();
     expect(fake.panels.ids()).toHaveLength(0);
     expect(fake.commands.ids()).toHaveLength(0);
+    expect(fake.tools.ids()).toHaveLength(0);
     expect(fake.importers.ids()).toHaveLength(0);
   });
 });
