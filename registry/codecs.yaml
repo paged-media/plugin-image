@@ -140,7 +140,7 @@
 
 - id: image.codec.avif
   state_row: image.codec.avif
-  tier: planned          # DECODE deferred — no acceptable pure-Rust, permissively-licensed AV1 decoder exists (2026-06)
+  tier: planned          # DECODE blocked (no permissive pure-Rust AV1 *library* decoder, 2026-06-13); ENCODE license-clean (ravif/rav1e BSD) but wasm-budget-deferred
   # VERDICT (Phase 4e dependency audit, decode-only adapter): SKIPPED, no
   # code landed. The spec §10.3 matrix names "rav1d / rav1e" for AVIF and
   # "wasm build of rav1d validated in M1", but the dependency landscape as
@@ -159,14 +159,105 @@
   #     dual-licensed AGPL-3.0 OR commercial. REJECTED: AGPL-3.0 is NOT in
   #     deny.toml's allow-list and is incompatible with the MPL-2.0/PMEL
   #     distribution posture (would fail `cargo deny check licenses`).
-  # CONCLUSION: there is no pure-Rust, permissively-licensed AVIF/AV1
-  # decoder that passes cargo deny today. Per the Phase 4e instruction,
-  # recorded honestly and SKIPPED — no C vendored, no AGPL pulled. Re-open
-  # when rav1d ships its planned Rust API under BSD-2 (the spec's intended
-  # path), or a permissive pure-Rust AV1 decoder matures. Encode was always
-  # deferred regardless.
-  decision: "DEFERRED 2026-06 — no pure-Rust permissive AV1 decoder passes cargo deny (avif-decode/dav1d-rs need C; rav1d is C-API-only; rav1d-safe is AGPL-3.0). Re-open on rav1d's planned BSD-2 Rust API."
+  # RE-AUDIT (Phase 9 Tier-B sweep, 2026-06-13): the DECODE verdict STANDS
+  # but the ENCODE side has changed — recording the split honestly.
+  #
+  # DECODE — still blocked. Re-checked rav1d (memorysafety) on 2026-06-13:
+  #   its README still says "A Rust API is planned for addition in the
+  #   future" and it exposes only the C-compatible dav1d_* surface (+ nasm
+  #   for x86 asm). NOT consumable as a pure-Rust *library*. avif-decode/
+  #   aom-decode (libaom C) and dav1d-rs (libdav1d C) remain C. rav1d-safe
+  #   (imazen) remains AGPL-3.0 OR commercial → fails cargo deny. So there
+  #   is still NO pure-Rust, permissive, library-API AV1 *decoder* that
+  #   passes cargo deny. Decode stays deferred; no code landed.
+  #
+  # ENCODE — now LICENSE-UNBLOCKED, deferred ONLY on the wasm budget.
+  #   Verified 2026-06-13: `ravif` (encode-only, `encode_rgba()`) is
+  #   BSD-3-Clause pure-Rust over `rav1e` (BSD-2-Clause, no mandatory C;
+  #   the default `asm`/nasm path is x86-only and disableable via
+  #   default-features / RAV1E_CPU_TARGET=rust). Both BSD variants are on
+  #   deny.toml's allow-list, so an AVIF *encode* adapter is no longer
+  #   license-blocked. NOT BUILT here, deliberately, for two reasons:
+  #     (1) WASM BUDGET (I-07): rav1e is ~257k SLoC of AV1 entropy coding +
+  #         transform + a deep dep tree (crossbeam/rayon/…); pulling it into
+  #         image-js would very likely blow the 8 MiB budget (the current
+  #         artifact is ~0.5 MiB — see scripts/build-wasm.sh). Encode-only
+  #         AVIF does not earn that cost on the editable-RGBA lane today.
+  #     (2) NO ROUND-TRIP PROOF: with no permissive decoder, an encode
+  #         adapter cannot be conformance-tested by encode→decode identity
+  #         (only "valid ISOBMFF container header" assertions) — a weak gate
+  #         for a frozen codec trait. Pairs poorly with the budget cost.
+  #   Re-open encode when the budget has headroom (a code-split / lazy AVIF
+  #   encode module, native-only encode, or a slimmer pure-Rust AV1 encoder)
+  #   AND a permissive decoder lands to close the round-trip loop.
+  decision: "DEFERRED — DECODE still blocked (rav1d C-API-only as of 2026-06-13; avif-decode/dav1d-rs C; rav1d-safe AGPL). ENCODE now license-clean via ravif BSD-3 + rav1e BSD-2 but deferred on the 8 MiB wasm budget (I-07, ~257k-SLoC rav1e) + no round-trip oracle. Re-open encode on budget headroom + a permissive decoder."
   provenance:
-    - "AV1 / ISOBMFF (AVIF) — adapter pending an acceptable pure-Rust decoder dependency"
+    - "AV1 / ISOBMFF (AVIF) — decode pending a permissive pure-Rust library-API decoder; encode candidate = ravif (BSD-3) over rav1e (BSD-2), deferred on the wasm budget"
+  tests:
+    rust: []
+
+- id: image.codec.jxl
+  state_row: image.codec.avif   # no dedicated state row yet; the v2-format slot tracks beside AVIF until split
+  tier: planned          # v2 (spec §10.3); DECODE license-clean (jxl-oxide) but budget+scope-deferred; ENCODE blocked-on-ecosystem (AGPL)
+  # VERDICT (Phase 9 Tier-B sweep, 2026-06-13): SCOPED NON-GOAL for v1, with
+  # an honest decode/encode split. No code landed — NO build (the format is
+  # explicitly v2 in the §10.3 matrix), but the dependency landscape is
+  # recorded so the re-open trigger is precise.
+  #
+  # DECODE — now license-clean, deferred on budget + v2 scope.
+  #   `jxl-oxide` (tirr-c) is a pure-Rust JPEG XL DECODER, dual MIT OR
+  #   Apache-2.0 — both on deny.toml's allow-list (verified 2026-06-13,
+  #   latest 0.12.x). It is genuinely consumable as a Rust library
+  #   (`JxlImage::builder()…render_frame()` → a FrameBuffer). So a JXL
+  #   *decode* adapter is no longer license-blocked. NOT BUILT here because:
+  #     (1) v2 SCOPE — the format matrix (§10.3) lists JPEG XL as ⏸/v2; this
+  #         conservative sweep does not pull a v2 format forward.
+  #     (2) WASM BUDGET (I-07) — jxl-oxide is a stack of ~10 jxl-* crates +
+  #         brotli-decompressor; a full JXL decode path is a non-trivial
+  #         size add against the 8 MiB budget, unjustified for a v2 format
+  #         on the editable-RGBA lane.
+  #
+  # ENCODE — BLOCKED ON ECOSYSTEM (no permissive pure-Rust encoder).
+  #   The only pure-Rust JPEG XL *encoder* (`jxl-encoder` / the jxl_encoder
+  #   crate, imazen, 0.3.x) is licensed AGPL-3.0-only OR a commercial
+  #   Imazen license. AGPL-3.0 is NOT on deny.toml's allow-list and is
+  #   incompatible with the MPL-2.0/PMEL distribution posture — it would
+  #   fail `cargo deny check licenses`. There is no BSD/MIT/Apache pure-Rust
+  #   JXL encoder as of 2026-06-13 (libjxl itself is C++ — rejected by the
+  #   no-C-in-default-build rule). JXL encode is therefore a genuine
+  #   blocked-on-ecosystem item, exactly the honest state.
+  #
+  # RE-OPEN when JXL is promoted to v1 scope AND (decode) the budget has
+  # headroom for the jxl-oxide stack, and (encode) a permissively-licensed
+  # pure-Rust JXL encoder matures. Do NOT vendor libjxl (C++).
+  decision: "v2 NON-GOAL (2026-06-13). DECODE license-clean via jxl-oxide (MIT OR Apache-2.0, pure-Rust) but deferred on v2 scope + the 8 MiB wasm budget (~10 jxl-* crates + brotli). ENCODE blocked-on-ecosystem: the only pure-Rust JXL encoder (jxl-encoder) is AGPL-3.0/commercial → fails cargo deny; libjxl is C++. No build."
+  provenance:
+    - "JPEG XL (ISO/IEC 18181) — decode candidate jxl-oxide (MIT OR Apache-2.0); encode blocked (jxl-encoder is AGPL-3.0/commercial; libjxl is C++)"
+  tests:
+    rust: []
+
+- id: image.codec.raw_heic
+  state_row: image.codec.avif   # placeholder; explicit-NON-GOAL marker, no own state row
+  tier: out-of-scope     # explicit NON-GOAL (Phase 9, 2026-06-13) — see base-idea §1.1
+  # VERDICT: EXPLICIT NON-GOAL, not a deferral. Camera-RAW (CR2/CR3/NEF/ARW/
+  # DNG/…) and HEIC/HEIF are OUT OF paged.image's lane by design, and the
+  # dependency landscape confirms it would also break the constitution:
+  #   - RAW developing (demosaic, per-sensor color science, highlight
+  #     recovery) is a whole subsystem, not a codec. The ecosystem decoders
+  #     are libraw (C++, LGPL-2.1/CDDL) and rawloader/rawler (pure-Rust but
+  #     LGPL-2.1) — LGPL is NOT on deny.toml's allow-list, and RAW is a
+  #     camera-developer product, not an editable-RGBA/PSD lane.
+  #   - HEIC/HEIF decode needs libheif (C, LGPL-3) over an HEVC decoder
+  #     (libde265 C, or the same AV1 wall as AVIF). C + LGPL → rejected twice
+  #     over (no-C-in-default-build §1.1; allow-list).
+  # paged.image's lane is the EDITABLE RGBA/PSD pipeline (the published-
+  # design raster surface), not a RAW developer or a HEVC/HEIF container
+  # reader. If a placed-RAW/HEIC asset must be ingested, that is a
+  # DOCUMENT-LINK / external-rasterize concern (a host/native pre-rasterize
+  # step handing RGBA in), NOT a codec adapter this crate ships. No build,
+  # no dependency, ever — recorded so the question stays closed.
+  decision: "EXPLICIT NON-GOAL (2026-06-13). Camera-RAW + HEIC/HEIF are out of the editable-RGBA/PSD lane and need heavy/non-permissive decoders (libraw/rawler LGPL; libheif C/LGPL-3 over HEVC). Not a codec this crate ships; at most a host-side document-link rasterize into RGBA. No build. See base-idea §1.1."
+  provenance:
+    - "camera-RAW developing + HEIC/HEIF — out of scope (LGPL/C decoders; a developer/container concern, not the editable-RGBA lane)"
   tests:
     rust: []
