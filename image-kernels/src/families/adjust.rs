@@ -529,6 +529,87 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
 "
 );
 
+// ─────────────────────────── white_balance ─────────────────────────
+//
+// Temperature/tint white balance as per-channel von-Kries-style gains on
+// UNpremultiplied rgb. `temp` warms (+R, −B) along the amber↔blue axis;
+// `tint` shifts the green↔magenta axis (+G). The per-channel gains:
+//   gr = 1 + temp,  gg = 1 + tint,  gb = 1 − temp
+// so c' = (gr·r, gg·g, gb·b), then re-premultiply by the original alpha.
+// Identity = {0, 0} (all gains 1). A gray-point eyedropper in the panel
+// resolves to a (temp, tint) that neutralizes the picked pixel; this
+// kernel only consumes the resolved gains (the pick math is panel-side).
+// Pure multiply — no transcendental, so the tolerance is the unpremul
+// f16-amplification floor (ChannelEpsF16(4), the family default).
+
+/// White-balance params: `temp` (amber↔blue) and `tint` (green↔magenta);
+/// both 0 = identity.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustWhiteBalanceParams {
+    pub temp: f32,
+    pub tint: f32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustWhiteBalanceParams {
+    pub fn new(temp: f32, tint: f32) -> Self {
+        Self {
+            temp,
+            tint,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const WHITE_BALANCE_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "temp",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "tint",
+        wgsl_ty: "f32",
+    },
+];
+
+/// Per-channel WB gains (1+temp, 1+tint, 1−temp) on unpremult rgb;
+/// re-premultiplied, alpha preserved.
+pub static ADJUST_WHITE_BALANCE: KernelDef = KernelDef {
+    id: "adjust.white_balance",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustWhiteBalanceParams>(),
+        fields: WHITE_BALANCE_PARAMS_FIELDS,
+    },
+    wgsl: WHITE_BALANCE_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+// Per-channel scalar gain; componentwise multiply. No cross-channel
+// terms, so reduction order is irrelevant and WGSL/Rust mirror exactly.
+const WHITE_BALANCE_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    temp: f32,
+    tint: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let gain = vec3<f32>(1.0 + params.temp, 1.0 + params.tint, 1.0 - params.temp);
+    return vec4<f32>(c * gain * a.a, a.a);
+}
+"
+);
+
 pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_EXPOSURE,
     &ADJUST_BRIGHTNESS_CONTRAST,
@@ -536,4 +617,5 @@ pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_SATURATION,
     &ADJUST_HUE_ROTATE,
     &ADJUST_INVERT_RGB,
+    &ADJUST_WHITE_BALANCE,
 ];

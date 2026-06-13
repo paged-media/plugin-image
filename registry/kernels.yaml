@@ -902,6 +902,19 @@
   tests:
     rust: ["image-conformance/tests/family_adjust.rs"]
 
+- id: adjust.white_balance
+  rust_path: families::adjust::ADJUST_WHITE_BALANCE
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "temp/tint per-channel von-Kries gains (1+temp,1+tint,1-temp); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
 # ── geom family (T2; coordinate remaps) ──────────────────────
 
 - id: geom.flip_h

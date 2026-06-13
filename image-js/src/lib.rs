@@ -54,7 +54,9 @@ mod wasm {
     use image_gpu::GpuContext;
     use wasm_bindgen::prelude::*;
 
-    use crate::ingest::{adjust_rgba8, decode_rgba8, AdjustParams, DecodedImage};
+    use crate::ingest::{
+        adjust_rgba8, crop_rgba8, decode_rgba8, AdjustParams, DecodedImage, LevelsParams,
+    };
 
     thread_local! {
         /// The bundle-realm GPU device (I-07: created HERE, where
@@ -87,8 +89,7 @@ mod wasm {
     /// would poison the instance for the still-valid decode lanes.
     fn has_webgpu() -> bool {
         let global = js_sys::global();
-        let Ok(navigator) = js_sys::Reflect::get(&global, &JsValue::from_str("navigator"))
-        else {
+        let Ok(navigator) = js_sys::Reflect::get(&global, &JsValue::from_str("navigator")) else {
             return false;
         };
         if navigator.is_undefined() || navigator.is_null() {
@@ -161,11 +162,7 @@ mod wasm {
     /// adjust + tile paths. `bytes` must be exactly `width*height*4` RGBA8;
     /// a length mismatch is a clean error. Free with `free_image`.
     #[wasm_bindgen]
-    pub fn ingest_rgba8(
-        width: u32,
-        height: u32,
-        bytes: Vec<u8>,
-    ) -> Result<DecodedHandle, JsValue> {
+    pub fn ingest_rgba8(width: u32, height: u32, bytes: Vec<u8>) -> Result<DecodedHandle, JsValue> {
         let img = DecodedImage::from_rgba8(width, height, bytes)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let handle = NEXT_HANDLE.with(|n| {
@@ -201,7 +198,77 @@ mod wasm {
             brightness,
             contrast,
             saturation,
+            ..Default::default()
         };
+        run_adjust(&img, params).await
+    }
+
+    /// The FULL adjustments pass — the levels/curves/white-balance panel's
+    /// committed values. The 9 scalars are exposure/brightness/contrast/
+    /// saturation (as `adjust_image`), white balance (temp/tint), and the
+    /// composite levels in/gamma/out window; `curve_lut` is an OPTIONAL
+    /// 256-byte tone LUT (the panel builds it from its curve control points
+    /// via `image_core::curve_lut`; pass an empty array for no curve). The
+    /// curves stage is a CPU LUT pass (no GPU LUT kernel yet — the honest
+    /// deferral); everything else is the GPU adjust chain. Returns straight
+    /// RGBA8 (the C-1 Stage-A scene payload).
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn adjust_image_full(
+        handle: u32,
+        exposure_ev: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        temp: f32,
+        tint: f32,
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+        curve_lut: &[u8],
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let lut = if curve_lut.len() == 256 {
+            let mut a = [0u8; 256];
+            a.copy_from_slice(curve_lut);
+            Some(a)
+        } else if curve_lut.is_empty() {
+            None
+        } else {
+            return Err(JsValue::from_str(&format!(
+                "curve_lut must be 256 bytes or empty (got {})",
+                curve_lut.len()
+            )));
+        };
+        let params = AdjustParams {
+            exposure_ev,
+            brightness,
+            contrast,
+            saturation,
+            temp,
+            tint,
+            levels: LevelsParams {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+            },
+            curve_lut: lut,
+        };
+        run_adjust(&img, params).await
+    }
+
+    /// Shared adjust runner: identity → the decode verbatim; otherwise the
+    /// GPU chain (requires `init_gpu`) plus any CPU curve LUT.
+    async fn run_adjust(
+        img: &DecodedImage,
+        params: AdjustParams,
+    ) -> Result<js_sys::Uint8Array, JsValue> {
         if params.is_identity() {
             return Ok(js_sys::Uint8Array::from(&img.rgba[..]));
         }
@@ -211,10 +278,57 @@ mod wasm {
                  GPU-only; no CPU fallback ships)",
             )
         })?;
-        let out = adjust_rgba8(&ctx, &img, &params)
+        let out = adjust_rgba8(&ctx, img, &params)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(js_sys::Uint8Array::from(&out[..]))
+    }
+
+    /// Compute the RGB + luma 256-bin histogram of an engine-held image as
+    /// a flat `[r…, g…, b…, luma…]` 1024-`u32` array (the LEVELS / CURVES
+    /// panel slices it into four channels). Pure CPU reduction over the
+    /// straight-RGBA8 buffer (no GPU); deterministic.
+    #[wasm_bindgen]
+    pub fn image_histogram(handle: u32) -> Result<js_sys::Uint32Array, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let hist = image_gpu::histogram_rgba8(&img.rgba);
+        Ok(js_sys::Uint32Array::from(&hist.to_flat()[..]))
+    }
+
+    /// Commit a CROP: cut the integer pixel rectangle `(x, y, w, h)`
+    /// (clamped to the image extent) out of an engine-held image and
+    /// register the result as a NEW engine-held image, returning its
+    /// handle. The source handle is left intact (the caller frees it). An
+    /// out-of-bounds / empty rectangle is a clean error (never a torn
+    /// image). The straighten-angle resample is a separate stage (not in
+    /// this axis-aligned cut — see the crop interaction machine).
+    #[wasm_bindgen]
+    pub fn crop_image(
+        handle: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    ) -> Result<DecodedHandle, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let cropped =
+            crop_rgba8(&img, x, y, w, h).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let new_handle = NEXT_HANDLE.with(|n| {
+            let h = n.get();
+            n.set(h + 1);
+            h
+        });
+        let (width, height) = (cropped.width, cropped.height);
+        IMAGES.with(|m| m.borrow_mut().insert(new_handle, cropped));
+        Ok(DecodedHandle {
+            handle: new_handle,
+            width,
+            height,
+        })
     }
 
     /// C-6 (I-06) — copy a LEVEL-0 tile window `(x, y, w, h)` out of a

@@ -27,7 +27,7 @@
 
 use image_conformance::harness::RefTile;
 use image_conformance::Px;
-use image_gpu::reduce::{histogram, statistics, Histogram};
+use image_gpu::reduce::{histogram, histogram_rgba8, statistics, Histogram};
 
 /// rgba16float bytes for a `w`×`h` tile of one constant texel.
 fn constant_bytes(w: u32, h: u32, px: [f32; 4]) -> Vec<u8> {
@@ -183,4 +183,108 @@ fn image_reduce_empty_tile_is_zero() {
     for c in 0..4 {
         assert_eq!(channel_total(&hist, c), 0);
     }
+}
+
+// ── histogram_rgba8 (the panel-facing RGB + luma readout) ────────────
+//
+// feat: image.reduce.statistics — the LEVELS/CURVES panel histogram over
+// the engine-held straight RGBA8 buffer (one bin per code value; luma is
+// Rec.601). Pure fixed-order arithmetic → its own golden.
+
+/// Build a tightly packed straight-RGBA8 buffer from a per-pixel fn.
+fn rgba8_from_fn(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+    let mut v = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            v.extend_from_slice(&f(x, y));
+        }
+    }
+    v
+}
+
+/// A constant RGBA8 tile spikes exactly one bin per channel (the byte IS
+/// the bin) and one luma bin; every total equals the pixel count.
+#[test]
+fn image_reduce_histogram_rgba8_constant_single_bin() {
+    let (w, h) = (16u32, 8u32);
+    let n = w * h;
+    // luma = round(0.299*40 + 0.587*80 + 0.114*120) = round(72.6) = 73.
+    let px = [40u8, 80, 120, 255];
+    let hist = histogram_rgba8(&rgba8_from_fn(w, h, |_, _| px));
+
+    assert_eq!(hist.r[40], n, "R spikes its own code value");
+    assert_eq!(hist.g[80], n, "G spikes its own code value");
+    assert_eq!(hist.b[120], n, "B spikes its own code value");
+    assert_eq!(hist.luma[73], n, "Rec.601 luma of (40,80,120) is 73");
+    for (label, ch) in [
+        ("r", &hist.r),
+        ("g", &hist.g),
+        ("b", &hist.b),
+        ("luma", &hist.luma),
+    ] {
+        assert_eq!(ch.iter().sum::<u32>(), n, "{label} total == pixel count");
+        assert_eq!(
+            ch.iter().filter(|&&c| c != 0).count(),
+            1,
+            "{label} one spike"
+        );
+    }
+}
+
+/// Pure-channel extremes: black → bin 0 on every channel + luma; white →
+/// bin 255 on every channel + luma. A 50/50 black/white split.
+#[test]
+fn image_reduce_histogram_rgba8_black_white_extremes() {
+    let (w, h) = (8u32, 8u32);
+    let hist = histogram_rgba8(&rgba8_from_fn(w, h, |x, _| {
+        if x < w / 2 {
+            [0, 0, 0, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    }));
+    let half = w / 2 * h;
+    for ch in [&hist.r, &hist.g, &hist.b, &hist.luma] {
+        assert_eq!(ch[0], half, "black half → bin 0");
+        assert_eq!(ch[255], half, "white half → bin 255");
+        assert_eq!(ch.iter().sum::<u32>(), w * h);
+    }
+}
+
+/// Luma of a pure primary uses ONLY that primary's weight: a full-red
+/// pixel has luma round(0.299*255) = 76; full-green round(0.587*255) =
+/// 150; full-blue round(0.114*255) = 29.
+#[test]
+fn image_reduce_histogram_rgba8_luma_primary_weights() {
+    let red = histogram_rgba8(&[255, 0, 0, 255]);
+    let green = histogram_rgba8(&[0, 255, 0, 255]);
+    let blue = histogram_rgba8(&[0, 0, 255, 255]);
+    assert_eq!(red.luma[76], 1, "0.299*255 ≈ 76");
+    assert_eq!(green.luma[150], 1, "0.587*255 ≈ 150");
+    assert_eq!(blue.luma[29], 1, "0.114*255 ≈ 29");
+}
+
+/// An empty / sub-pixel buffer yields an all-zero histogram (a trailing
+/// partial pixel is ignored — never a panic).
+#[test]
+fn image_reduce_histogram_rgba8_empty_is_zero() {
+    let empty = histogram_rgba8(&[]);
+    let partial = histogram_rgba8(&[1, 2, 3]); // 3 bytes — no whole pixel
+    for hist in [&empty, &partial] {
+        let flat = hist.to_flat();
+        assert_eq!(flat.iter().sum::<u32>(), 0, "no counts");
+    }
+}
+
+/// The flat layout is `[r…, g…, b…, luma…]` — the wasm-boundary order the
+/// panel slices back.
+#[test]
+fn image_reduce_histogram_rgba8_flat_layout() {
+    // One pixel: R=1, G=2, B=3, luma=round(0.299+1.174+0.342)=round(1.815)=2.
+    let flat = histogram_rgba8(&[1, 2, 3, 255]).to_flat();
+    assert_eq!(flat.len(), 1024);
+    assert_eq!(flat[1], 1, "R bin 1");
+    assert_eq!(flat[256 + 2], 1, "G bin 2");
+    assert_eq!(flat[512 + 3], 1, "B bin 3");
+    assert_eq!(flat[768 + 2], 1, "luma bin 2");
 }

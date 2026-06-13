@@ -31,6 +31,19 @@ mod slice;
 mod tile;
 mod tilemap;
 
+// Pure editor GEOMETRY/DATA math (NOT part of the M0 frozen type set —
+// additive, leaf-pure, deterministic): the crop + straighten frame
+// geometry and the curves control-point → tone-LUT builder the editor
+// panels/interaction drive. No pixels, no GPU; tested as their own
+// golden (bit-stable fixed-order arithmetic, §6.3).
+mod crop;
+mod curve;
+
+pub use crop::{
+    apply_drag, frame_corners, hit_handle, normalize_angle, rotate_point, AspectLock, CropRect,
+    Handle,
+};
+pub use curve::{curve_lut, identity_lut};
 pub use format::{
     AlphaMode, ChannelLayout, ColorSpaceRef, IccHash, NamedSpace, PixelFormat, SampleDepth,
     Transfer, TransferCurve,

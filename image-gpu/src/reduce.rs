@@ -65,6 +65,83 @@ impl Default for Histogram {
     }
 }
 
+/// The RGB + luma 256-bin histogram an editor LEVELS/CURVES panel reads.
+///
+/// `r`/`g`/`b` count the straight-8-bit channel values directly (one bin
+/// per code value — no quantization round-trip, the byte IS the bin);
+/// `luma` is the Rec.601 luma `round(0.299·r + 0.587·g + 0.114·b)` per
+/// pixel. Alpha is intentionally absent (a levels/curves panel never
+/// plots it). Each of the four totals equals the pixel count. This is the
+/// panel-facing readout (the RGBA8 working buffer the wasm surface holds);
+/// the f16 working-tile [`histogram`] above is the in-pipeline reduction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RgbaLumaHistogram {
+    pub r: [u32; 256],
+    pub g: [u32; 256],
+    pub b: [u32; 256],
+    pub luma: [u32; 256],
+}
+
+impl Default for RgbaLumaHistogram {
+    fn default() -> Self {
+        RgbaLumaHistogram {
+            r: [0u32; 256],
+            g: [0u32; 256],
+            b: [0u32; 256],
+            luma: [0u32; 256],
+        }
+    }
+}
+
+impl RgbaLumaHistogram {
+    /// Flatten to the `[r…, g…, b…, luma…]` 1024-`u32` row the wasm
+    /// surface hands JS (the panel slices it back into four 256-bin
+    /// channels). Fixed channel order — never reassociated.
+    pub fn to_flat(&self) -> [u32; 1024] {
+        let mut out = [0u32; 1024];
+        out[0..256].copy_from_slice(&self.r);
+        out[256..512].copy_from_slice(&self.g);
+        out[512..768].copy_from_slice(&self.b);
+        out[768..1024].copy_from_slice(&self.luma);
+        out
+    }
+}
+
+/// Rec.601 luma bin for a straight-8-bit pixel: `round(0.299·r +
+/// 0.587·g + 0.114·b)` clamped to `[0, 255]`. Fixed coefficient order,
+/// round-half-away-from-zero — bit-stable by construction (§6.3). The
+/// weights are the ITU-R BT.601 luma weights (standard literature; no
+/// reference reading).
+#[inline]
+fn luma_bin(r: u8, g: u8, b: u8) -> usize {
+    let y = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+    let yr = y.round();
+    if yr <= 0.0 {
+        0
+    } else if yr >= 255.0 {
+        255
+    } else {
+        yr as usize
+    }
+}
+
+/// Build the RGB + luma 256-bin histogram over a tightly packed straight
+/// RGBA8 buffer (`pixels.len()` must be a multiple of 4; a trailing
+/// partial pixel is ignored). The panel-facing reduction the LEVELS /
+/// CURVES editor renders. Pure fixed-order scalar arithmetic — bit-stable
+/// across platforms, its own golden (§6.3). Alpha is not binned.
+pub fn histogram_rgba8(pixels: &[u8]) -> RgbaLumaHistogram {
+    let mut hist = RgbaLumaHistogram::default();
+    for px in pixels.chunks_exact(4) {
+        let (r, g, b) = (px[0], px[1], px[2]);
+        hist.r[r as usize] += 1;
+        hist.g[g as usize] += 1;
+        hist.b[b as usize] += 1;
+        hist.luma[luma_bin(r, g, b)] += 1;
+    }
+    hist
+}
+
 /// Per-channel min / max / mean over an rgba16float tile/region, in f32.
 ///
 /// `min`/`max` are exact (the smallest/largest f16-decoded channel

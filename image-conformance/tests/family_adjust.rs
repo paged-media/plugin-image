@@ -24,8 +24,9 @@ use image_conformance::harness::{assert_within, parity, RefTile};
 use image_conformance::Px;
 use image_kernels::families::adjust::{
     adjust_invert_rgb, AdjustBrightnessContrastParams, AdjustExposureParams, AdjustHueRotateParams,
-    AdjustInvertRgbParams, AdjustLevelsParams, AdjustSaturationParams, ADJUST_BRIGHTNESS_CONTRAST,
-    ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_SATURATION,
+    AdjustInvertRgbParams, AdjustLevelsParams, AdjustSaturationParams, AdjustWhiteBalanceParams,
+    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB,
+    ADJUST_LEVELS, ADJUST_SATURATION, ADJUST_WHITE_BALANCE,
 };
 
 /// `unpremul_rgb` — the module preamble helper (a==0 → 0).
@@ -96,6 +97,15 @@ fn hue_rotate_ref(a: Px, _b: Px, p: &AdjustHueRotateParams) -> Px {
     Px([rr * al, gg * al, bb * al, al])
 }
 
+fn white_balance_ref(a: Px, _b: Px, p: &AdjustWhiteBalanceParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    // gain = (1+temp, 1+tint, 1-temp); c' = c * gain (componentwise).
+    let gain = [1.0 + p.temp, 1.0 + p.tint, 1.0 - p.temp];
+    let cp = [c[0] * gain[0], c[1] * gain[1], c[2] * gain[2]];
+    Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
+}
+
 /// A finite premultiplied tile: per-texel straight color in [0,1] and a
 /// per-texel alpha in {0.25,…,1}, stored premultiplied (rgb = straight·α)
 /// so `unpremul` recovers a valid color. Alpha is never 0 (the unpremul
@@ -161,6 +171,12 @@ parity_test!(
     adjust_invert_rgb,
     AdjustInvertRgbParams::new()
 );
+parity_test!(
+    white_balance_parity,
+    ADJUST_WHITE_BALANCE,
+    white_balance_ref,
+    AdjustWhiteBalanceParams::new(0.15, -0.08)
+);
 
 /// Identity-parameter cases: each op at its no-op params is a
 /// near-passthrough (within tolerance) of a premultiplied input.
@@ -190,5 +206,13 @@ fn adjust_identity_params() {
         &AdjustHueRotateParams::new(0.0),
     ) {
         assert_within(r, &ADJUST_HUE_ROTATE);
+    }
+    if let Some(r) = parity(
+        &ADJUST_WHITE_BALANCE,
+        white_balance_ref,
+        &[&t],
+        &AdjustWhiteBalanceParams::new(0.0, 0.0),
+    ) {
+        assert_within(r, &ADJUST_WHITE_BALANCE);
     }
 }

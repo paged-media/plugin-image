@@ -54,7 +54,7 @@ pub use distance::{distance_transform, DistanceParams, MaskChannel};
 pub use execute::{execute_tile_once, execute_tile_once_async, execute_windowed_once, TileInput};
 pub use pipeline::KernelPipeline;
 pub use pool::{PoolSlot, TexturePool};
-pub use reduce::{histogram, statistics, Histogram, Stats};
+pub use reduce::{histogram, histogram_rgba8, statistics, Histogram, RgbaLumaHistogram, Stats};
 pub use residency::{Acquired, ResidencyManager, Tier, HEAP_TILE_BYTES};
 pub use selection::SelectionMask;
 
