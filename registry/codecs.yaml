@@ -91,3 +91,49 @@
     - "ITU T.81 / JFIF / Adobe APP14 via zune-jpeg + jpeg-encoder"
   tests:
     rust: ["image-conformance/tests/codec_jpeg.rs", "image-codecs/src/jpeg/decode.rs (unit: Adobe inversion)"]
+
+- id: image.codec.exif
+  state_row: image.codec.exif
+  tier: shipped          # decode-side: orientation + DPI + color-space tag, applied at ingest
+  # A tiny dependency-free EXIF/TIFF reader (image-codecs/src/exif.rs) over
+  # the raw payload codecs already capture (SourceInfo.exif, which starts at
+  # the TIFF header — zune-jpeg strips the `Exif\0\0` APP1 prefix). Reads
+  # exactly three facts off IFD0 (+ the Exif sub-IFD): Orientation (0x0112),
+  # XResolution/YResolution/ResolutionUnit → DPI (0x011A/0x011B/0x0128, cm
+  # converted ×2.54, unit "none" → no DPI), and ColorSpace (0xA001: sRGB /
+  # Uncalibrated / Other). Both byte orders (II/MM). Lenient by design: any
+  # malformed / truncated / unknown structure yields None for that field,
+  # never an error — EXIF is advisory and must not fail an otherwise-valid
+  # decode.
+  #
+  # WHY HAND-ROLLED (not kamadak-exif): three tags need a ~150-line bounded
+  # IFD walk; a full EXIF crate drags a dependency + a second TIFF reader
+  # into a workspace that pins codec deps tightly (§10.3) and watches an
+  # 8 MiB wasm budget (I-07). The hand-rolled reader keeps the codec crate
+  # dependency-flat and #![forbid(unsafe_code)].
+  #
+  # APPLY SITE: the decode-to-RGBA bridge in image-js (ingest.rs
+  # apply_orientation) auto-orients on the straight-RGBA8 buffer BEFORE the
+  # GPU adjustment pipeline. This is the architecturally honest spot: it is
+  # a CPU memory reshuffle (transpose/flip) inherent to ingest, not GPU
+  # kernel work, and the adjustments + the C-1 composite must see upright,
+  # correctly-dimensioned pixels. JPEG/TIFF carry orientation; PNG/PSD
+  # don't (parses to None → no-op). The eight CIPA transforms are unit- and
+  # e2e-tested (a JPEG with a spliced APP1 Orientation=6 ingests 16×8→8×16).
+  #
+  # EXPORT-SIDE RULING — N/A (strip-by-construction). The frozen TargetInfo
+  # (image-codecs target.rs) carries NO EXIF/orientation channel, and
+  # neither encoder writes EXIF. Because ingest auto-orients to canonical
+  # upright (TopLeft) pixels, a re-export is ALREADY in the identity
+  # orientation — there is nothing to preserve and no tag to strip. The
+  # "strip vs preserve" question is therefore moot for orientation on the
+  # current export lane; if a future export lane gains an EXIF writer, it
+  # must emit Orientation=1 (the pixels are upright), never copy a stale
+  # source tag. DPI/color-space round-trip on export is a separate
+  # TargetInfo-amendment follow-up (not in scope here).
+  provenance:
+    - "Exif 2.3 / TIFF 6.0 IFD structure (public spec); tags 0x0112/0x011A/0x011B/0x0128/0x8769/0xA001"
+    - "CIPA orientation transform table (the eight values)"
+    - "hand-rolled bounded reader — no EXIF crate dependency (8 MiB wasm budget, I-07)"
+  tests:
+    rust: ["image-codecs/src/exif.rs (unit: 10 tags/endianness/garbage)", "image-js/src/ingest.rs (unit: 6 orientation geometries)", "image-js/tests/ingest.rs (e2e: APP1 orientation auto-rotate)"]

@@ -17,7 +17,7 @@
 //! Engine A's async sink. The GPU half SKIPS cleanly without an
 //! adapter; decode is pure CPU and always runs.
 
-use image_codecs::{ImageTarget, PngTarget, TargetInfo};
+use image_codecs::{ImageTarget, JpegTarget, PngTarget, TargetInfo};
 use image_core::{
     AlphaMode, ChannelLayout, ColorSpaceRef, NamedSpace, PixelFormat, Region, SampleDepth,
     TileSliceRef, Transfer, TransferCurve,
@@ -96,6 +96,80 @@ fn psd_bytes(width: u32, height: u32, planes: &[&[u8]]) -> Vec<u8> {
     b
 }
 
+/// A JPEG pixel format (straight RGBA8, sRGB) for the encoder. The
+/// encoder drops alpha (JPEG has none) — fine for the orientation test.
+const JPEG_FMT: PixelFormat = PixelFormat {
+    channels: ChannelLayout::Rgba,
+    depth: SampleDepth::U8,
+    alpha: AlphaMode::Straight,
+    transfer: Transfer::Gamma(TransferCurve::Srgb),
+    space: ColorSpaceRef::Named(NamedSpace::Srgb),
+};
+
+/// Encode RGBA8 pixels as a baseline JPEG via the codec adapter.
+fn jpeg_bytes(w: u32, h: u32, pixels: &[u8]) -> Vec<u8> {
+    let mut target = JpegTarget::new(92);
+    target
+        .begin(TargetInfo {
+            width: w,
+            height: h,
+            format: JPEG_FMT,
+            icc: None,
+        })
+        .expect("jpeg begin");
+    target
+        .write_strip(
+            Region::new(0, 0, w, h),
+            &TileSliceRef {
+                region: Region::new(0, 0, w, h),
+                format: JPEG_FMT,
+                bytes: pixels,
+                row_stride: w as usize * 4,
+            },
+        )
+        .expect("jpeg strip");
+    target.finish().expect("jpeg finish");
+    target.into_bytes()
+}
+
+/// Build a minimal little-endian EXIF TIFF block carrying a single
+/// Orientation (0x0112) SHORT entry, then wrap it in a JPEG APP1 segment
+/// (`FF E1 len "Exif\0\0" <tiff>`). Splice it right after the SOI of an
+/// existing JPEG so the decoder sees real EXIF.
+fn splice_exif_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+    // TIFF: header (8) + IFD0 (count=1, one 12-byte entry, next=0).
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II");
+    tiff.extend_from_slice(&42u16.to_le_bytes());
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    tiff.extend_from_slice(&1u16.to_le_bytes()); // 1 entry
+    tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // Orientation
+    tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+    tiff.extend_from_slice(&1u32.to_le_bytes()); // count
+    tiff.extend_from_slice(&orientation.to_le_bytes());
+    tiff.extend_from_slice(&[0u8, 0]); // pad value field to 4 bytes
+    tiff.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+
+    let mut app1_payload = Vec::new();
+    app1_payload.extend_from_slice(b"Exif\x00\x00");
+    app1_payload.extend_from_slice(&tiff);
+
+    // APP1 segment: marker FFE1 + 2-byte length (includes the length
+    // bytes themselves) + payload.
+    let seg_len = (app1_payload.len() + 2) as u16;
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend_from_slice(&seg_len.to_be_bytes());
+    app1.extend_from_slice(&app1_payload);
+
+    // Splice after SOI (the first two bytes FFD8).
+    assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "input is a JPEG (SOI)");
+    let mut out = Vec::with_capacity(jpeg.len() + app1.len());
+    out.extend_from_slice(&jpeg[0..2]);
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
 #[test]
 fn image_editor_ingest_decode_png_roundtrip() {
     let (w, h) = (8u32, 6u32);
@@ -103,6 +177,43 @@ fn image_editor_ingest_decode_png_roundtrip() {
     let img = decode_rgba8(&png_bytes(w, h, &pixels)).expect("decode png");
     assert_eq!((img.width, img.height), (w, h));
     assert_eq!(&img.rgba[..], &pixels[..], "PNG is lossless");
+}
+
+#[test]
+fn image_editor_ingest_jpeg_no_exif_keeps_dims() {
+    // Control: a JPEG without EXIF keeps its dimensions (orientation
+    // parses to None → identity auto-orient).
+    let (w, h) = (16u32, 8u32);
+    let img = decode_rgba8(&jpeg_bytes(w, h, &test_pixels(w, h))).expect("decode jpeg");
+    assert_eq!((img.width, img.height), (w, h));
+}
+
+#[test]
+fn image_editor_ingest_jpeg_exif_orientation_6_auto_rotates() {
+    // A 16×8 JPEG tagged Orientation=6 (rotate 90° CW) must ingest as 8×16
+    // — the auto-orient in the decode-to-RGBA bridge ran. This proves the
+    // EXIF read path (image-codecs::exif) is wired end-to-end through the
+    // M4 ingest slice.
+    let (w, h) = (16u32, 8u32);
+    let base = jpeg_bytes(w, h, &test_pixels(w, h));
+    let with_exif = splice_exif_orientation(&base, 6);
+    let img = decode_rgba8(&with_exif).expect("decode jpeg+exif");
+    assert_eq!(
+        (img.width, img.height),
+        (h, w),
+        "Orientation=6 must swap dimensions to {h}×{w}"
+    );
+    assert_eq!(img.rgba.len(), (w * h * 4) as usize, "pixel count preserved");
+}
+
+#[test]
+fn image_editor_ingest_jpeg_exif_orientation_1_is_identity() {
+    // Orientation=1 (TopLeft) is the no-op — dims unchanged even with EXIF.
+    let (w, h) = (16u32, 8u32);
+    let base = jpeg_bytes(w, h, &test_pixels(w, h));
+    let with_exif = splice_exif_orientation(&base, 1);
+    let img = decode_rgba8(&with_exif).expect("decode jpeg+exif");
+    assert_eq!((img.width, img.height), (w, h));
 }
 
 #[test]

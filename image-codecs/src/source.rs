@@ -18,6 +18,7 @@
 
 use image_core::{PixelFormat, Region, TileSliceMut};
 
+use crate::exif::Exif;
 use crate::Result;
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,16 @@ pub struct SourceInfo {
     /// Container-provided mip levels (pyramid TIFF etc.); empty for
     /// single-resolution containers.
     pub native_mips: Vec<(u32, u32)>,
+}
+
+impl SourceInfo {
+    /// Parse the raw EXIF payload (if any) into the advisory facts the
+    /// ingest lane consumes: orientation, DPI, color-space tag. Returns
+    /// `Exif::default()` (all `None`) when there is no EXIF or it is
+    /// unreadable — EXIF is advisory and never fails a decode.
+    pub fn exif_meta(&self) -> Exif {
+        self.exif.as_deref().map(Exif::parse).unwrap_or_default()
+    }
 }
 
 pub trait ImageSource {

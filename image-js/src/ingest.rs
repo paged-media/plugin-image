@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use image_codecs::raw::{RawSource, RawTarget};
-use image_codecs::{ImageSource, JpegSource, MemoryByteSource, PngSource};
+use image_codecs::{ImageSource, JpegSource, MemoryByteSource, Orientation, PngSource};
 use image_core::{
     AlphaMode, ChannelLayout, ColorSpaceRef, NamedSpace, PixelFormat, Region, SampleDepth,
     TileSliceMut, Transfer,
@@ -159,6 +159,15 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
             info.format.depth
         )));
     }
+    // EXIF orientation (JPEG/TIFF carry it; PNG/PSD don't, so it parses to
+    // None and the auto-orient is a no-op). Auto-orientation is the
+    // architecturally honest job of the decode-to-RGBA bridge: it is a CPU
+    // memory reshuffle (transpose/flip) inherent to *ingest*, not a GPU
+    // kernel — it must run before the GPU adjustment pipeline so the
+    // adjustments and the C-1 composite see upright, correctly-dimensioned
+    // pixels. (Spec §10.3 EXIF read path; the value is also surfaced raw on
+    // SourceInfo for callers that want to defer the rotation.)
+    let orientation = info.exif_meta().orientation.unwrap_or(Orientation::TopLeft);
     let channels = info.format.channels;
     if matches!(channels, ChannelLayout::Cmyk | ChannelLayout::Cmyka) {
         return Err(IngestError::Unsupported(
@@ -198,11 +207,53 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
         }
         ChannelLayout::Cmyk | ChannelLayout::Cmyka => unreachable!("rejected above"),
     };
+
+    // Auto-orient on the straight-RGBA8 buffer. Identity short-circuits
+    // (the common case — most images are TopLeft) so non-rotated ingest
+    // pays nothing.
+    let (rgba, w, h) = apply_orientation(rgba, w, h, orientation);
     Ok(DecodedImage {
         width: w,
         height: h,
         rgba: rgba.into(),
     })
+}
+
+/// Apply an EXIF [`Orientation`] to a tightly-packed straight-RGBA8
+/// buffer, returning the reoriented pixels and the (possibly swapped)
+/// dimensions. The eight cases are the CIPA transforms expressed as a
+/// (flip-x, flip-y, transpose) composition over destination coordinates.
+/// `TopLeft` returns the input untouched.
+fn apply_orientation(rgba: Vec<u8>, w: u32, h: u32, o: Orientation) -> (Vec<u8>, u32, u32) {
+    if o.is_identity() {
+        return (rgba, w, h);
+    }
+    let (wi, hi) = (w as usize, h as usize);
+    // For each orientation, (dst_w, dst_h) and a mapping from destination
+    // (dx, dy) back to source (sx, sy). Derived from the CIPA table; the
+    // four 90°/270° cases transpose (dst dims swap).
+    let swaps = o.swaps_dimensions();
+    let (dw, dh) = if swaps { (hi, wi) } else { (wi, hi) };
+    let mut out = vec![0u8; dw * dh * 4];
+    for dy in 0..dh {
+        for dx in 0..dw {
+            // Map destination → source per orientation.
+            let (sx, sy) = match o {
+                Orientation::TopLeft => (dx, dy), // unreachable (identity)
+                Orientation::TopRight => (wi - 1 - dx, dy), // mirror H
+                Orientation::BottomRight => (wi - 1 - dx, hi - 1 - dy), // 180°
+                Orientation::BottomLeft => (dx, hi - 1 - dy), // mirror V
+                Orientation::LeftTop => (dy, dx), // transpose
+                Orientation::RightTop => (dy, hi - 1 - dx), // 90° CW
+                Orientation::RightBottom => (wi - 1 - dy, hi - 1 - dx), // transverse
+                Orientation::LeftBottom => (wi - 1 - dy, dx), // 270° CW
+            };
+            let s = (sy * wi + sx) * 4;
+            let d = (dy * dw + dx) * 4;
+            out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    (out, dw as u32, dh as u32)
 }
 
 /// Run the M4 adjustments chain (exposure → brightness/contrast →
@@ -253,4 +304,90 @@ pub async fn adjust_rgba8(
         .await
         .map_err(|e| IngestError::Pipeline(e.to_string()))?;
     Ok(target.into_pixels())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 2×1 RGBA image: pixel (0,0) red, (1,0) green — a horizontal pair
+    /// so flips/rotations are unambiguous. Each pixel encodes its source
+    /// (x,y) in the R,G bytes for easy assertion.
+    fn grid(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                v[i] = x as u8;
+                v[i + 1] = y as u8;
+                v[i + 2] = 0;
+                v[i + 3] = 255;
+            }
+        }
+        v
+    }
+
+    /// Read the (encoded src-x, src-y) at destination (dx, dy) of a
+    /// reoriented buffer of width `dw`.
+    fn at(buf: &[u8], dw: u32, dx: u32, dy: u32) -> (u8, u8) {
+        let i = ((dy * dw + dx) * 4) as usize;
+        (buf[i], buf[i + 1])
+    }
+
+    #[test]
+    fn orientation_identity_is_untouched() {
+        let src = grid(3, 2);
+        let (out, w, h) = apply_orientation(src.clone(), 3, 2, Orientation::TopLeft);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn orientation_mirror_horizontal() {
+        // TopRight (2): mirror across the vertical axis. dst(0,0) should
+        // come from src(2,0) in a 3-wide image.
+        let (out, w, h) = apply_orientation(grid(3, 2), 3, 2, Orientation::TopRight);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(at(&out, w, 0, 0), (2, 0));
+        assert_eq!(at(&out, w, 2, 1), (0, 1));
+    }
+
+    #[test]
+    fn orientation_rotate_180() {
+        let (out, w, h) = apply_orientation(grid(3, 2), 3, 2, Orientation::BottomRight);
+        assert_eq!((w, h), (3, 2));
+        // dst(0,0) == src(2,1) (opposite corner).
+        assert_eq!(at(&out, w, 0, 0), (2, 1));
+    }
+
+    #[test]
+    fn orientation_rotate_90_cw_swaps_dims() {
+        // RightTop (6): rotate 90° CW. A 3×2 source becomes 2×3.
+        let (out, w, h) = apply_orientation(grid(3, 2), 3, 2, Orientation::RightTop);
+        assert_eq!((w, h), (2, 3), "90° CW swaps to 2×3");
+        // Under 90° CW, source top-left (0,0) lands at dst top-right
+        // (dst_w-1, 0) = (1, 0).
+        assert_eq!(at(&out, w, 1, 0), (0, 0));
+        // Source bottom-left (0,1) lands at dst (0,0).
+        assert_eq!(at(&out, w, 0, 0), (0, 1));
+    }
+
+    #[test]
+    fn orientation_rotate_270_cw_swaps_dims() {
+        // LeftBottom (8): rotate 270° CW. 3×2 → 2×3.
+        let (out, w, h) = apply_orientation(grid(3, 2), 3, 2, Orientation::LeftBottom);
+        assert_eq!((w, h), (2, 3));
+        // 270° CW: source top-left (0,0) lands at dst bottom-left
+        // (0, dst_h-1) = (0, 2).
+        assert_eq!(at(&out, w, 0, 2), (0, 0));
+    }
+
+    #[test]
+    fn orientation_transpose_and_transverse_swap_dims() {
+        for o in [Orientation::LeftTop, Orientation::RightBottom] {
+            let (out, w, h) = apply_orientation(grid(3, 2), 3, 2, o);
+            assert_eq!((w, h), (2, 3), "transpose/transverse swap dims for {o:?}");
+            assert_eq!(out.len(), (w * h * 4) as usize);
+        }
+    }
 }

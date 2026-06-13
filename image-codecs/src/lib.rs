@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod bytesource;
+pub mod exif;
 pub mod jpeg;
 pub mod png;
 pub mod raw;
@@ -29,6 +30,7 @@ mod source;
 mod target;
 
 pub use bytesource::{ByteSource, MemoryByteSource};
+pub use exif::{ColorSpaceTag, Exif, Orientation};
 pub use jpeg::{JpegSource, JpegTarget};
 pub use png::{PngSource, PngTarget};
 pub use source::{ImageSource, SourceInfo};
