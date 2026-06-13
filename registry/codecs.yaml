@@ -137,3 +137,36 @@
     - "hand-rolled bounded reader — no EXIF crate dependency (8 MiB wasm budget, I-07)"
   tests:
     rust: ["image-codecs/src/exif.rs (unit: 10 tags/endianness/garbage)", "image-js/src/ingest.rs (unit: 6 orientation geometries)", "image-js/tests/ingest.rs (e2e: APP1 orientation auto-rotate)"]
+
+- id: image.codec.avif
+  state_row: image.codec.avif
+  tier: planned          # DECODE deferred — no acceptable pure-Rust, permissively-licensed AV1 decoder exists (2026-06)
+  # VERDICT (Phase 4e dependency audit, decode-only adapter): SKIPPED, no
+  # code landed. The spec §10.3 matrix names "rav1d / rav1e" for AVIF and
+  # "wasm build of rav1d validated in M1", but the dependency landscape as
+  # of 2026-06 does not admit a clean adapter under this repo's rules
+  # (pure-Rust, no vendored C, cargo-deny-permissive):
+  #   - avif-decode → aom-decode → requires a C compiler (libaom). REJECTED
+  #     (the plugin's no-C-in-default-build rule, §1.1; "do NOT vendor C").
+  #   - dav1d-rs → bindings to the C libdav1d. REJECTED (C dependency).
+  #   - rav1d (memorysafety, BSD-2-Clause) → a Rust port, BUT exposes only a
+  #     C API (dav1d_* FFI symbols; "a Rust API is planned for the future")
+  #     and builds librav1d.a as a C-library replacement (+ optional nasm
+  #     assembly). Not consumable as a pure-Rust *library* dependency
+  #     without going through a C-shaped FFI surface — defeats the
+  #     pure-Rust requirement. NOT USABLE as a crate dep today.
+  #   - rav1d-safe (imazen, safe-SIMD fork with a real Rust decode API) →
+  #     dual-licensed AGPL-3.0 OR commercial. REJECTED: AGPL-3.0 is NOT in
+  #     deny.toml's allow-list and is incompatible with the MPL-2.0/PMEL
+  #     distribution posture (would fail `cargo deny check licenses`).
+  # CONCLUSION: there is no pure-Rust, permissively-licensed AVIF/AV1
+  # decoder that passes cargo deny today. Per the Phase 4e instruction,
+  # recorded honestly and SKIPPED — no C vendored, no AGPL pulled. Re-open
+  # when rav1d ships its planned Rust API under BSD-2 (the spec's intended
+  # path), or a permissive pure-Rust AV1 decoder matures. Encode was always
+  # deferred regardless.
+  decision: "DEFERRED 2026-06 — no pure-Rust permissive AV1 decoder passes cargo deny (avif-decode/dav1d-rs need C; rav1d is C-API-only; rav1d-safe is AGPL-3.0). Re-open on rav1d's planned BSD-2 Rust API."
+  provenance:
+    - "AV1 / ISOBMFF (AVIF) — adapter pending an acceptable pure-Rust decoder dependency"
+  tests:
+    rust: []
