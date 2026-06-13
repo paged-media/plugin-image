@@ -57,11 +57,33 @@
 //! once the trait grows a float endpoint (a versioned amendment, not a
 //! drive-by edit), the print lane can keep the full precision moxcms
 //! computes internally instead of quantising to 8-bit codes here.
+//!
+//! ## CMYK ingest (spec §5.2)
+//!
+//! "CMYK sources transform to working space at ingest and back at
+//! export." [`Self::compile_cmyk_to_rgba8`] is that ingest path: a CMYK
+//! *device* source profile → an RGB destination, applied to packed
+//! CMYK8 ink (the 4-channel `cmyk8` the JPEG adapter delivers, post the
+//! Adobe-APP14 re-inversion) and producing straight RGBA8.
+//!
+//! moxcms expresses a 4-ink CMYK device source via `Layout::Rgba` — its
+//! [`moxcms::DataColorSpace::Cmyk`] profiles accept exactly the 4-slot
+//! `Rgba` layout (the 4 inks ride the 4 byte slots; this is moxcms's
+//! `check_layout` contract, not a colour reinterpretation). The
+//! destination RGB is `Layout::Rgb` (3 channels); we widen to RGBA with
+//! `A = 255` at the slice boundary because CMYK ink carries no alpha.
+//! Intent selects the per-intent A2B LUT exactly as in the RGB lane; BPC
+//! is the same inert-but-recorded flag (moxcms 0.8.1 exposes no knob).
 
-use moxcms::{ColorProfile, Layout, RenderingIntent, Transform8BitExecutor, TransformOptions};
+use moxcms::{
+    ColorProfile, DataColorSpace, Layout, RenderingIntent, Transform8BitExecutor, TransformOptions,
+};
 use std::sync::Arc;
 
-use crate::{CmsEngine, CmsError, CompiledTransform, ExactTransform, Intent, Profile};
+use crate::{
+    CmsEngine, CmsError, CmykTransform, CompiledCmykTransform, CompiledTransform, ExactTransform,
+    Intent, Profile,
+};
 
 #[derive(Debug, Default)]
 pub struct MoxcmsEngine;
@@ -95,6 +117,32 @@ impl ExactTransform for MoxcmsRgba8 {
         self.transform
             .transform(&src, pixels)
             .expect("moxcms RGBA8 transform: equal-length src/dst cannot fail");
+    }
+}
+
+/// The compiled moxcms CMYK8→RGB8 transform (print-lane ingest). The
+/// executor takes a packed 4-ink `Layout::Rgba` source and a packed
+/// 3-channel `Layout::Rgb` destination; we widen the RGB output to
+/// straight RGBA8 (A = 255) at the boundary.
+struct MoxcmsCmyk8 {
+    transform: Arc<Transform8BitExecutor>,
+}
+
+impl CmykTransform for MoxcmsCmyk8 {
+    fn apply(&self, cmyk: &[u8], rgba: &mut [u8]) {
+        let n = cmyk.len() / 4;
+        // moxcms writes 3 bytes (RGB) per pixel; scratch then widen so we
+        // never hand the executor a non-multiple-of-3 destination.
+        let mut rgb = vec![0u8; n * 3];
+        self.transform
+            .transform(cmyk, &mut rgb)
+            .expect("moxcms CMYK8→RGB8: caller-checked 4·n / 3·n lengths cannot fail");
+        for (px, src) in rgba.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+            px[0] = src[0];
+            px[1] = src[1];
+            px[2] = src[2];
+            px[3] = 255;
+        }
     }
 }
 
@@ -133,6 +181,54 @@ impl CmsEngine for MoxcmsEngine {
             intent,
             bpc,
             backend: Box::new(MoxcmsRgba8 { transform }),
+        })
+    }
+
+    fn compile_cmyk_to_rgba8(
+        &self,
+        src: &Profile,
+        dst: &Profile,
+        intent: Intent,
+        bpc: bool,
+    ) -> Result<CompiledCmykTransform, CmsError> {
+        let src_profile = ColorProfile::new_from_slice(&src.bytes).map_err(|e| {
+            CmsError::BadProfile(format!("moxcms rejected CMYK source profile: {e:?}"))
+        })?;
+        // Refuse a non-CMYK source up front — the ingest contract is "CMYK
+        // device → working space"; an RGB source here is a caller error,
+        // and feeding RGB through the Rgba-as-ink layout would silently
+        // mis-colour. (`DataColorSpace::Cmyk` is the 4-ink device class.)
+        if src_profile.color_space != DataColorSpace::Cmyk {
+            return Err(CmsError::Unsupported(format!(
+                "compile_cmyk_to_rgba8 needs a CMYK device source profile, got {:?}",
+                src_profile.color_space
+            )));
+        }
+        let dst_profile = ColorProfile::new_from_slice(&dst.bytes).map_err(|e| {
+            CmsError::BadProfile(format!("moxcms rejected destination profile: {e:?}"))
+        })?;
+
+        let options = TransformOptions {
+            rendering_intent: map_intent(intent),
+            ..Default::default()
+        };
+
+        // 4-ink CMYK device source rides Layout::Rgba (moxcms's
+        // check_layout contract); RGB destination is Layout::Rgb.
+        let transform = src_profile
+            .create_transform_8bit(Layout::Rgba, &dst_profile, Layout::Rgb, options)
+            .map_err(|e| {
+                CmsError::Unsupported(format!(
+                    "moxcms could not build the CMYK8→RGB8 transform: {e:?}"
+                ))
+            })?;
+
+        Ok(CompiledCmykTransform {
+            src: src.hash,
+            dst: dst.hash,
+            intent,
+            bpc,
+            backend: Box::new(MoxcmsCmyk8 { transform }),
         })
     }
 }

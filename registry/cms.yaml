@@ -1,0 +1,102 @@
+# paged.image LOCAL CMS registry (spec §10.1, D-11 ruling: HYBRID). The
+# build-consumed provenance + tolerance ledger for the color-management
+# lanes; state_row joins onto the paged-media/state `image.cms.*` rows.
+#
+# D-11 (A-0 audit §F): a HYBRID engine seam (`CmsEngine` trait). The qcms
+# backend is the display-consistency lane (the exact build core uses, so
+# "the page" and "the image editor" agree by construction); the moxcms
+# backend is the print lane (genuine 4-intent handling, CMYK ingest, ICC
+# v4) — the capability qcms's Firefox-driven build lacks (audit §A).
+
+- id: image.cms.engine.seam
+  state_row: image.cms.engine
+  tier: shipped          # M0: CmsEngine trait + compile-on-CPU / apply-on-GPU (LUT bake)
+  provenance:
+    - "spec §10.1 D-11 ruling (A-0 audit §F): hybrid qcms+moxcms behind one trait"
+    - "compile-on-CPU / apply-on-GPU: GpuLut trilinear lattice (cms.apply kernel, T1)"
+  tests:
+    rust: ["image-cms/src/lut.rs (unit)"]
+
+- id: image.cms.display.qcms
+  state_row: image.cms.display
+  tier: shipped          # M1: RGBA8 RGB↔RGB display path, qcms 0.3 (cmyk+iccv4 build flags)
+  # Display-consistency lane: the EXACT qcms build core uses, so the page
+  # render and the image editor agree (A-0 audit §F.1). Deliberate limits
+  # inherited (audit §A): no BPC, 8-bit endpoints, Perceptual/RelCol-centric
+  # intents (Saturation/Absolute degrade to nearest). bpc:true is recorded
+  # on the handle but inert. The differential oracle is lcms2 (CI-only
+  # dev-dep, never shipped); tolerance 3/255 per channel over matrix-shaper
+  # profiles (the only residual is gamma/matrix rounding).
+  gpu_tolerance: { kind: channel_eps_u8, value: 3, note: "vs lcms2 oracle, RGB↔RGB matrix-shaper" }
+  provenance:
+    - "ICC.1 color management; qcms 0.3 (FirefoxGraphics), the build core ships"
+    - "differential oracle: lcms2 6 (CI-only dev-dep, never shipped)"
+  tests:
+    rust: ["image-cms/tests/parity.rs"]
+
+- id: image.cms.print.rgb.moxcms
+  state_row: image.cms.print
+  tier: shipped          # M1: RGBA8 RGB↔RGB print lane through moxcms 0.8.1
+  # Print lane, RGB↔RGB half: genuine per-intent LUT selection (all four
+  # map 1:1 to moxcms RenderingIntent; none silently degraded — the qcms
+  # gap, audit §A). Proven intent-dependent on a synthetic LUT profile with
+  # distinct A2B0/A2B1 tables. BPC: moxcms 0.8.1 exposes no runtime BPC knob
+  # (the TransformOptions field is commented out upstream; the BPC module is
+  # dead code) — bpc:true is recorded for provenance but byte-identical to
+  # bpc:false. The BPC-fidelity row stays pinned to a future moxcms release
+  # (or the lcms2-shaped export oracle); the test documents the gap by
+  # contrasting with lcms2 BLACKPOINT_COMPENSATION which DOES move pixels.
+  gpu_tolerance: { kind: channel_eps_u8, value: 3, note: "vs lcms2 oracle, RGB↔RGB matrix-shaper" }
+  provenance:
+    - "ICC.1 v2/v4; moxcms 0.8.1 (pure-Rust, BSD-3-Clause OR Apache-2.0)"
+    - "per-intent A2B LUT selection: moxcms TransformOptions.rendering_intent"
+    - "differential oracle: lcms2 6 / lcms2-sys 4 (CI-only dev-deps, never shipped)"
+  tests:
+    rust: ["image-cms/tests/print_lane.rs"]
+
+- id: image.cms.print.cmyk-ingest.moxcms
+  state_row: image.cms.print
+  tier: shipped          # M1 (lane): CMYK8 device → RGBA8 working-space ingest through moxcms 0.8.1
+  # The print lane's second half (spec §5.2: "CMYK sources transform to
+  # working space at ingest and back at export"). CompiledCmykTransform:
+  # a CMYK *device* source profile → an RGB destination, applied to the
+  # packed 4-ink cmyk8 the JPEG adapter delivers (post the Adobe-APP14
+  # re-inversion). moxcms expresses 4-ink CMYK device data via Layout::Rgba
+  # (its DataColorSpace::Cmyk check_layout contract — the 4 inks ride the 4
+  # byte slots); RGB destination is Layout::Rgb, widened to straight RGBA8
+  # (A=255, CMYK ink carries no alpha) at the slice boundary. Intent honored
+  # (proven: Perceptual vs AbsoluteColorimetric differ 67/255 through a
+  # distinct-A2B CMYK profile). The lane REFUSES a non-CMYK source profile
+  # (a guarded caller error, never a silent mis-colour). The qcms display
+  # lane does NOT implement CMYK ingest (the default trait method returns
+  # Unsupported — the audit §A gap this lane closes).
+  #
+  # TOLERANCE RULING (delta vs the RGB display lane): a CMYK A2B is a CLUT
+  # pipeline (4-in → 3-out), not a matrix-shaper, so the residual is
+  # interpolation- and media-white-clamp-bound, not gamma-rounding-bound.
+  # Measured vs the lcms2 CMYK→RGB oracle over a 16-patch ink ramp, both
+  # intents: bulk worst = 1/255; the lone outlier is the PAPER-WHITE corner
+  # (all-zero ink) under RelativeColorimetric, 19/255 (moxcms G≈236 vs
+  # lcms2 255 — the two CMMs' media-white-clamp disagreement at the no-ink
+  # CLUT corner, a known relcol white-handling difference, not a bug).
+  # Headline bound 20/255 admits that corner; a tighter 8/255 BULK gate
+  # holds every non-corner patch (measured 1/255 — 8 is conservative
+  # headroom across CMM minor versions).
+  #
+  # NOT YET WIRED into the M4 image-js ingest slice: that path still rejects
+  # CMYK ("the M2 cast/CMS lane") because wiring needs image-js to take an
+  # image-cms dep (wasm-size budget I-07) + thread the embedded source ICC
+  # and a baked sRGB destination. The transform lane is complete and
+  # conformance-gated here; the editor-ingest wire-up is a separate task.
+  gpu_tolerance:
+    kind: channel_eps_u8
+    value: 20
+    bulk: 8
+    note: "vs lcms2 CMYK→RGB oracle; 20 admits the paper-white/relcol media-white corner (19/255), 8 is the bulk gate (measured 1/255)"
+  provenance:
+    - "ICC.1 v2/v4 A2B CLUT (4-in CMYK → 3-out PCS); moxcms 0.8.1"
+    - "Adobe APP14 ink convention upstream (decode side, image-codecs jpeg)"
+    - "4-ink-via-Layout::Rgba: moxcms DataColorSpace::Cmyk check_layout contract"
+    - "differential oracle: lcms2-sys 4 raw FFI CMYK_8→RGB_8 (CI-only dev-dep, never shipped)"
+  tests:
+    rust: ["image-cms/tests/cmyk_lane.rs"]

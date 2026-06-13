@@ -74,6 +74,21 @@ pub struct CompiledTransform {
     pub(crate) backend: Box<dyn ExactTransform>,
 }
 
+/// A compiled CMYK→RGBA8 transform handle — the print-lane ingest path
+/// (spec §5.2: "CMYK sources transform to working space at ingest").
+/// Distinct from [`CompiledTransform`] because the input is 4-channel ink
+/// (one byte per C, M, Y, K), not RGBA: the [`ExactTransform`] in-place
+/// contract cannot express a channel-count change. Engine-opaque; the
+/// backend converts a packed CMYK8 buffer to a packed straight-RGBA8
+/// buffer (alpha synthesised as 255 — CMYK ink carries no transparency).
+pub struct CompiledCmykTransform {
+    pub src: IccHash,
+    pub dst: IccHash,
+    pub intent: Intent,
+    pub bpc: bool,
+    pub(crate) backend: Box<dyn CmykTransform>,
+}
+
 /// Backend-internal exact application (8-bit endpoints in M0 — the
 /// qcms reality; the float path arrives with moxcms). Deliberately NOT
 /// `Send + Sync` in M0: the engine is single-threaded until the
@@ -82,6 +97,18 @@ pub struct CompiledTransform {
 pub(crate) trait ExactTransform {
     /// Transform interleaved RGBA8 in place (alpha passed through).
     fn apply_rgba8(&self, pixels: &mut [u8]);
+}
+
+/// Backend-internal exact CMYK→RGBA8 application: reads `cmyk` as packed
+/// 4-byte ink (C, M, Y, K) and writes `rgba` as packed straight RGBA8
+/// (A = 255). The two slices have independent channel counts, so this is
+/// a separate out-of-place contract rather than an in-place one. 8-bit
+/// endpoints in M1 (the float path arrives with the M2 high-bit lane).
+pub(crate) trait CmykTransform {
+    /// `cmyk.len()` must be `4 * n` and `rgba.len()` must be `4 * n` for
+    /// the same `n`; the caller guarantees this (see
+    /// [`CompiledCmykTransform::apply_cmyk_to_rgba8`]).
+    fn apply(&self, cmyk: &[u8], rgba: &mut [u8]);
 }
 
 impl CompiledTransform {
@@ -97,6 +124,31 @@ impl CompiledTransform {
     }
 }
 
+impl CompiledCmykTransform {
+    /// Exact CPU application of the print-lane ingest transform: packed
+    /// CMYK8 (`cmyk`, `4 * n` bytes) → packed straight RGBA8 (`rgba`,
+    /// `4 * n` bytes, A = 255). Panics on a length mismatch — callers hold
+    /// the contract; conversions are compiled paths, never ad-hoc per-op
+    /// code (spec §5.1).
+    pub fn apply_cmyk_to_rgba8(&self, cmyk: &[u8], rgba: &mut [u8]) {
+        assert_eq!(cmyk.len() % 4, 0, "CMYK input must be 4 bytes per pixel");
+        assert_eq!(rgba.len() % 4, 0, "RGBA output must be 4 bytes per pixel");
+        assert_eq!(
+            cmyk.len(),
+            rgba.len(),
+            "CMYK→RGBA is pixel-for-pixel (both 4 channels)"
+        );
+        self.backend.apply(cmyk, rgba);
+    }
+
+    /// Convenience: allocate the RGBA8 output for a CMYK8 input and apply.
+    pub fn cmyk_to_rgba8_vec(&self, cmyk: &[u8]) -> Vec<u8> {
+        let mut rgba = vec![0u8; cmyk.len()];
+        self.apply_cmyk_to_rgba8(cmyk, &mut rgba);
+        rgba
+    }
+}
+
 /// The swappable engine seam (D-11). Mirrors core's narrow `Cmm`
 /// trait: build once per (src, dst, intent, bpc), apply many.
 pub trait CmsEngine {
@@ -107,4 +159,22 @@ pub trait CmsEngine {
         intent: Intent,
         bpc: bool,
     ) -> Result<CompiledTransform, CmsError>;
+
+    /// Compile a CMYK→RGBA8 transform: a CMYK *device* source profile
+    /// (`src`) to an RGB destination (`dst`) — the print-lane ingest path
+    /// (spec §5.2). Additive over [`Self::compile`]: backends that cannot
+    /// honour CMYK ingest (the qcms display lane, audit §A) keep the
+    /// frozen surface by inheriting the default, which returns
+    /// [`CmsError::Unsupported`]. The moxcms print lane overrides it.
+    fn compile_cmyk_to_rgba8(
+        &self,
+        _src: &Profile,
+        _dst: &Profile,
+        _intent: Intent,
+        _bpc: bool,
+    ) -> Result<CompiledCmykTransform, CmsError> {
+        Err(CmsError::Unsupported(
+            "CMYK ingest is the moxcms print lane; this backend is RGB-only".into(),
+        ))
+    }
 }
