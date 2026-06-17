@@ -280,11 +280,17 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
     // SourceInfo for callers that want to defer the rotation.)
     let orientation = info.exif_meta().orientation.unwrap_or(Orientation::TopLeft);
     let channels = info.format.channels;
-    if matches!(channels, ChannelLayout::Cmyk | ChannelLayout::Cmyka) {
+    // CMYK+alpha (5-channel) is not produced by any current codec adapter
+    // (the JPEG lane delivers 4-ink `Cmyk`); reject it cleanly rather than
+    // guess an alpha-from-ink rule.
+    if matches!(channels, ChannelLayout::Cmyka) {
         return Err(IngestError::Unsupported(
-            "CMYK placed images (the M2 cast/CMS lane)".into(),
+            "CMYK+alpha placed images (no 5-channel ingest lane)".into(),
         ));
     }
+    // The embedded ICC profile (if any) drives the colour-managed CMYK
+    // cast; clone it out before `info` is consumed below.
+    let embedded_icc = info.icc.clone();
     let (w, h) = (info.width, info.height);
     let bpp = info.format.bytes_per_pixel();
     let mut buf = vec![0u8; w as usize * h as usize * bpp];
@@ -316,7 +322,15 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
             }
             v
         }
-        ChannelLayout::Cmyk | ChannelLayout::Cmyka => unreachable!("rejected above"),
+        ChannelLayout::Cmyk => {
+            // The print-lane ingest cast (spec §5.2): 4-ink CMYK → RGBA8,
+            // colour-managed via the embedded ICC when present, else the
+            // uncalibrated device formula. `buf` is packed 4-byte true ink
+            // (the JPEG adapter already applied the Adobe-APP14 re-inversion).
+            let (rgba, _managed) = crate::cmyk::cmyk8_to_rgba8(&buf, embedded_icc.as_deref())?;
+            rgba
+        }
+        ChannelLayout::Cmyka => unreachable!("rejected above"),
     };
 
     // Auto-orient on the straight-RGBA8 buffer. Identity short-circuits

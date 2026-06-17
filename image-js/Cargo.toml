@@ -22,6 +22,14 @@ image-pipeline = { path = "../image-pipeline" }
 image-codecs = { path = "../image-codecs" }
 image-gpu = { path = "../image-gpu" }
 image-psd = { path = "../image-psd" }
+# CMS print lane (D-11): the moxcms CMYK→RGBA8 ingest cast. CPU transform
+# *compilation* + apply is inherently-CPU work (spec §6), so this rides
+# the ingest slice's decode lane, not the GPU kernel path.
+image-cms = { path = "../image-cms" }
+# Engine B: the tiled buffer-graph mip evaluation (the `image_tile_rgba8_level`
+# window path). rgba16float source tiles + the f16→u8 downconvert.
+image-graph = { path = "../image-graph" }
+half = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -33,3 +41,7 @@ getrandom = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+# CMYK-JPEG fixture builder for the ingest cast test (the codec adapter
+# only encodes RGB/Gray; jpeg-encoder writes the Adobe-APP14 CMYK form
+# zune-jpeg re-inverts on decode). Dev-only — never in the wasm artifact.
+jpeg-encoder = "0.7.0"

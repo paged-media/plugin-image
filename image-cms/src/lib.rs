@@ -36,6 +36,22 @@ pub use lut::GpuLut;
 
 use image_core::IccHash;
 
+/// The canonical sRGB profile as a ready-to-use [`Profile`] — the working
+/// RGB destination for the ingest casts (CMYK→RGBA8) when no document
+/// working-space profile is supplied. Synthesised by the moxcms backend
+/// (`ColorProfile::new_srgb`), so no external ICC asset is bundled. The
+/// returned profile's `hash` is the content hash of the synthesised bytes
+/// (stable across calls within a build). Errors only if moxcms cannot
+/// encode its own canonical sRGB profile (a should-never-happen).
+pub fn working_srgb_profile() -> Result<Profile, CmsError> {
+    let bytes = moxcms::ColorProfile::new_srgb()
+        .encode()
+        .map_err(|e| CmsError::BadProfile(format!("could not synthesise sRGB profile: {e:?}")))?;
+    let bytes: std::sync::Arc<[u8]> = bytes.into();
+    let hash = IccHash(image_core::ContentHash::of(&bytes).0);
+    Ok(Profile { hash, bytes })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CmsError {
     #[error("profile rejected: {0}")]

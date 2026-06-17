@@ -33,7 +33,9 @@
 //! (image-conformance / `image-kernels` feature `reference`) is
 //! reachable from this crate (cargo-tree guard, spec §4 dep rule 2).
 
+pub mod cmyk;
 pub mod ingest;
+pub mod mip;
 
 /// The frozen kernel ABI version this artifact was built against.
 pub fn abi_version() -> u32 {
@@ -57,6 +59,7 @@ mod wasm {
     use crate::ingest::{
         adjust_rgba8, crop_rgba8, decode_rgba8, AdjustParams, DecodedImage, LevelsParams,
     };
+    use crate::mip::MipPyramid;
 
     thread_local! {
         /// The bundle-realm GPU device (I-07: created HERE, where
@@ -66,6 +69,11 @@ mod wasm {
         static IMAGES: RefCell<HashMap<u32, DecodedImage>> =
             RefCell::new(HashMap::new());
         static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
+        /// Engine-B mip pyramids built lazily for the `level > 0` tile
+        /// window path, cached per image handle (build once, sample many).
+        /// Dropped when the image is freed.
+        static PYRAMIDS: RefCell<HashMap<u32, Rc<MipPyramid>>> =
+            RefCell::new(HashMap::new());
     }
 
     #[wasm_bindgen(start)]
@@ -481,11 +489,76 @@ mod wasm {
         Ok(js_sys::Uint8Array::from(&bytes[..]))
     }
 
-    /// Release an engine-held decoded image.
+    /// C-6 (I-06) — copy a tile window `(x, y, w, h)` out of a decoded
+    /// image at mip `level` as tightly packed RGBA8 (`w'*h'*4` bytes,
+    /// clipped to the level extent, row-major). `level == 0` is the fast
+    /// level-0 path ([`image_tile_rgba8`]'s pure windowing); `level > 0`
+    /// routes through Engine B's tiled buffer graph
+    /// (`image_graph::BufferGraph`): a 2×-box mip pyramid of rgba16float
+    /// source tiles is built once per handle (cached) and the requested
+    /// window is gathered from `(level, coord)` source reads and
+    /// downconverted back to RGBA8. The coordinates are in the LEVEL's
+    /// pixel space (already halved per level — the caller scales). No GPU
+    /// is required (a source read carries no kernel dispatch). Returns an
+    /// empty buffer when the window lies fully outside the level, or when
+    /// `level` exceeds the pyramid top (a transparent miss the provider
+    /// skips). `max_level` bounds the pyramid height built on first touch.
+    #[wasm_bindgen]
+    pub fn image_tile_rgba8_level(
+        handle: u32,
+        level: u32,
+        x: u32,
+        y: u32,
+        size: u32,
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        // Fast path: level 0 needs no pyramid (pure windowing of the
+        // already-decoded buffer).
+        if level == 0 {
+            let img = IMAGES
+                .with(|m| m.borrow().get(&handle).cloned())
+                .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+            let (bytes, _tw, _th) = img.tile_window_rgba8(x, y, size, size);
+            return Ok(js_sys::Uint8Array::from(&bytes[..]));
+        }
+
+        let level_u8: u8 = level
+            .try_into()
+            .map_err(|_| JsValue::from_str(&format!("mip level {level} out of range (max 255)")))?;
+
+        // Build (or reuse the cached) pyramid for this handle. The pyramid
+        // height is bounded by the requested level (built up to it).
+        let pyramid = PYRAMIDS.with(|p| p.borrow().get(&handle).cloned());
+        let pyramid = match pyramid {
+            Some(p) if p.max_level() >= level_u8 => p,
+            _ => {
+                let img = IMAGES
+                    .with(|m| m.borrow().get(&handle).cloned())
+                    .ok_or_else(|| {
+                        JsValue::from_str(&format!("unknown image handle {handle}"))
+                    })?;
+                let built = Rc::new(MipPyramid::build(
+                    img.width,
+                    img.height,
+                    &img.rgba,
+                    level_u8,
+                ));
+                PYRAMIDS.with(|p| p.borrow_mut().insert(handle, Rc::clone(&built)));
+                built
+            }
+        };
+
+        let (bytes, _tw, _th) = pyramid.window_rgba8(level_u8, x, y, size, size);
+        Ok(js_sys::Uint8Array::from(&bytes[..]))
+    }
+
+    /// Release an engine-held decoded image (and its mip pyramid cache).
     #[wasm_bindgen]
     pub fn free_image(handle: u32) {
         IMAGES.with(|m| {
             m.borrow_mut().remove(&handle);
+        });
+        PYRAMIDS.with(|p| {
+            p.borrow_mut().remove(&handle);
         });
     }
 }

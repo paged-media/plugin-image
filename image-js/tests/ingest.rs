@@ -316,3 +316,49 @@ fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
 async fn maybe_device() -> Option<GpuContext> {
     GpuContext::new().await.ok()
 }
+
+/// Encode a true-ink CMYK buffer (`4·n` bytes, C,M,Y,K) as an Adobe CMYK
+/// JPEG via jpeg-encoder (writes APP14 transform 0 + the Adobe inversion
+/// the zune-jpeg decoder re-inverts). No embedded ICC profile, so the
+/// decode takes the uncalibrated device-CMYK fallback.
+fn cmyk_jpeg_bytes(w: u32, h: u32, cmyk_ink: &[u8]) -> Vec<u8> {
+    use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
+    let mut buf = Vec::new();
+    let mut enc = Encoder::new(&mut buf, 100);
+    enc.set_sampling_factor(SamplingFactor::F_1_1);
+    enc.encode(cmyk_ink, w as u16, h as u16, ColorType::Cmyk)
+        .expect("encode cmyk jpeg");
+    buf
+}
+
+// feat: image.editor.ingest — the CMYK ingest cast (spec §5.2). A CMYK
+// placed image now DECODES (uncalibrated device fallback when there is no
+// embedded ICC) instead of the old `Unsupported` rejection.
+#[test]
+fn image_editor_ingest_cmyk_jpeg_decodes_instead_of_rejecting() {
+    // A 2×1 CMYK image: paper white (no ink) and solid black (full K).
+    let (w, h) = (2u32, 1u32);
+    let cmyk = vec![0u8, 0, 0, 0, /* white */ 0, 0, 0, 255 /* full K */];
+    let jpeg = cmyk_jpeg_bytes(w, h, &cmyk);
+    assert_eq!(&jpeg[0..3], &[0xFF, 0xD8, 0xFF], "JPEG SOI");
+
+    let img = decode_rgba8(&jpeg).expect("CMYK JPEG must now decode, not reject");
+    assert_eq!((img.width, img.height), (w, h));
+    assert_eq!(img.rgba.len(), (w * h * 4) as usize);
+
+    // No ICC → the device formula. JPEG is lossy, so allow tolerance, but
+    // the structure must hold: paper white near white, full K near black,
+    // alpha synthesised opaque.
+    let white = &img.rgba[0..4];
+    let black = &img.rgba[4..8];
+    assert!(
+        white[0] > 230 && white[1] > 230 && white[2] > 230,
+        "paper white should be near RGB white, got {white:?}"
+    );
+    assert!(
+        black[0] < 25 && black[1] < 25 && black[2] < 25,
+        "full K should be near RGB black, got {black:?}"
+    );
+    assert_eq!(white[3], 255, "alpha synthesised opaque");
+    assert_eq!(black[3], 255, "alpha synthesised opaque");
+}

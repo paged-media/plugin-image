@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use image_core::{ParamsHash, TileCoord};
+use image_core::{ParamsHash, TileCoord, TILE};
 use image_kernels::KernelDef;
 
 use crate::cache::NodeCache;
@@ -161,6 +161,26 @@ impl BufferGraph {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Read a single SOURCE tile `(level, coord)` without a GPU context —
+    /// the passthrough mip-window path (a source read does no kernel
+    /// dispatch, so it needs no device). Returns the tile's rgba16float
+    /// bytes (a freshly-allocated transparent-black tile for an
+    /// unallocated coord, per the sparse-canvas rule §5.3), or `None` if
+    /// `node` is not a source. The op-bearing evaluation stays on
+    /// [`Self::request`], which takes the GPU context the kernels need.
+    pub fn read_source_tile(&self, node: NodeId, coord: TileCoord) -> Option<Arc<[u8]>> {
+        match self.nodes.get(node)? {
+            Node::Source { data } => Some(match data.tile(coord) {
+                Some((b, _g)) => Arc::clone(b),
+                None => {
+                    const TILE_BYTES: usize = (TILE * TILE * 8) as usize; // rgba16float
+                    Arc::from(vec![0u8; TILE_BYTES].into_boxed_slice())
+                }
+            }),
+            _ => None,
         }
     }
 
