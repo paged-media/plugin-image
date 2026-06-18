@@ -95,6 +95,12 @@ export interface ImageSession {
   commitCrop(): Promise<boolean>;
   /** COMMITTED apply: adjust on the GPU + submit the in-frame layer. */
   apply(): Promise<boolean>;
+  /** LIVE per-drag preview (C-1 Stage B): adjust on the GPU + submit a
+   *  STREAMING pixel layer for the target frame, so dragging a slider
+   *  re-renders the frame without committing. No-op (returns false) when
+   *  the host wires no `rendering.pixelLayer@1` channel — the panel then
+   *  stays on the committed-Apply (Stage-A) path only. */
+  previewAdjust(): Promise<boolean>;
   /** C-6 — claim the ingested image's tile resource so the renderer
    *  pulls level-0 tiles for it (the v44 wire). Returns false when there
    *  is nothing ingested, no target frame, or the host wires no resource
@@ -123,6 +129,10 @@ export function createImageSession(host: BundleHost): ImageSession {
   let engine: ImageEngine | null = null;
   let bootPromise: Promise<ImageEngine | null> | null = null;
   let sceneSurface: ReturnType<typeof host.contribute.sceneLayer> | null = null;
+  // C-1 Stage B (protocol v50) — the per-drag pixel-layer surface + the
+  // frame currently carrying a live preview (cleared on commit/deselect).
+  let pixelSurface: ReturnType<typeof host.contribute.pixelLayer> | null = null;
+  let pixelPreviewFrame: string | null = null;
   // C-6 — the active tile-resource claim (null when nothing is claimed).
   let tileClaim: { elementId: string; dispose(): void } | null = null;
   // K-3 — the decode worker pool (null when the host wires no workers /
@@ -158,6 +168,15 @@ export function createImageSession(host: BundleHost): ImageSession {
     if (!host.supports("rendering.sceneLayer@1")) return null;
     if (!sceneSurface) sceneSurface = host.contribute.sceneLayer();
     return sceneSurface;
+  };
+
+  // C-1 Stage B — the per-drag pixel channel (protocol v50; lazy). Absent
+  // on an older/headless host (supports false) → previewAdjust no-ops and
+  // the panel stays on the committed-Apply path.
+  const pixelLayer = () => {
+    if (!host.supports("rendering.pixelLayer@1")) return null;
+    if (!pixelSurface) pixelSurface = host.contribute.pixelLayer();
+    return pixelSurface;
   };
 
   /** Boot the engine + GPU once, on first need. */
@@ -264,12 +283,90 @@ export function createImageSession(host: BundleHost): ImageSession {
     cropMachineRef = createCropMachine(engine, state.source.width, state.source.height);
   };
 
+  /** Clear any live Stage-B pixel preview (returns the frame to its
+   *  committed content). Safe to call when none is active. */
+  const clearPixelPreview = async () => {
+    if (pixelPreviewFrame) {
+      const frame = pixelPreviewFrame;
+      pixelPreviewFrame = null;
+      await pixelLayer()?.clear(frame);
+    }
+  };
+
   const clearLayer = async () => {
+    await clearPixelPreview();
     if (state.compositedFrame) {
       await scene()?.clear(state.compositedFrame);
       state.compositedFrame = null;
       emit();
     }
+  };
+
+  /** Resolve the frame to composite into: the source's bound element, else
+   *  the single current selection (bound to the source so later commits +
+   *  per-drag previews target the same frame). */
+  const resolveTarget = (): string | null => {
+    const src = state.source;
+    let target = src?.elementId ?? null;
+    if (!target) {
+      const ids = host.selection.get();
+      target = ids.length === 1 ? elementIdOf(ids[0]) : null;
+      if (target && src) src.elementId = target;
+    }
+    return target;
+  };
+
+  /** Adjust the source on the GPU + aspect-fit it into the target frame's
+   *  content box (centered). Returns the image tile fields SHARED by the
+   *  Stage-A sceneLayer (apply) and the Stage-B pixel layer (previewAdjust)
+   *  — the PixelTile shape is the SceneItem::Image shape minus `kind`. Null
+   *  when there is nothing to adjust. */
+  const computeTile = async (
+    target: string,
+  ): Promise<{
+    rgba: number[];
+    width: number;
+    height: number;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  } | null> => {
+    const src = state.source;
+    if (!src || !engine) return null;
+    const rgba = await engine.adjust(src.handle, state.params);
+    // Frame content box (the layer is clipped + transformed by core; §8.5 —
+    // the plugin never compensates). Aspect-fit, centered.
+    let boxW = src.width;
+    let boxH = src.height;
+    try {
+      const geom = await host.document.elementGeometry([
+        host.selection.get().find((i) => elementIdOf(i) === target) ??
+          ({ kind: "rectangle", id: target } as never),
+      ]);
+      const bounds = geom[0]?.bounds;
+      if (bounds) {
+        const [top, left, bottom, right] = bounds;
+        boxW = Math.max(right - left, 1);
+        boxH = Math.max(bottom - top, 1);
+      }
+    } catch (err) {
+      host.log.debug("composite: frame geometry read failed", err);
+    }
+    const scale = Math.min(boxW / src.width, boxH / src.height);
+    const w = src.width * scale;
+    const h = src.height * scale;
+    const x = (boxW - w) / 2;
+    const y = (boxH - h) / 2;
+    return {
+      rgba: Array.from(rgba),
+      width: src.width,
+      height: src.height,
+      x,
+      y,
+      w,
+      h,
+    };
   };
 
   const decodeInto = async (
@@ -454,16 +551,10 @@ export function createImageSession(host: BundleHost): ImageSession {
         setStatus("Nothing ingested — select an image frame and ingest first.");
         return false;
       }
-      // An import targets the currently selected frame at Apply time.
-      let target = src.elementId;
+      const target = resolveTarget();
       if (!target) {
-        const ids = host.selection.get();
-        target = ids.length === 1 ? elementIdOf(ids[0]) : null;
-        if (!target) {
-          setStatus("Select the target frame to composite the import into.");
-          return false;
-        }
-        src.elementId = target;
+        setStatus("Select the target frame to composite the import into.");
+        return false;
       }
       const surface = scene();
       if (!surface) {
@@ -478,46 +569,18 @@ export function createImageSession(host: BundleHost): ImageSession {
       state.busy = true;
       setStatus("Adjusting…");
       try {
-        const rgba = await engine.adjust(src.handle, state.params);
-
-        // Frame content box (the layer is clipped + transformed by core;
-        // §8.5 — the plugin never compensates). Aspect-fit, centered.
-        let boxW = src.width;
-        let boxH = src.height;
-        try {
-          const geom = await host.document.elementGeometry([
-            host.selection.get().find((i) => elementIdOf(i) === target) ??
-              ({ kind: "rectangle", id: target } as never),
-          ]);
-          const bounds = geom[0]?.bounds;
-          if (bounds) {
-            const [top, left, bottom, right] = bounds;
-            boxW = Math.max(right - left, 1);
-            boxH = Math.max(bottom - top, 1);
-          }
-        } catch (err) {
-          host.log.debug("apply: frame geometry read failed", err);
+        const tile = await computeTile(target);
+        if (!tile) {
+          setStatus("Nothing to composite.");
+          return false;
         }
-        const scale = Math.min(boxW / src.width, boxH / src.height);
-        const w = src.width * scale;
-        const h = src.height * scale;
-        const x = (boxW - w) / 2;
-        const y = (boxH - h) / 2;
-
-        await surface.submit(target, {
-          items: [
-            {
-              kind: "image",
-              rgba: Array.from(rgba),
-              width: src.width,
-              height: src.height,
-              x,
-              y,
-              w,
-              h,
-            },
-          ],
-        });
+        // A pixel preview and a scene layer share the frame's single layer
+        // slot in the engine (a PixelLayer lowers to the SceneItem::Image
+        // lane), so CLEAR the live Stage-B preview FIRST — clearing AFTER the
+        // submit would wipe the layer we just committed. Compute happened
+        // above (preview still up), so the blank gap is one round-trip.
+        await clearPixelPreview();
+        await surface.submit(target, { items: [{ kind: "image", ...tile }] });
         state.compositedFrame = target;
         setStatus(
           `Composited ${src.width}×${src.height} into the frame ` +
@@ -530,6 +593,30 @@ export function createImageSession(host: BundleHost): ImageSession {
       } finally {
         state.busy = false;
         emit();
+      }
+    },
+
+    async previewAdjust() {
+      const src = state.source;
+      if (!src || !engine) return false;
+      // No pixel channel (older/headless host) → no-op; the panel's live
+      // slider stays on the committed-Apply path. Never warns mid-drag.
+      const surface = pixelLayer();
+      if (!surface) return false;
+      const target = resolveTarget();
+      if (!target) return false;
+      // The GPU kernels are the only adjust path; without WebGPU a non-
+      // identity preview can't render — skip silently (Apply says it once).
+      if (!state.gpu && !isIdentity(state.params)) return false;
+      try {
+        const tile = await computeTile(target);
+        if (!tile) return false;
+        await surface.submit(target, { tiles: [tile] });
+        pixelPreviewFrame = target;
+        return true;
+      } catch (err) {
+        host.log.debug("previewAdjust failed", err);
+        return false;
       }
     },
 

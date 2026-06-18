@@ -69,6 +69,12 @@ export function makeFakeEditor() {
     submit: vi.fn(async () => {}),
     clear: vi.fn(async () => {}),
   };
+  // C-1 Stage B (v50) — the per-drag pixel channel (PagedEditor.pixelLayers);
+  // present here flips supports("rendering.pixelLayer@1") true for previewAdjust.
+  const pixelLayers = {
+    submit: vi.fn(async () => {}),
+    clear: vi.fn(async () => {}),
+  };
   // C-6 — a fake renderer resource channel (the editor's PagedEditor.images
   // member). Records claims/releases/submits and lets a test EMIT a
   // resourceTilesNeeded notification, driving the SDK adapter's
@@ -138,6 +144,7 @@ export function makeFakeEditor() {
     },
     camera: { camera: { scale: 1, tx: 0, ty: 0 } },
     sceneLayers,
+    pixelLayers,
     images,
     client: {
       mutate: async () => ({ kind: "mutationApplied", payload: {} }),
@@ -207,6 +214,7 @@ export function makeFakeEditor() {
     importers,
     tools,
     sceneLayers,
+    pixelLayers,
     images,
     overlayShapes,
     geometry,

@@ -8,7 +8,7 @@
 // crop geometry are the engine's deterministic Rust (image_core / the
 // reduce histogram); this leaf only renders + forwards.
 
-import { useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import manifest from "@paged-media/image-manifest/manifest.json";
@@ -253,11 +253,43 @@ export function makeImagePanel(session: ImageSession) {
           : "ready (no WebGPU — adjustments disabled)"
         : s.engine;
 
-    const setBase = (k: keyof AdjustParams, v: number) => session.setParams({ [k]: v });
+    // C-1 Stage B — a COALESCED live preview: while a GPU previewAdjust is
+    // in-flight, further slider moves only mark `pending`; when it settles it
+    // runs once more with the latest params. No overlapping GPU calls, always
+    // converges to the current values. No-ops when the host wires no pixel
+    // channel (previewAdjust returns false). The committed Apply (Stage-A)
+    // remains the explicit button.
+    const previewRef = useRef({ pending: false, running: false });
+    const preview = useCallback(() => {
+      const st = previewRef.current;
+      st.pending = true;
+      if (st.running) return;
+      void (async () => {
+        while (st.pending) {
+          st.pending = false;
+          st.running = true;
+          try {
+            await session.previewAdjust();
+          } finally {
+            st.running = false;
+          }
+        }
+      })();
+    }, []);
+
+    const setBase = (k: keyof AdjustParams, v: number) => {
+      session.setParams({ [k]: v });
+      preview();
+    };
+    const setLevel = (l: Parameters<ImageSession["setLevels"]>[0]) => {
+      session.setLevels(l);
+      preview();
+    };
 
     const pushCurve = (next: Array<[number, number]>) => {
       setCurvePoints(next);
       session.setCurvePoints(next);
+      preview();
     };
 
     const machine = session.cropMachine();
@@ -313,11 +345,11 @@ export function makeImagePanel(session: ImageSession) {
 
         {/* Levels */}
         <div style={sectionTitle}>Levels (composite)</div>
-        <Slider label="In black" min={0} max={1} step={0.01} value={p.levels.inBlack} disabled={disabled} onChange={(v) => session.setLevels({ inBlack: v })} />
-        <Slider label="Gamma" min={0.1} max={4} step={0.05} value={p.levels.gamma} disabled={disabled} onChange={(v) => session.setLevels({ gamma: v })} />
-        <Slider label="In white" min={0} max={1} step={0.01} value={p.levels.inWhite} disabled={disabled} onChange={(v) => session.setLevels({ inWhite: v })} />
-        <Slider label="Out black" min={0} max={1} step={0.01} value={p.levels.outBlack} disabled={disabled} onChange={(v) => session.setLevels({ outBlack: v })} />
-        <Slider label="Out white" min={0} max={1} step={0.01} value={p.levels.outWhite} disabled={disabled} onChange={(v) => session.setLevels({ outWhite: v })} />
+        <Slider label="In black" min={0} max={1} step={0.01} value={p.levels.inBlack} disabled={disabled} onChange={(v) => setLevel({ inBlack: v })} />
+        <Slider label="Gamma" min={0.1} max={4} step={0.05} value={p.levels.gamma} disabled={disabled} onChange={(v) => setLevel({ gamma: v })} />
+        <Slider label="In white" min={0} max={1} step={0.01} value={p.levels.inWhite} disabled={disabled} onChange={(v) => setLevel({ inWhite: v })} />
+        <Slider label="Out black" min={0} max={1} step={0.01} value={p.levels.outBlack} disabled={disabled} onChange={(v) => setLevel({ outBlack: v })} />
+        <Slider label="Out white" min={0} max={1} step={0.01} value={p.levels.outWhite} disabled={disabled} onChange={(v) => setLevel({ outWhite: v })} />
 
         {/* Curves */}
         <div style={sectionTitle}>Curves</div>

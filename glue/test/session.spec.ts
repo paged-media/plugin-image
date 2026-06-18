@@ -146,6 +146,62 @@ describe("the M4 ingest session (real engine wasm)", () => {
     handle.dispose();
   });
 
+  it("submits a live Stage-B pixel preview per drag, and the committed Apply clears it", async () => {
+    const fake = makeFakeEditor();
+    fake.placed.set("u5", psdBytes());
+    fake.emitSelection([{ kind: "rectangle", id: "u5" }]);
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+
+    await session.ingestSelection();
+    expect(session.state().gpu).toBe(false); // Node — identity-only lane
+
+    // A live per-drag preview (identity, the only no-GPU lane) submits a
+    // PIXEL layer (Stage B), not a scene layer — the frame re-renders without
+    // committing.
+    expect(await session.previewAdjust()).toBe(true);
+    expect(fake.pixelLayers.submit).toHaveBeenCalledTimes(1);
+    const [pid, layer] = fake.pixelLayers.submit.mock.calls[0] as unknown as [
+      string,
+      { tiles: Array<Record<string, unknown>> },
+    ];
+    expect(pid).toBe("u5");
+    expect(layer.tiles).toHaveLength(1);
+    expect(layer.tiles[0]).toMatchObject({ width: 2, height: 1, rgba: PSD_RGBA });
+
+    // Committing (Apply, Stage A) supersedes + CLEARS the live preview.
+    expect(await session.apply()).toBe(true);
+    expect(fake.pixelLayers.clear).toHaveBeenCalledWith("u5");
+
+    // A NON-identity preview without WebGPU is a silent no-op (no CPU
+    // kernel) — no second pixel submit, never a thrown mid-drag.
+    session.setParams({ exposureEv: 1 });
+    expect(await session.previewAdjust()).toBe(false);
+    expect(fake.pixelLayers.submit).toHaveBeenCalledTimes(1);
+
+    session.dispose();
+    handle.dispose();
+  });
+
+  it("previewAdjust no-ops when the host wires no pixel channel (older/headless host)", async () => {
+    const fake = makeFakeEditor();
+    // An older host without the v50 pixelLayers channel → supports
+    // ("rendering.pixelLayer@1") is false → previewAdjust returns false,
+    // never throws, and the panel stays on the committed-Apply path.
+    delete (fake.editor as unknown as { pixelLayers?: unknown }).pixelLayers;
+    fake.placed.set("u8", psdBytes());
+    fake.emitSelection([{ kind: "rectangle", id: "u8" }]);
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+
+    await session.ingestSelection();
+    expect(await session.previewAdjust()).toBe(false);
+    expect(fake.pixelLayers.submit).not.toHaveBeenCalled();
+
+    session.dispose();
+    handle.dispose();
+  });
+
   it("answers the honest no-bytes state for a frame without a placed image", async () => {
     const fake = makeFakeEditor();
     fake.emitSelection([{ kind: "rectangle", id: "empty" }]);
