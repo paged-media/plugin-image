@@ -14,6 +14,7 @@ import type { PluginManifest } from "@paged-media/plugin-api";
 import manifestJson from "@paged-media/image-manifest/manifest.json";
 
 import { createImageSession } from "../src/session";
+import { isIdentity } from "../src/engine";
 import {
   makeFakeEditor,
   mapBacking,
@@ -141,6 +142,39 @@ describe("the M4 ingest session (real engine wasm)", () => {
       saturation: 1,
     });
     expect(session.state().compositedFrame).toBeNull();
+
+    session.dispose();
+    handle.dispose();
+  });
+
+  it("auto-enhance derives levels + white balance from the histogram (real kernel)", async () => {
+    const fake = makeFakeEditor();
+    fake.placed.set("u5", psdBytes());
+    fake.emitSelection([{ kind: "rectangle", id: "u5" }]);
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+
+    // Before ingest: honest no-source state, params untouched.
+    session.autoEnhance();
+    expect(session.state().status).toMatch(/Nothing ingested/);
+    expect(isIdentity(session.state().params)).toBe(true);
+
+    await session.ingestSelection();
+    session.autoEnhance();
+    const s = session.state();
+    // The fixture is a dark, narrow-range, blue-cast image → auto-levels
+    // pulls the white point in (well under 1) and the result is non-identity;
+    // exposure/brightness/contrast/saturation are left untouched.
+    expect(s.params.levels.inWhite).toBeLessThan(1);
+    expect(s.params.levels.inWhite).toBeGreaterThan(s.params.levels.inBlack);
+    expect(isIdentity(s.params)).toBe(false);
+    expect(s.params.exposureEv).toBe(0);
+    expect(s.status).toMatch(/Auto-enhance/);
+
+    // Deterministic (pure CPU readout): a second call yields the same points.
+    const inWhite = s.params.levels.inWhite;
+    session.autoEnhance();
+    expect(session.state().params.levels.inWhite).toBe(inWhite);
 
     session.dispose();
     handle.dispose();

@@ -298,6 +298,20 @@ export function makeImagePanel(session: ImageSession) {
         ) : (
           <div style={note}>Ingest an image to see its histogram.</div>
         )}
+        <div style={{ display: "flex", gap: "var(--space-2, 8px)", marginTop: "var(--space-2, 8px)" }}>
+          <button
+            type="button"
+            data-image-auto-enhance
+            disabled={disabled || !s.histogram}
+            onClick={() => session.autoEnhance()}
+          >
+            Auto-enhance
+          </button>
+        </div>
+        <div style={note}>
+          Auto-enhance reads the histogram for auto-levels + a gray-world white
+          balance and fills the sliders below; click Apply to composite.
+        </div>
 
         {/* Tone / color base */}
         <div style={sectionTitle}>Tone</div>

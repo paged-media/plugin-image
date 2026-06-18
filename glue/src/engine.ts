@@ -107,6 +107,17 @@ export interface ImageHistogram {
   luma: Uint32Array;
 }
 
+/** Auto-enhance estimate (spec §6): percentile-clipped auto-levels black/
+ *  white points + a gray-world white balance, derived from the image's
+ *  histogram. Identity `{0, 1, 0, 0}` for a flat/neutral image (a no-op,
+ *  never a wrong-looking correction). Merged into the panel's levels + WB. */
+export interface AutoEnhanceParams {
+  inBlack: number;
+  inWhite: number;
+  temp: number;
+  tint: number;
+}
+
 /** The 8 crop grips + the body Move (discriminants mirror the Rust
  *  `image_core::Handle`); -1 = a miss (outside the chrome). */
 export type CropHandle = number;
@@ -159,6 +170,11 @@ export interface ImageEngine {
   /** Compute the RGB + luma 256-bin histogram of an engine-held image
    *  (the LEVELS / CURVES panel readout). Pure CPU reduction; no GPU. */
   histogram(handle: number): ImageHistogram;
+  /** Derive an auto-enhance estimate (auto-levels + gray-world white
+   *  balance) from the engine-held image's histogram. Pure CPU readout;
+   *  no GPU, no kernel dispatch — the values flow through the SAME
+   *  adjust pipeline the sliders use (the caller still commits via Apply). */
+  autoEnhanceParams(handle: number): AutoEnhanceParams;
   /** Commit a CROP: cut the integer pixel rectangle out of an engine-held
    *  image and register the result as a NEW engine-held image, returning
    *  its handle. The source handle is left intact. Throws on an empty /
@@ -236,6 +252,7 @@ export interface ImageWasmModule {
     curve_lut: Uint8Array,
   ): Promise<Uint8Array>;
   image_histogram(handle: number): Uint32Array;
+  image_auto_enhance_params(handle: number): Float32Array;
   crop_image(
     handle: number,
     x: number,
@@ -347,6 +364,11 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         b: flat.slice(512, 768),
         luma: flat.slice(768, 1024),
       };
+    },
+    autoEnhanceParams(handle) {
+      // Rust returns [in_black, in_white, temp, tint] (image-js lib.rs).
+      const a = wasm.image_auto_enhance_params(handle);
+      return { inBlack: a[0], inWhite: a[1], temp: a[2], tint: a[3] };
     },
     crop(handle, rect) {
       const h = wasm.crop_image(handle, rect.x, rect.y, rect.w, rect.h);

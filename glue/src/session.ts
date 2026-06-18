@@ -84,6 +84,12 @@ export interface ImageSession {
   /** Build + set the curves tone LUT from `(input, output)` control points
    *  in [0,1] (an empty / identity set clears the curve). */
   setCurvePoints(points: Array<[number, number]>): void;
+  /** Auto-enhance: derive levels (in black/white) + white balance
+   *  (temp/tint) from the ingested image's histogram and set them on the
+   *  params (PREVIEW-only — the user commits with Apply, like every other
+   *  edit). A no-op estimate (flat/neutral image) leaves the result
+   *  identity. */
+  autoEnhance(): void;
   /** The crop interaction machine for the ingested image (null until an
    *  image is ingested + the engine is ready). The crop tool's gesture and
    *  the panel's crop controls drive it. */
@@ -411,6 +417,33 @@ export function createImageSession(host: BundleHost): ImageSession {
         curveLut: isIdentityCurve ? null : engine.curveLut(points),
       };
       emit();
+    },
+
+    autoEnhance() {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return;
+      }
+      try {
+        // Pure CPU readout (no GPU needed) — derive auto-levels + gray-world
+        // WB from the histogram and merge into the SAME params the sliders
+        // drive. The composite still waits for the explicit Apply.
+        const a = engine.autoEnhanceParams(src.handle);
+        state.params = {
+          ...state.params,
+          temp: a.temp,
+          tint: a.tint,
+          levels: { ...state.params.levels, inBlack: a.inBlack, inWhite: a.inWhite },
+        };
+        emit();
+        setStatus(
+          "Auto-enhance set levels + white balance — click Apply to composite " +
+            "(document unchanged).",
+        );
+      } catch (err) {
+        setStatus(`Auto-enhance failed: ${err instanceof Error ? err.message : err}`);
+      }
     },
 
     cropMachine() {

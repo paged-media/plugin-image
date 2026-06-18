@@ -53,6 +53,19 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
+  // Auto-enhance: derive auto-levels + a gray-world white balance from the
+  // ingested image's histogram (pure CPU readout) and set them on the panel
+  // params. Like every edit it's PREVIEW-only — the user commits with Apply.
+  host.contribute.command({
+    id: "media.paged.image.command.autoEnhance",
+    title: "Auto-enhance image",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      session.autoEnhance();
+    },
+  });
+
   // C-6 (I-06) — claim the ingested image's tile resource so the renderer
   // pulls level-0 tiles for the placed frame at its current scale (the
   // honest subset; the mip pyramid + Engine B window eval are the named

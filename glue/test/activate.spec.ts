@@ -30,6 +30,7 @@ describe("imageBundle.activate", () => {
     expect(fake.commands.ids()).toEqual([
       "media.paged.image.command.openImage",
       "media.paged.image.command.adjustSelected",
+      "media.paged.image.command.autoEnhance",
       "media.paged.image.command.claimTiles",
       "media.paged.image.command.commitCrop",
     ]);
