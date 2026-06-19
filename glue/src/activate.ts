@@ -92,7 +92,9 @@ export function activate(host: BundleHost): BundleHandle {
     icon: "tool-crop",
     group: CROP_TOOL_ID,
     section: "transform",
-    shortcut: "c",
+    // shift+x — yields "c" to the built-in Scissors tool (InDesign-canonical);
+    // INV-REG-1 (editor registry-invariants) keeps tool shortcuts unique.
+    shortcut: "shift+x",
     gesture: () => makeCropGesture(host, session),
   });
 
