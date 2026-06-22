@@ -12,6 +12,7 @@
     "validate:manifest": "node ../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs validate manifest/manifest.json"
   },
   "devDependencies": {
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "tsup": "^8.3.5"
   }
 }

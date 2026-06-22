@@ -1,0 +1,65 @@
+# Build the paged.image wasm + publish to npm via OIDC TRUSTED PUBLISHING.
+#
+# image-manifest ships the wasm-bindgen artifact (manifest/wasm/*, gitignored
+# build output) built here by scripts/build-wasm.sh; image-glue is the TS bundle
+# (tsup, two entries: index + decode-worker) that imports it. Both publish under
+# the `canary` dist-tag, tokenless via OIDC (id-token) + auto-provenance.
+#
+# One-time npm setup per package (image-manifest, image-glue):
+#   npmjs → package → Trusted Publisher → GitHub Actions →
+#     org: paged-media, repo: plugin-image, workflow: publish.yml, action: npm publish
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- build the engine wasm (Rust → wasm-bindgen → wasm-opt) ---
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen 0.2.122 (prebuilt, must match Cargo.lock)
+        run: |
+          curl -fsSL https://github.com/rustwasm/wasm-bindgen/releases/download/0.2.122/wasm-bindgen-0.2.122-x86_64-unknown-linux-musl.tar.gz | tar xz
+          echo "$PWD/wasm-bindgen-0.2.122-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: binaryen (prebuilt wasm-opt; pinned — old apt binaryen breaks externref)
+        run: |
+          curl -fsSL https://github.com/WebAssembly/binaryen/releases/download/version_119/binaryen-version_119-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_119/bin" >> "$GITHUB_PATH"
+      - name: build wasm (manifest/wasm/image_js*)
+        run: bash scripts/build-wasm.sh
+
+      # --- build the TS bundle + publish ---
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22   # >= 22.14 for OIDC trusted publishing
+      - name: upgrade npm (OIDC needs >= 11.5.1)
+        run: npm install -g npm@latest
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r typecheck
+      - run: pnpm -r build   # image-glue tsup (index + decode-worker)
+      - name: publish via OIDC (canary)
+        run: |
+          set -e
+          for dir in manifest glue; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "skip $name@$version (already published)"; continue
+            fi
+            tgz="$RUNNER_TEMP/$(echo "$name" | sed 's#@##; s#/#-#')-${version}.tgz"
+            ( cd "$dir" && pnpm pack --pack-destination "$RUNNER_TEMP" )
+            echo "publish $name@$version via OIDC ($tgz)"
+            npm publish "$tgz" --tag canary --access public
+          done

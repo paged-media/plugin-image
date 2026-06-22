@@ -1,7 +1,7 @@
 {
   "name": "@paged-media/image-manifest",
-  "private": true,
-  "version": "0.0.1",
+  "private": false,
+  "version": "0.0.1-canary.0",
   "type": "module",
   "exports": {
     "./manifest.json": "./manifest.json",
@@ -10,5 +10,13 @@
   "scripts": {
     "typecheck": "node ../../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs validate manifest.json",
     "test": "node ../../plugin-sdk/packages/plugin-cli/bin/paged-plugin.mjs validate manifest.json"
+  },
+  "files": [
+    "manifest.json",
+    "wasm"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "canary"
   }
 }
