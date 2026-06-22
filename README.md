@@ -63,3 +63,13 @@ pnpm test && pnpm validate:manifest
   `rendered`, public crates announcement.
 - **M2** — buffer graph + interactivity (Engine B), PSD `mutatable`.
 - **M3** — breadth (T3 ops), selections plumbing, editor enablement.
+
+## License
+
+Dual-licensed **AGPL-3.0 OR the Paged Media Enterprise License (PMEL)** —
+the same as the paged editor (a plugin is part of the editor app). The engine
+(`paged-media/core`) and the plugin SDK (`paged-media/plugin-sdk`) it builds on
+are MPL-2.0 OR PMEL. See [`LICENSE.md`](./LICENSE.md), [`LICENSE`](./LICENSE),
+and [`CONTRIBUTING.md`](./CONTRIBUTING.md) (contributions under a CLA).
+
+`SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-PMEL`

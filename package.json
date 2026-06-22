@@ -2,6 +2,7 @@
   "name": "paged-media-plugin-image",
   "private": true,
   "version": "0.0.0",
+  "license": "AGPL-3.0-only OR LicenseRef-PMEL",
   "type": "module",
   "scripts": {
     "typecheck": "pnpm -r run typecheck",

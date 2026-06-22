@@ -1,8 +1,8 @@
 # CLAUDE.md — paged-media/plugin-image
 
 Orientation for Claude sessions in **paged-media/plugin-image** — the
-paged.image raster subsystem, delivered as a Paged plugin (private repo,
-And The Next GmbH).
+paged.image raster subsystem, delivered as a Paged plugin (public;
+dual-licensed AGPL-3.0 OR PMEL, And The Next GmbH).
 
 ## What this is
 
