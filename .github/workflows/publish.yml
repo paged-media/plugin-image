@@ -47,7 +47,8 @@ jobs:
       - name: upgrade npm (OIDC needs >= 11.5.1)
         run: npm install -g npm@latest
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -r typecheck
+      # tsup --dts type-checks image-glue; the manifest's own "typecheck" is a
+      # sibling-cli validation that doesn't belong in single-repo publish CI.
       - run: pnpm -r build   # image-glue tsup (index + decode-worker)
       - name: publish via OIDC (canary)
         run: |
