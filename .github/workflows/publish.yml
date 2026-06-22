@@ -43,14 +43,18 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 22   # >= 22.14 for OIDC trusted publishing
-      - name: upgrade npm (OIDC needs >= 11.5.1)
-        run: npm install -g npm@latest
+          node-version: 22
+          registry-url: https://registry.npmjs.org   # writes the token .npmrc
       - run: pnpm install --frozen-lockfile
       # tsup --dts type-checks image-glue; the manifest's own "typecheck" is a
       # sibling-cli validation that doesn't belong in single-repo publish CI.
       - run: pnpm -r build   # image-glue tsup (index + decode-worker)
-      - name: publish via OIDC (canary)
+      # First publish of brand-new packages can't use OIDC (no package page exists
+      # yet to configure a trusted publisher on) — bootstrap with the token, like
+      # draw. Once published, add OIDC trusted publishers + drop NODE_AUTH_TOKEN.
+      - name: publish (canary)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
           for dir in manifest glue; do
