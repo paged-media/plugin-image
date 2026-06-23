@@ -1,15 +1,15 @@
 name: publish
 
-# Token-bootstrap publish for the consolidated @paged-media/image package.
-# NEW package name → OIDC can't first-publish (no package page to set a trusted
-# publisher on). After the first publish, add a Trusted Publisher on npm and
-# switch back to OIDC (drop NODE_AUTH_TOKEN). Pre-1.0 -canary.N; unchanged skip.
+# Publish @paged-media/image to npm via OIDC TRUSTED PUBLISHING (tokenless).
+# Requires a Trusted Publisher on npm: org paged-media, this repo, workflow
+# publish.yml. Pre-1.0 -canary.N under the `canary` dist-tag; unchanged skip.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
+  id-token: write   # OIDC token for trusted publishing
   contents: read
 
 jobs:
@@ -34,13 +34,12 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          node-version: 22   # >= 22.14 for OIDC trusted publishing
+      - name: upgrade npm (OIDC needs >= 11.5.1)
+        run: npm install -g npm@latest
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
-      - name: publish (canary)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: publish via OIDC (canary)
         run: |
           set -e
           for dir in glue; do
@@ -51,6 +50,6 @@ jobs:
             fi
             tgz="$RUNNER_TEMP/$(echo "$name" | sed 's#@##; s#/#-#')-${version}.tgz"
             ( cd "$dir" && pnpm pack --pack-destination "$RUNNER_TEMP" )
-            echo "publish $name@$version"
+            echo "publish $name@$version via OIDC"
             npm publish "$tgz" --tag canary --access public
           done
