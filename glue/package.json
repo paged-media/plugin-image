@@ -50,5 +50,10 @@
         "default": "./dist/decode-worker.js"
       }
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paged-media/plugin-image.git",
+    "directory": "glue"
   }
 }
