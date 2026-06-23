@@ -460,7 +460,7 @@ async function loadModule(): Promise<ImageWasmModule> {
     // --target web glue) is produced by scripts/build-wasm.sh and is
     // intentionally absent from the source tree; the dynamic import
     // resolves at runtime once built. Typed via ImageWasmModule.
-    mod = (await import("@paged-media/image-manifest/wasm/image_js.js")) as ImageWasmModule;
+    mod = (await import("../wasm/image_js.js")) as ImageWasmModule;
   } catch (cause) {
     throw new Error(ENGINE_NOT_BUILT, { cause });
   }
@@ -473,7 +473,7 @@ async function loadModule(): Promise<ImageWasmModule> {
     // lives in a SIBLING workspace package, unlike sheets' ../bin).
     const require = createRequire(import.meta.url);
     const wasmPath = require.resolve(
-      "@paged-media/image-manifest/wasm/image_js_bg.wasm",
+      "../wasm/image_js_bg.wasm",
     );
     const bytes = await readFile(
       wasmPath.startsWith("file:") ? fileURLToPath(wasmPath) : wasmPath,
@@ -489,7 +489,7 @@ async function loadModule(): Promise<ImageWasmModule> {
     // @ts-ignore — `?url` is a bundler affordance, untyped.
     const wasmUrl = (await import(
       // @ts-ignore — see above.
-      "@paged-media/image-manifest/wasm/image_js_bg.wasm?url"
+      "../wasm/image_js_bg.wasm?url"
     )) as { default: string };
     await mod.default({ module_or_path: wasmUrl.default });
   }

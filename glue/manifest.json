@@ -1,0 +1,58 @@
+{
+  "id": "media.paged.image",
+  "name": "paged.image",
+  "version": "0.1.0",
+  "apiVersion": "^0.2",
+  "publisher": "paged.media",
+  "capabilities": {
+    "document": {
+      "read": "broad",
+      "write": "scoped"
+    },
+    "rendering": [
+      "sceneLayer",
+      "hitTest",
+      "resourceProvider",
+      "overlay"
+    ],
+    "assets": [
+      "images"
+    ],
+    "network": false,
+    "clipboard": "full",
+    "workers": {
+      "max": 4,
+      "sharedMemory": true
+    },
+    "gpu": {
+      "realm": "bundle"
+    },
+    "wasm": [
+      {
+        "name": "compute",
+        "path": "wasm/image_js_bg.wasm",
+        "purpose": "compute",
+        "maxBytes": 8388608
+      }
+    ]
+  },
+  "contributes": {
+    "panels": [
+      "media.paged.image.panel.adjustments",
+      "panels/image-adjustments.panel.json"
+    ],
+    "commands": [
+      "media.paged.image.command.openImage",
+      "media.paged.image.command.adjustSelected",
+      "media.paged.image.command.autoEnhance",
+      "media.paged.image.command.claimTiles",
+      "media.paged.image.command.commitCrop"
+    ],
+    "tools": [
+      "media.paged.image.tool.crop"
+    ],
+    "importers": [
+      "media.paged.image.importer.raster"
+    ]
+  }
+}

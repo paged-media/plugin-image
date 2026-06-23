@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT=manifest/wasm
+OUT=glue/wasm
 BUDGET=$((8 * 1024 * 1024))
 
 cargo build --release --target wasm32-unknown-unknown -p image-js

@@ -29,7 +29,7 @@
 import { useEffect, useReducer, useState } from "react";
 import type { CSSProperties } from "react";
 
-import manifest from "@paged-media/image-manifest/manifest.json";
+import manifest from "../../manifest.json";
 
 import type { ImageSession } from "../session";
 import type { AdjustParams, ImageHistogram } from "../engine";

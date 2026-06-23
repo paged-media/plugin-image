@@ -17,14 +17,11 @@ importers:
 
   glue:
     dependencies:
-      '@paged-media/image-manifest':
-        specifier: workspace:*
-        version: link:../manifest
       '@paged-media/plugin-api':
-        specifier: canary
+        specifier: 0.2.25-canary.0
         version: 0.2.25-canary.0
       '@paged-media/plugin-sdk':
-        specifier: canary
+        specifier: 0.2.25-canary.0
         version: 0.2.25-canary.0(react@18.3.1)
     devDependencies:
       '@types/node':

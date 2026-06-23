@@ -86,11 +86,12 @@ async function ensureWasm(): Promise<DecodeWasm> {
       // The glue + the `_bg.wasm` URL — resolved as worker chunks by the
       // bundler (the editor's `?worker&url` build includes them).
       const mod = (await import(
-        "@paged-media/image-manifest/wasm/image_js.js"
+        // @ts-ignore — artifact built by build-wasm.sh; absent from the source tree.
+        "../wasm/image_js.js"
       )) as unknown as DecodeWasm;
       const wasmUrl = (await import(
         // @ts-ignore — `?url` is a bundler affordance, untyped.
-        "@paged-media/image-manifest/wasm/image_js_bg.wasm?url"
+        "../wasm/image_js_bg.wasm?url"
       )) as { default: string };
       await mod.default({ module_or_path: wasmUrl.default });
       return mod;

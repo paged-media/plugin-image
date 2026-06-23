@@ -1,16 +1,15 @@
 name: publish
 
-# Build the plugin wasm + publish to npm via OIDC TRUSTED PUBLISHING (tokenless).
-# Each published package needs a Trusted Publisher on npmjs:
-#   org: paged-media, repo: THIS repo, workflow: publish.yml, action: npm publish
-# Pre-1.0: -canary.N versions under the `canary` dist-tag; unchanged versions skip.
+# Token-bootstrap publish for the consolidated @paged-media/image package.
+# NEW package name → OIDC can't first-publish (no package page to set a trusted
+# publisher on). After the first publish, add a Trusted Publisher on npm and
+# switch back to OIDC (drop NODE_AUTH_TOKEN). Pre-1.0 -canary.N; unchanged skip.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  id-token: write   # OIDC token for trusted publishing
   contents: read
 
 jobs:
@@ -35,15 +34,16 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 22   # >= 22.14 for OIDC trusted publishing
-      - name: upgrade npm (OIDC needs >= 11.5.1)
-        run: npm install -g npm@latest
+          node-version: 22
+          registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
-      - name: publish via OIDC (canary)
+      - name: publish (canary)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
-          for dir in manifest glue; do
+          for dir in glue; do
             name=$(node -p "require('./$dir/package.json').name")
             version=$(node -p "require('./$dir/package.json').version")
             if npm view "$name@$version" version >/dev/null 2>&1; then
@@ -51,6 +51,6 @@ jobs:
             fi
             tgz="$RUNNER_TEMP/$(echo "$name" | sed 's#@##; s#/#-#')-${version}.tgz"
             ( cd "$dir" && pnpm pack --pack-destination "$RUNNER_TEMP" )
-            echo "publish $name@$version via OIDC ($tgz)"
+            echo "publish $name@$version"
             npm publish "$tgz" --tag canary --access public
           done

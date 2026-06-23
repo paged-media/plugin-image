@@ -1,6 +1,6 @@
 {
   "name": "@paged-media/image-manifest",
-  "private": false,
+  "private": true,
   "version": "0.0.1-canary.0",
   "type": "module",
   "exports": {
@@ -14,9 +14,5 @@
   "files": [
     "manifest.json",
     "wasm"
-  ],
-  "publishConfig": {
-    "access": "public",
-    "tag": "canary"
-  }
+  ]
 }

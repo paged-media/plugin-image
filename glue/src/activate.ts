@@ -29,7 +29,7 @@
 import type { BundleHandle, BundleHost } from "@paged-media/plugin-api";
 import { contributePanel, contributeTool } from "@paged-media/plugin-sdk";
 
-import manifest from "@paged-media/image-manifest/manifest.json";
+import manifest from "../manifest.json";
 
 import { createImageSession } from "./session";
 import { makeImagePanel } from "./panels/image-panel";
