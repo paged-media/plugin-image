@@ -32,13 +32,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # No toolchain: input — dtolnay/rust-toolchain reads the pinned
-      # channel (1.93.0) from rust-toolchain.toml at the repo root, so the
-      # file is the single source of truth (a bump is one line, no
-      # workflow edit). This is core's resolve-from-file intent without a
-      # separate channel-resolver script.
+      # `toolchain:` is REQUIRED. This step used to omit it, on the belief
+      # that dtolnay/rust-toolchain resolves the channel from
+      # rust-toolchain.toml — it does not (the action has no such lookup;
+      # the file is honoured by rustup at invocation time, not by the
+      # installer). @master hard-fails the input check instead: "'toolchain'
+      # is a required input", exit 1 — which is what has been killing this
+      # job. Pin it here and MIRROR rust-toolchain.toml; bump both together.
       - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.93.0" # mirrors rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2

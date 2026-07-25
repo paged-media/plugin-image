@@ -84,16 +84,19 @@ jobs:
 
   # Rust unit evidence: cargo-nextest under the [profile.ci] in
   # .config/nextest.toml (fail-fast off, junit.path = junit.xml →
-  # target/nextest/ci/junit.xml). dtolnay/rust-toolchain reads the pinned
-  # channel from rust-toolchain.toml.
+  # target/nextest/ci/junit.xml).
   nextest:
     name: nextest evidence
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # No toolchain: input — reads the pinned channel (1.93.0) from
-      # rust-toolchain.toml, same as ci.yml.
+      # `toolchain:` is REQUIRED — dtolnay/rust-toolchain does NOT read
+      # rust-toolchain.toml, and @master exits 1 with "'toolchain' is a
+      # required input" when it is omitted (that, not the tests, is why
+      # this job has been red). Mirror rust-toolchain.toml; bump together.
       - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0" # mirrors rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
       - name: install cargo-nextest
         uses: taiki-e/install-action@nextest
