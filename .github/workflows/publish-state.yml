@@ -1,16 +1,15 @@
 # Evidence for the state matrix (stage plugin.image): run the unit suites
-# and publish normalized results to paged-media/state via the shared
-# publish-results action. Runs on main only — this is the post-merge
-# evidence feed, distinct from ci.yml's pre-merge gate.
+# and upload their results as artifacts for the private paged-media/state
+# repo to pull (see the step comments for why the direction is inverted).
+# Runs on main only — this is the post-merge evidence feed, distinct from
+# ci.yml's pre-merge gate.
 #
-# The (source, suite) pairs published here — (plugin-image, vitest) and
+# The (source, suite) pairs fed from here — (plugin-image, vitest) and
 # (plugin-image, nextest) — must be registered in the state repo's
-# ingest/suites.yaml; publish-results' convert step requires that pair to
-# exist there (using the registered name is load-bearing). Both suites'
-# junit carries no @feat: tags yet, so `map: "true"` applies state's
-# ingest/test-map.yaml bridge at convert time. The action self-conditions
-# the cross-repo dispatch on a non-empty token, so an unset
-# STATE_DISPATCH_TOKEN degrades to "convert + gate + upload, no dispatch".
+# ingest/suites.yaml; the convert step requires that pair to exist there
+# (using the registered name is load-bearing). Both suites' junit carries
+# no @feat: tags yet, so state applies its ingest/test-map.yaml bridge at
+# convert time.
 name: publish-state
 
 on:
@@ -64,15 +63,24 @@ jobs:
           cat plugin-image/*/junit.xml > junit-all.xml 2>/dev/null || true
           [ -s junit-all.xml ] # at least one package must have produced results
 
-      - uses: paged-media/state/actions/publish-results@main
+      # Evidence hand-off, INVERTED (2026-07-25). This step used to call
+      # paged-media/state/actions/publish-results@main, but that action lives in the
+      # PRIVATE paged-media/state repo, and GitHub refuses to resolve a private
+      # repo's action from a public workflow ("Unable to resolve action
+      # paged-media/state, not found") — so the job died at SET-UP, before any step
+      # ran, and this lane never published a single result. Follow the inverted
+      # pattern core/ci.yml and plugin-doc use: upload the results as an artifact
+      # and let state PULL it (private state can read a public repo's artifacts).
+      # Consumer: state/.github/workflows/siblings-pull.yml (source=plugin-image,
+      # suite=vitest, format=nextest-junit).
+      - name: upload vitest results artifact
         if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
         with:
-          source: plugin-image
-          suite: vitest
-          format: nextest-junit
+          name: vitest-junit
           path: junit-all.xml
-          map: "true"
-          dispatch-token: ${{ secrets.STATE_DISPATCH_TOKEN }}
+          if-no-files-found: error
+          retention-days: 14
 
   # Rust unit evidence: cargo-nextest under the [profile.ci] in
   # .config/nextest.toml (fail-fast off, junit.path = junit.xml →
@@ -96,12 +104,21 @@ jobs:
         # writes target/nextest/ci/junit.xml from [profile.ci.junit].
         run: cargo nextest run --workspace --profile ci || true
 
-      - uses: paged-media/state/actions/publish-results@main
+      # Evidence hand-off, INVERTED (2026-07-25). This step used to call
+      # paged-media/state/actions/publish-results@main, but that action lives in the
+      # PRIVATE paged-media/state repo, and GitHub refuses to resolve a private
+      # repo's action from a public workflow ("Unable to resolve action
+      # paged-media/state, not found") — so the job died at SET-UP, before any step
+      # ran, and this lane never published a single result. Follow the inverted
+      # pattern core/ci.yml and plugin-doc use: upload the results as an artifact
+      # and let state PULL it (private state can read a public repo's artifacts).
+      # Consumer: state/.github/workflows/siblings-pull.yml (source=plugin-image,
+      # suite=nextest, format=nextest-junit).
+      - name: upload nextest results artifact
         if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
         with:
-          source: plugin-image
-          suite: nextest
-          format: nextest-junit
+          name: nextest-junit
           path: target/nextest/ci/junit.xml
-          map: "true"
-          dispatch-token: ${{ secrets.STATE_DISPATCH_TOKEN }}
+          if-no-files-found: error
+          retention-days: 14
