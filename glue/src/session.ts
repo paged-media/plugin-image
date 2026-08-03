@@ -38,6 +38,7 @@ import {
   type AdjustParams,
   type ImageEngine,
   type ImageHistogram,
+  type PsdLayerInfo,
   type LevelsParams,
 } from "./engine";
 import { claimImageTiles } from "./tile-provider";
@@ -87,6 +88,12 @@ export interface ImageSessionState {
   busy: boolean;
   /** One-line panel status (honest, never fake-progress). */
   status: string;
+  /** PSD structural session (the mutatable tier): present when the
+   *  imported source is a PSD/PSB. Edits accumulate on the retained
+   *  parse; `psdExport` re-emits with full preservation. The canvas
+   *  composite stays the import-time flatten (re-flatten after record
+   *  edits is a follow-up). */
+  psd: { name: string; layers: PsdLayerInfo[] } | null;
 }
 
 export interface ImageSession {
@@ -96,6 +103,14 @@ export interface ImageSession {
   ingestSelection(): Promise<boolean>;
   /** Ingest opened/dropped file bytes (the K-2 importer path). */
   importBytes(name: string, bytes: Uint8Array): Promise<boolean>;
+  /** PSD layer-record edits (only when `state().psd` is set). Each
+   *  applies to the retained parse and refreshes the layer list. */
+  psdSetLayerOpacity(index: number, opacity: number): boolean;
+  psdRenameLayer(index: number, name: string): boolean;
+  psdRemoveLayer(index: number): boolean;
+  /** The edited PSD, preservation-safe (zero-edit ⇒ byte-identical).
+   *  Null when no PSD is loaded / the engine is gone. */
+  psdExport(): { bytes: Uint8Array; fileName: string } | null;
   setParams(p: Partial<AdjustParams>): void;
   /** Set the composite levels (merged into params.levels). */
   setLevels(l: Partial<LevelsParams>): void;
@@ -167,7 +182,10 @@ export function createImageSession(host: BundleHost): ImageSession {
     compositedFrame: null,
     busy: false,
     status: "Select a placed image frame, then ingest.",
+    psd: null,
   };
+  /** The retained PSD parse handle (wasm-side), when state.psd is set. */
+  let psdHandle: number | null = null;
 
   const emit = () => {
     for (const l of [...listeners]) l();
@@ -270,6 +288,40 @@ export function createImageSession(host: BundleHost): ImageSession {
     state.source = null;
     state.histogram = null;
     cropMachineRef = null;
+    if (psdHandle !== null && engine) engine.psdClose(psdHandle);
+    psdHandle = null;
+    state.psd = null;
+  };
+
+  /** "8BPS" — the PSD/PSB magic. */
+  const isPsd = (bytes: Uint8Array): boolean =>
+    bytes.length >= 4 &&
+    bytes[0] === 0x38 &&
+    bytes[1] === 0x42 &&
+    bytes[2] === 0x50 &&
+    bytes[3] === 0x53;
+
+  /** Open the PSD structural session for an imported PSD (the mutatable
+   *  tier's editor reach). Failure is honest-null — the raster lane
+   *  (composite decode) is unaffected. */
+  const openPsdSession = (name: string, bytes: Uint8Array): void => {
+    if (!engine || !isPsd(bytes)) return;
+    try {
+      psdHandle = engine.psdOpen(bytes);
+      state.psd = { name, layers: engine.psdLayers(psdHandle) };
+    } catch {
+      psdHandle = null;
+      state.psd = null;
+    }
+  };
+
+  const refreshPsdLayers = (): void => {
+    if (psdHandle === null || !engine || !state.psd) return;
+    try {
+      state.psd = { ...state.psd, layers: engine.psdLayers(psdHandle) };
+    } catch {
+      // A failed refresh leaves the last-known list; edits still saved.
+    }
   };
 
   /** Recompute the histogram + (re)build the crop machine for the live
@@ -396,6 +448,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         const ok = await decodeInto(name, bytes, "import", null);
         if (ok) {
+          openPsdSession(name, bytes);
           setStatus(
             `${name} — ${state.source?.width}×${state.source?.height} decoded. ` +
               "Select an image frame and Apply to composite.",
@@ -411,6 +464,59 @@ export function createImageSession(host: BundleHost): ImageSession {
     setParams(p) {
       state.params = { ...state.params, ...p };
       emit();
+    },
+
+    psdSetLayerOpacity(index, opacity) {
+      if (psdHandle === null || !engine) return false;
+      try {
+        engine.psdSetLayerOpacity(psdHandle, index, Math.max(0, Math.min(255, Math.round(opacity))));
+        refreshPsdLayers();
+        emit();
+        return true;
+      } catch (err) {
+        setStatus(`PSD edit failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+    },
+
+    psdRenameLayer(index, name) {
+      if (psdHandle === null || !engine) return false;
+      try {
+        engine.psdSetLayerName(psdHandle, index, name);
+        refreshPsdLayers();
+        emit();
+        return true;
+      } catch (err) {
+        setStatus(`PSD rename failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+    },
+
+    psdRemoveLayer(index) {
+      if (psdHandle === null || !engine) return false;
+      try {
+        engine.psdRemoveLayer(psdHandle, index);
+        refreshPsdLayers();
+        emit();
+        return true;
+      } catch (err) {
+        setStatus(`PSD remove failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+    },
+
+    psdExport() {
+      if (psdHandle === null || !engine || !state.psd) return null;
+      try {
+        return { bytes: engine.psdSave(psdHandle), fileName: state.psd.name };
+      } catch (err) {
+        setStatus(`PSD save failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return null;
+      }
     },
 
     setLevels(l) {

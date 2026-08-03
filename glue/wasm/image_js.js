@@ -404,6 +404,111 @@ export function kernel_count() {
     const ret = wasm.kernel_count();
     return ret >>> 0;
 }
+
+/**
+ * @param {number} handle
+ */
+export function psd_close(handle) {
+    wasm.psd_close(handle);
+}
+
+/**
+ * The layer list as JSON, in record order:
+ * `[{index, name, opacity, hidden, top, left, bottom, right}]`.
+ * `hidden` is PSD flags bit 1 (0x02).
+ * @param {number} handle
+ * @returns {string}
+ */
+export function psd_layer_list(handle) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.psd_layer_list(handle);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Parse a `.psd`/`.psb` and retain the structural model behind a
+ * handle (independent of `decode_image`'s composite lane). Free with
+ * `psd_close`.
+ * @param {Uint8Array} bytes
+ * @returns {number}
+ */
+export function psd_open(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.psd_open(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] >>> 0;
+}
+
+/**
+ * Remove a layer (balanced `lsct` group-divider bookkeeping engine-side).
+ * @param {number} handle
+ * @param {number} layer
+ */
+export function psd_remove_layer(handle, layer) {
+    const ret = wasm.psd_remove_layer(handle, layer);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Save the (possibly edited) PSD with full preservation: unmodeled
+ * blocks verbatim; a zero-edit save is byte-identical.
+ * @param {number} handle
+ * @returns {Uint8Array}
+ */
+export function psd_save(handle) {
+    const ret = wasm.psd_save(handle);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Rename a layer (updates the legacy Pascal name AND the canonical
+ * `luni` block).
+ * @param {number} handle
+ * @param {number} layer
+ * @param {string} name
+ */
+export function psd_set_layer_name(handle, layer, name) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.psd_set_layer_name(handle, layer, ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Set a layer's opacity (0–255) through the mutatable tier.
+ * @param {number} handle
+ * @param {number} layer
+ * @param {number} opacity
+ */
+export function psd_set_layer_opacity(handle, layer, opacity) {
+    const ret = wasm.psd_set_layer_opacity(handle, layer, opacity);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -1091,12 +1196,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 143, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 152, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 180, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 188, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

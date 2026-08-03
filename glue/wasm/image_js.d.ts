@@ -175,6 +175,44 @@ export function init_gpu(): Promise<void>;
 
 export function kernel_count(): number;
 
+export function psd_close(handle: number): void;
+
+/**
+ * The layer list as JSON, in record order:
+ * `[{index, name, opacity, hidden, top, left, bottom, right}]`.
+ * `hidden` is PSD flags bit 1 (0x02).
+ */
+export function psd_layer_list(handle: number): string;
+
+/**
+ * Parse a `.psd`/`.psb` and retain the structural model behind a
+ * handle (independent of `decode_image`'s composite lane). Free with
+ * `psd_close`.
+ */
+export function psd_open(bytes: Uint8Array): number;
+
+/**
+ * Remove a layer (balanced `lsct` group-divider bookkeeping engine-side).
+ */
+export function psd_remove_layer(handle: number, layer: number): void;
+
+/**
+ * Save the (possibly edited) PSD with full preservation: unmodeled
+ * blocks verbatim; a zero-edit save is byte-identical.
+ */
+export function psd_save(handle: number): Uint8Array;
+
+/**
+ * Rename a layer (updates the legacy Pascal name AND the canonical
+ * `luni` block).
+ */
+export function psd_set_layer_name(handle: number, layer: number, name: string): void;
+
+/**
+ * Set a layer's opacity (0–255) through the mutatable tier.
+ */
+export function psd_set_layer_opacity(handle: number, layer: number, opacity: number): void;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -205,6 +243,13 @@ export interface InitOutput {
     readonly init: () => void;
     readonly init_gpu: () => any;
     readonly kernel_count: () => number;
+    readonly psd_close: (a: number) => void;
+    readonly psd_layer_list: (a: number) => [number, number, number, number];
+    readonly psd_open: (a: number, b: number) => [number, number, number];
+    readonly psd_remove_layer: (a: number, b: number) => [number, number];
+    readonly psd_save: (a: number) => [number, number, number];
+    readonly psd_set_layer_name: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly psd_set_layer_opacity: (a: number, b: number, c: number) => [number, number];
     readonly qcms_enable_iccv4: () => void;
     readonly qcms_profile_precache_output_transform: (a: number) => void;
     readonly qcms_transform_data_bgra_out_lut: (a: number, b: number, c: number, d: number) => void;

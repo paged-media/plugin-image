@@ -51,6 +51,9 @@
     ],
     "importers": [
       "media.paged.image.importer.raster"
+    ],
+    "exporters": [
+      "media.paged.image.exporter.psd"
     ]
   }
 }

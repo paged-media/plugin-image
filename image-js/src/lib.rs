@@ -587,6 +587,149 @@ mod wasm {
             p.borrow_mut().remove(&handle);
         });
     }
+
+    // ─────────────────────────── PSD doors ───────────────────────────
+    //
+    // The mutatable tier (image-psd edit.rs: opacity / rename / remove +
+    // the preservation writer) was Rust-only — "Paged never destroys a
+    // PSD" was a test-only property with no wasm reach (the coverage
+    // spec's finding). These doors retain the PARSED PsdFile behind a
+    // handle so the panel can list layers, apply record edits, and save
+    // with full carry-through preservation. Pixel-level channel
+    // replacement stays engine-side (its payload contract is a follow-up).
+
+    thread_local! {
+        static PSDS: RefCell<HashMap<u32, image_psd::PsdFile>> =
+            RefCell::new(HashMap::new());
+        static NEXT_PSD: Cell<u32> = const { Cell::new(1) };
+    }
+
+    /// Parse a `.psd`/`.psb` and retain the structural model behind a
+    /// handle (independent of `decode_image`'s composite lane). Free with
+    /// `psd_close`.
+    #[wasm_bindgen]
+    pub fn psd_open(bytes: &[u8]) -> Result<u32, JsValue> {
+        let file = image_psd::PsdFile::parse(bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let handle = NEXT_PSD.with(|n| {
+            let h = n.get();
+            n.set(h + 1);
+            h
+        });
+        PSDS.with(|m| m.borrow_mut().insert(handle, file));
+        Ok(handle)
+    }
+
+    /// The layer list as JSON, in record order:
+    /// `[{index, name, opacity, hidden, top, left, bottom, right}]`.
+    /// `hidden` is PSD flags bit 1 (0x02).
+    #[wasm_bindgen]
+    pub fn psd_layer_list(handle: u32) -> Result<String, JsValue> {
+        PSDS.with(|m| {
+            let map = m.borrow();
+            let file = map
+                .get(&handle)
+                .ok_or_else(|| JsValue::from_str(&format!("unknown psd handle {handle}")))?;
+            let rows: Vec<String> = file
+                .layer_mask
+                .layers
+                .iter()
+                .enumerate()
+                .map(|(index, l)| {
+                    format!(
+                        "{{\"index\":{index},\"name\":{},\"opacity\":{},\"hidden\":{},\"top\":{},\"left\":{},\"bottom\":{},\"right\":{}}}",
+                        json_escape(&l.name()),
+                        l.opacity,
+                        (l.flags & 0x02) != 0,
+                        l.top,
+                        l.left,
+                        l.bottom,
+                        l.right,
+                    )
+                })
+                .collect();
+            Ok(format!("[{}]", rows.join(",")))
+        })
+    }
+
+    /// Set a layer's opacity (0–255) through the mutatable tier.
+    #[wasm_bindgen]
+    pub fn psd_set_layer_opacity(handle: u32, layer: usize, opacity: u8) -> Result<(), JsValue> {
+        with_psd_mut(handle, |file| {
+            image_psd::edit::set_layer_opacity(file, layer, opacity)
+        })
+    }
+
+    /// Rename a layer (updates the legacy Pascal name AND the canonical
+    /// `luni` block).
+    #[wasm_bindgen]
+    pub fn psd_set_layer_name(handle: u32, layer: usize, name: &str) -> Result<(), JsValue> {
+        with_psd_mut(handle, |file| {
+            image_psd::edit::set_layer_name(file, layer, name)
+        })
+    }
+
+    /// Remove a layer (balanced `lsct` group-divider bookkeeping engine-side).
+    #[wasm_bindgen]
+    pub fn psd_remove_layer(handle: u32, layer: usize) -> Result<(), JsValue> {
+        with_psd_mut(handle, |file| image_psd::edit::remove_layer(file, layer))
+    }
+
+    /// Save the (possibly edited) PSD with full preservation: unmodeled
+    /// blocks verbatim; a zero-edit save is byte-identical.
+    #[wasm_bindgen]
+    pub fn psd_save(handle: u32) -> Result<js_sys::Uint8Array, JsValue> {
+        PSDS.with(|m| {
+            let map = m.borrow();
+            let file = map
+                .get(&handle)
+                .ok_or_else(|| JsValue::from_str(&format!("unknown psd handle {handle}")))?;
+            let bytes = file.write().map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(js_sys::Uint8Array::from(&bytes[..]))
+        })
+    }
+
+    #[wasm_bindgen]
+    pub fn psd_close(handle: u32) {
+        PSDS.with(|m| {
+            m.borrow_mut().remove(&handle);
+        });
+    }
+
+    /// Minimal JSON string escape (quotes, backslash, control chars) —
+    /// avoids a serde_json dependency for one field.
+    fn json_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    fn with_psd_mut<F>(handle: u32, f: F) -> Result<(), JsValue>
+    where
+        F: FnOnce(&mut image_psd::PsdFile) -> image_psd::Result<()>,
+    {
+        PSDS.with(|m| {
+            let mut map = m.borrow_mut();
+            let file = map
+                .get_mut(&handle)
+                .ok_or_else(|| JsValue::from_str(&format!("unknown psd handle {handle}")))?;
+            f(file).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
 }
 
 #[cfg(test)]

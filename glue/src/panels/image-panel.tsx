@@ -368,6 +368,64 @@ export function makeImagePanel(session: ImageSession) {
           Invert colors
         </label>
 
+        {/* PSD layers — the structural session (mutatable tier): record
+            edits accumulate on the retained parse; Export Center's "PSD
+            (edited)" re-emits preservation-safe. The canvas composite
+            stays the import-time flatten (re-flatten is a follow-up). */}
+        {s.psd && (
+          <>
+            <div style={sectionTitle}>PSD layers ({s.psd.layers.length})</div>
+            {s.psd.layers.map((l) => (
+              <div
+                key={l.index}
+                data-image-psd-layer={l.index}
+                style={{ display: "flex", alignItems: "center", gap: 6, font: "12px var(--font-sans, sans-serif)", padding: "1px 0" }}
+              >
+                <span
+                  style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: l.hidden ? 0.5 : 1 }}
+                  title={l.hidden ? `${l.name} (hidden in the PSD)` : l.name}
+                  onDoubleClick={() => {
+                    const name = window.prompt("Layer name", l.name);
+                    if (name && name !== l.name) session.psdRenameLayer(l.index, name);
+                  }}
+                >
+                  {l.name}
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  data-image-psd-opacity
+                  value={Math.round((l.opacity / 255) * 100)}
+                  style={{ width: 52, font: "11px var(--font-mono, monospace)" }}
+                  title="Layer opacity (%)"
+                  onChange={(e) =>
+                    session.psdSetLayerOpacity(
+                      l.index,
+                      (Number(e.target.value) / 100) * 255,
+                    )
+                  }
+                />
+                <button
+                  type="button"
+                  data-image-psd-remove
+                  title="Remove layer (in the exported PSD)"
+                  style={{ border: "none", background: "none", cursor: "pointer", color: "var(--pg-fg)" }}
+                  onClick={() => session.psdRemoveLayer(l.index)}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            <p style={{ margin: "2px 0 0", font: "10px/1.5 var(--font-sans, sans-serif)", color: "var(--pg-muted-fg)" }}>
+              Edits land in the exported PSD (preservation-safe — a zero-edit
+              export is byte-identical). The canvas shows the import-time
+              flatten.
+            </p>
+          </>
+        )}
+
         {/* Curves */}
         <div style={sectionTitle}>Curves</div>
         <div style={{ display: "flex", gap: "var(--space-2, 8px)", alignItems: "flex-start" }}>

@@ -146,6 +146,19 @@ export function activate(host: BundleHost): BundleHandle {
       },
     });
   }
+  // PSD save-back — the mutatable tier's Export Center lane: re-emit the
+  // (possibly layer-edited) PSD with full carry-through preservation
+  // (zero-edit ⇒ byte-identical). Null when no PSD is loaded — the
+  // Export Center shows the honest empty result.
+  if (host.supports("contribute.exporter@1")) {
+    host.contribute.exporter({
+      id: "media.paged.image.exporter.psd",
+      title: "PSD (edited layers)",
+      extension: ".psd",
+      mimeType: "image/vnd.adobe.photoshop",
+      export: () => session.psdExport(),
+    });
+  }
 
   host.log.info(`activated (apiVersion ${manifest.apiVersion})`);
 

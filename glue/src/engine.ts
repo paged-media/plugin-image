@@ -181,6 +181,20 @@ export interface DecodedInfo {
 
 /** The stable engine contract the bundle codes against. Every method
  *  forwards to the wasm surface; the facade only renames + shapes. */
+/** One PSD layer-record row (`psd_layer_list`), record order. */
+export interface PsdLayerInfo {
+  index: number;
+  name: string;
+  /** 0–255. */
+  opacity: number;
+  /** PSD flags bit 1 — hidden (display-only; no visibility edit tier yet). */
+  hidden: boolean;
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+}
+
 export interface ImageEngine {
   abiVersion(): number;
   kernelCount(): number;
@@ -237,6 +251,17 @@ export interface ImageEngine {
   /** Build a 256-byte tone LUT from the curve editor's `(input, output)`
    *  control points in [0,1] (the LUT `adjust` consumes for curves). */
   curveLut(points: Array<[number, number]>): Uint8Array;
+  /** PSD structural session — the mutatable tier's wasm reach ("Paged
+   *  never destroys a PSD" was a Rust-test-only property until these).
+   *  `psdOpen` retains the PARSED file behind a handle; edits accumulate
+   *  on it; `psdSave` re-emits with full carry-through preservation. */
+  psdOpen(bytes: Uint8Array): number;
+  psdLayers(handle: number): PsdLayerInfo[];
+  psdSetLayerOpacity(handle: number, layer: number, opacity: number): void;
+  psdSetLayerName(handle: number, layer: number, name: string): void;
+  psdRemoveLayer(handle: number, layer: number): void;
+  psdSave(handle: number): Uint8Array;
+  psdClose(handle: number): void;
   /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
    *  image as tightly packed RGBA8. Edge tiles are clamped to the image
    *  extent; a fully-outside window returns an empty buffer. The honest
@@ -341,6 +366,13 @@ export interface ImageWasmModule {
     h: number,
   ): Uint8Array;
   free_image(handle: number): void;
+  psd_open(bytes: Uint8Array): number;
+  psd_layer_list(handle: number): string;
+  psd_set_layer_opacity(handle: number, layer: number, opacity: number): void;
+  psd_set_layer_name(handle: number, layer: number, name: string): void;
+  psd_remove_layer(handle: number, layer: number): void;
+  psd_save(handle: number): Uint8Array;
+  psd_close(handle: number): void;
 }
 
 // ----------------------------------------------------------- the facade
@@ -401,6 +433,14 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.invert,
       );
     },
+    psdOpen: (bytes) => wasm.psd_open(bytes),
+    psdLayers: (handle) => JSON.parse(wasm.psd_layer_list(handle)) as PsdLayerInfo[],
+    psdSetLayerOpacity: (handle, layer, opacity) =>
+      wasm.psd_set_layer_opacity(handle, layer, opacity),
+    psdSetLayerName: (handle, layer, name) => wasm.psd_set_layer_name(handle, layer, name),
+    psdRemoveLayer: (handle, layer) => wasm.psd_remove_layer(handle, layer),
+    psdSave: (handle) => wasm.psd_save(handle),
+    psdClose: (handle) => wasm.psd_close(handle),
     histogram(handle) {
       const flat = wasm.image_histogram(handle);
       return {
