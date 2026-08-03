@@ -69,6 +69,13 @@ export interface AdjustParams {
   /** Curves: a 256-byte tone LUT (built from the curve editor's control
    *  points via `engine.curveLut`), or null for the identity curve. */
   curveLut: Uint8Array | null;
+  /** FILTER stages (first wasm reach of the T1/T2 kernels): Gaussian
+   *  blur sigma px (0 = off), unsharp amount (0 = off), hue rotation
+   *  degrees (0 = off), per-color invert. */
+  blurSigma: number;
+  sharpenAmount: number;
+  hueDegrees: number;
+  invert: boolean;
 }
 
 export const IDENTITY_PARAMS: AdjustParams = {
@@ -80,6 +87,10 @@ export const IDENTITY_PARAMS: AdjustParams = {
   tint: 0,
   levels: { ...IDENTITY_LEVELS },
   curveLut: null,
+  blurSigma: 0,
+  sharpenAmount: 0,
+  hueDegrees: 0,
+  invert: false,
 };
 
 function levelsIdentity(l: LevelsParams): boolean {
@@ -101,7 +112,14 @@ export function isIdentity(p: AdjustParams): boolean {
     p.temp === 0 &&
     p.tint === 0 &&
     levelsIdentity(p.levels) &&
-    p.curveLut === null
+    p.curveLut === null &&
+    filtersIdentity(p)
+  );
+}
+
+function filtersIdentity(p: AdjustParams): boolean {
+  return (
+    p.blurSigma === 0 && p.sharpenAmount === 0 && p.hueDegrees === 0 && !p.invert
   );
 }
 
@@ -112,7 +130,8 @@ function isBaseOnly(p: AdjustParams): boolean {
     p.temp === 0 &&
     p.tint === 0 &&
     levelsIdentity(p.levels) &&
-    p.curveLut === null
+    p.curveLut === null &&
+    filtersIdentity(p)
   );
 }
 
@@ -268,6 +287,10 @@ export interface ImageWasmModule {
     out_black: number,
     out_white: number,
     curve_lut: Uint8Array,
+    blur_sigma: number,
+    sharpen_amount: number,
+    hue_degrees: number,
+    invert: boolean,
   ): Promise<Uint8Array>;
   image_histogram(handle: number): Uint32Array;
   image_auto_enhance_params(handle: number): Float32Array;
@@ -372,6 +395,10 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.levels.outBlack,
         p.levels.outWhite,
         p.curveLut ?? new Uint8Array(0),
+        p.blurSigma,
+        p.sharpenAmount,
+        p.hueDegrees,
+        p.invert,
       );
     },
     histogram(handle) {

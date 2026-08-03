@@ -56,9 +56,14 @@ use image_core::{
 };
 use image_gpu::GpuContext;
 use image_kernels::families::adjust::{
-    AdjustBrightnessContrastParams, AdjustExposureParams, AdjustLevelsParams,
-    AdjustSaturationParams, AdjustWhiteBalanceParams, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_EXPOSURE,
+    AdjustBrightnessContrastParams, AdjustExposureParams, AdjustHueRotateParams,
+    AdjustInvertRgbParams, AdjustLevelsParams, AdjustSaturationParams, AdjustWhiteBalanceParams,
+    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB,
     ADJUST_LEVELS, ADJUST_SATURATION, ADJUST_WHITE_BALANCE,
+};
+use image_kernels::families::conv::{
+    ConvGaussianParams, ConvUnsharpParams, CONV_GAUSSIAN_H, CONV_GAUSSIAN_V, CONV_UNSHARP,
+    GAUSSIAN_MAX_RADIUS,
 };
 use image_pipeline::Pipeline;
 use image_psd::PsdFile;
@@ -132,6 +137,17 @@ pub struct AdjustParams {
     /// RGBA8 result — there is no GPU LUT kernel yet (the honest deferral
     /// documented on the wasm export).
     pub curve_lut: Option<[u8; 256]>,
+    /// FILTER stages (editor-ui-coverage: the T1/T2 kernels get their
+    /// first wasm reach). Each 0/false = stage off.
+    /// Gaussian blur σ (px); radius derives as ceil(3σ) clamped to the
+    /// kernel's GAUSSIAN_MAX_RADIUS window.
+    pub blur_sigma: f32,
+    /// Unsharp amount (`out = a + amount·(a − blur(a))`, threshold 0).
+    pub sharpen_amount: f32,
+    /// Hue rotation in degrees.
+    pub hue_degrees: f32,
+    /// Per-color negate, alpha preserved (`adjust.invert_rgb`).
+    pub invert: bool,
 }
 
 impl Default for AdjustParams {
@@ -145,6 +161,10 @@ impl Default for AdjustParams {
             tint: 0.0,
             levels: LevelsParams::default(),
             curve_lut: None,
+            blur_sigma: 0.0,
+            sharpen_amount: 0.0,
+            hue_degrees: 0.0,
+            invert: false,
         }
     }
 }
@@ -164,6 +184,10 @@ impl AdjustParams {
             || self.temp != 0.0
             || self.tint != 0.0
             || !self.levels.is_identity()
+            || self.blur_sigma > 0.0
+            || self.sharpen_amount > 0.0
+            || self.hue_degrees != 0.0
+            || self.invert
     }
 }
 
@@ -472,6 +496,46 @@ pub async fn adjust_rgba8(
                 node,
                 &ADJUST_SATURATION,
                 Arc::<[u8]>::from(AdjustSaturationParams::new(params.saturation).as_bytes()),
+            );
+        }
+        // FILTER stages (first wasm reach for the registered T1/T2
+        // kernels — same registry-driven dispatch, nothing new): hue
+        // rotation, per-color invert, separable Gaussian blur, and
+        // unsharp masking (the classic a + amount·(a − blur(a)) blend —
+        // CONV_UNSHARP is the 2-input point kernel; its blur input is a
+        // fixed σ1.5 Gaussian of the current node).
+        if params.hue_degrees != 0.0 {
+            node = pipe.apply(
+                node,
+                &ADJUST_HUE_ROTATE,
+                Arc::<[u8]>::from(AdjustHueRotateParams::new(params.hue_degrees).as_bytes()),
+            );
+        }
+        if params.invert {
+            node = pipe.apply(
+                node,
+                &ADJUST_INVERT_RGB,
+                Arc::<[u8]>::from(AdjustInvertRgbParams::new().as_bytes()),
+            );
+        }
+        if params.blur_sigma > 0.0 {
+            let sigma = params.blur_sigma;
+            let radius = (sigma * 3.0).ceil().min(f32::from(GAUSSIAN_MAX_RADIUS)) as u32;
+            let p = Arc::<[u8]>::from(ConvGaussianParams::new(sigma, radius).as_bytes());
+            node = pipe.apply(node, &CONV_GAUSSIAN_H, Arc::clone(&p));
+            node = pipe.apply(node, &CONV_GAUSSIAN_V, p);
+        }
+        if params.sharpen_amount > 0.0 {
+            let p = Arc::<[u8]>::from(ConvGaussianParams::new(1.5, 5).as_bytes());
+            let mut blurred = pipe.apply(node, &CONV_GAUSSIAN_H, Arc::clone(&p));
+            blurred = pipe.apply(blurred, &CONV_GAUSSIAN_V, p);
+            node = pipe.apply2(
+                node,
+                blurred,
+                &CONV_UNSHARP,
+                Arc::<[u8]>::from(
+                    ConvUnsharpParams::new(params.sharpen_amount, 0.0).as_bytes(),
+                ),
             );
         }
 

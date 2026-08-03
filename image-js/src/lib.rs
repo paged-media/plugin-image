@@ -254,6 +254,10 @@ mod wasm {
         out_black: f32,
         out_white: f32,
         curve_lut: &[u8],
+        blur_sigma: f32,
+        sharpen_amount: f32,
+        hue_degrees: f32,
+        invert: bool,
     ) -> Result<js_sys::Uint8Array, JsValue> {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
@@ -285,6 +289,10 @@ mod wasm {
                 out_white,
             },
             curve_lut: lut,
+            blur_sigma,
+            sharpen_amount,
+            hue_degrees,
+            invert,
         };
         run_adjust(&img, params).await
     }

@@ -351,6 +351,23 @@ export function makeImagePanel(session: ImageSession) {
         <Slider label="Out black" min={0} max={1} step={0.01} value={p.levels.outBlack} disabled={disabled} onChange={(v) => session.setLevels({ outBlack: v })} />
         <Slider label="Out white" min={0} max={1} step={0.01} value={p.levels.outWhite} disabled={disabled} onChange={(v) => session.setLevels({ outWhite: v })} />
 
+        {/* Filters — the T1/T2 kernels' first editor reach (blur, unsharp,
+            hue rotation, invert); same GPU chain, same Apply commit. */}
+        <div style={sectionTitle}>Filters</div>
+        <Slider label="Blur (σ px)" min={0} max={8} step={0.1} value={p.blurSigma} disabled={disabled} onChange={(v) => setBase("blurSigma", v)} />
+        <Slider label="Sharpen" min={0} max={3} step={0.05} value={p.sharpenAmount} disabled={disabled} onChange={(v) => setBase("sharpenAmount", v)} />
+        <Slider label="Hue rotate (°)" min={-180} max={180} step={1} value={p.hueDegrees} disabled={disabled} onChange={(v) => setBase("hueDegrees", v)} />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, font: "12px var(--font-sans, sans-serif)" }}>
+          <input
+            type="checkbox"
+            data-image-invert
+            checked={p.invert}
+            disabled={disabled}
+            onChange={(e) => session.setParams({ invert: e.target.checked })}
+          />
+          Invert colors
+        </label>
+
         {/* Curves */}
         <div style={sectionTitle}>Curves</div>
         <div style={{ display: "flex", gap: "var(--space-2, 8px)", alignItems: "flex-start" }}>
