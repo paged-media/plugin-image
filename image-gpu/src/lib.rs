@@ -58,6 +58,13 @@ pub mod reduce;
 // argument consumes — the surface the editor's selections lower to.
 pub mod selection;
 
+// The persistent selection COVERAGE model (spec §6.1): the u8 coverage
+// field at image resolution behind the marquee/lasso/wand tools, its
+// rasterizers + combine algebra + feather, and the lowering to the
+// r16float mask windows the dispatches bind. All mask PREP (inherently
+// CPU orchestration); consumption stays GPU-only via the ABI mask.
+pub mod coverage;
+
 // T3 breadth op (spec §11): a CPU two-pass chamfer/Euclidean-approx
 // distance transform over a binary mask tile. Sequential/iterative (the
 // GPU jump-flood version is the M3 follow-up — see the module docs), so
@@ -66,12 +73,13 @@ pub mod selection;
 // per-texel WGSL ABI kernel row.
 pub mod distance;
 
+pub use coverage::{CombineMode, SelectionCoverage};
 pub use device::GpuContext;
 pub use dispatch::{BatchTile, DispatchBatch};
 pub use distance::{distance_transform, DistanceParams, MaskChannel};
 pub use execute::{
-    execute_tile_once, execute_tile_once_async, execute_windowed_once,
-    execute_windowed_once_async, TileInput,
+    execute_tile_once, execute_tile_once_async, execute_windowed_once, execute_windowed_once_async,
+    TileInput,
 };
 pub use pipeline::KernelPipeline;
 pub use pool::{PoolSlot, TexturePool};

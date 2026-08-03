@@ -34,9 +34,14 @@ import manifest from "../manifest.json";
 import { createImageSession } from "./session";
 import { makeImagePanel } from "./panels/image-panel";
 import { makeCropGesture } from "./crop-tool";
+import { makeSelectionGesture } from "./selection-tool";
 
 const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
+const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
+const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
+const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
+const MAGIC_WAND_TOOL_ID = "media.paged.image.tool.magicWand";
 
 export function activate(host: BundleHost): BundleHandle {
   const session = createImageSession(host);
@@ -127,6 +132,150 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
+  // ── SELECTION tools (spec §6.1 — the mask ABI's editor reach) ──
+  //
+  // Four tools over ONE gesture architecture (the crop pattern: gesture →
+  // machine → Rust coverage → marching-ants overlay via
+  // host.overlay.setToolPreview). The selection is ENGINE state bound to
+  // the ingested source; the committed Apply masks every adjust/filter
+  // dispatch (GPU `mix(a, result, mask)`) + the CPU curves pass by it.
+  // Modifier convention on all four (read from the gesture events'
+  // `modifiers`): shift = add, alt = subtract, shift+alt = intersect.
+  // SHORTCUTS (INV-REG-1, globally unique tool shortcuts): "y" is the
+  // last free single letter; shift+y / shift+l / shift+w are free in the
+  // shift register (draw holds shift+a/b/c/i/j/k/m/n/r/u; this bundle
+  // holds shift+x) — verified against both manifests + the editor
+  // built-ins at pick time.
+  contributeTool(host, {
+    id: MARQUEE_RECT_TOOL_ID,
+    title: "Marquee (rectangle)",
+    icon: "tool-marquee-rect",
+    group: MARQUEE_RECT_TOOL_ID,
+    section: "selection",
+    shortcut: "y",
+    gesture: () => makeSelectionGesture(host, session, "rect"),
+  });
+  contributeTool(host, {
+    id: MARQUEE_ELLIPSE_TOOL_ID,
+    title: "Marquee (ellipse)",
+    icon: "tool-marquee-ellipse",
+    group: MARQUEE_ELLIPSE_TOOL_ID,
+    section: "selection",
+    shortcut: "shift+y",
+    gesture: () => makeSelectionGesture(host, session, "ellipse"),
+  });
+  contributeTool(host, {
+    id: LASSO_TOOL_ID,
+    title: "Lasso",
+    icon: "tool-lasso",
+    group: LASSO_TOOL_ID,
+    section: "selection",
+    shortcut: "shift+l",
+    gesture: () => makeSelectionGesture(host, session, "lasso"),
+  });
+  // Magic wand: click-select by color distance (v0 fixed tolerance
+  // 32/255 per channel, contiguous flood — documented in
+  // selection-machine.ts; a tool-options tolerance slider is a
+  // follow-up).
+  contributeTool(host, {
+    id: MAGIC_WAND_TOOL_ID,
+    title: "Magic wand",
+    icon: "tool-magic-wand",
+    group: MAGIC_WAND_TOOL_ID,
+    section: "selection",
+    shortcut: "shift+w",
+    gesture: () => makeSelectionGesture(host, session, "wand"),
+  });
+
+  // GENERATE — the `gen.*` family's editor reach. Fills the CURRENT
+  // SELECTION (the whole image when there is none) with a fixed
+  // two-stop gradient or with noise, composited through the coverage
+  // mask on the GPU. DESTRUCTIVE by design (it swaps the engine-held
+  // source like a crop commit) — see fill.rs for why a generator cannot
+  // be a re-runnable stage of the adjust chain. The commands carry the
+  // v0 defaults (black→white linear, noise amount 0.5); the panel's
+  // Generate section exposes the pickers.
+  host.contribute.command({
+    id: "media.paged.image.command.fillSelection",
+    title: "Fill selection with a gradient",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.fillSelection({
+        kind: "gradient",
+        gradient: "linear",
+        c0: [0, 0, 0, 1],
+        c1: [1, 1, 1, 1],
+      });
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.fillNoise",
+    title: "Fill selection with noise",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.fillSelection({ kind: "noise", amount: 0.5 });
+    },
+  });
+
+  // SAVE-BACK — bake the adjustments into the SOURCE FILE's bytes.
+  //
+  // DELIVERY SEAM (honest, and the reason this is a "stage + export"
+  // flow rather than a one-click write): the host wires NO save-file
+  // door. `host.shell.pickFile` is a READ picker — it returns
+  // `PickedFile { name, bytes }`, i.e. bytes coming IN — and there is no
+  // counterpart that takes bytes out (probed here at activate time so
+  // the claim is checked, not assumed). So the panel button + this
+  // command COMPUTE and STAGE the bytes (reporting size + the honest
+  // layer-structure note), and the Export Center's exporters below are
+  // the whole delivery lane. A `shell.saveFile@1` door is the RFI-worthy
+  // gap; the day it exists this handler writes directly.
+  host.contribute.command({
+    id: "media.paged.image.command.applyToFile",
+    title: "Apply adjustments to the file",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.applyToFile();
+    },
+  });
+
+  // Selection commands (the panel buttons + command-palette reach).
+  host.contribute.command({
+    id: "media.paged.image.command.selectAll",
+    title: "Select all (image)",
+    category: "Image",
+    handler: () => {
+      session.selectAll();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.deselect",
+    title: "Deselect (image)",
+    category: "Image",
+    handler: () => {
+      session.deselect();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.invertSelection",
+    title: "Invert selection (image)",
+    category: "Image",
+    handler: () => {
+      session.invertSelection();
+    },
+  });
+  // Fixed v0 sigma (session FEATHER_SIGMA_DEFAULT) — a slider follows.
+  host.contribute.command({
+    id: "media.paged.image.command.featherSelection",
+    title: "Feather selection (image)",
+    category: "Image",
+    handler: () => {
+      session.featherSelection();
+    },
+  });
+
   // K-2 — the raster importer: opening/dropping a PSD/PNG/JPEG routes
   // its bytes HERE (decode into the session, raise the panel; it does
   // NOT replace the document). Degrades honestly on an older host.
@@ -146,19 +295,55 @@ export function activate(host: BundleHost): BundleHandle {
       },
     });
   }
-  // PSD save-back — the mutatable tier's Export Center lane: re-emit the
-  // (possibly layer-edited) PSD with full carry-through preservation
-  // (zero-edit ⇒ byte-identical). Null when no PSD is loaded — the
-  // Export Center shows the honest empty result.
+  // SAVE-BACK exporters — the delivery lane for the adjusted pixels.
+  //
+  // PSD: re-emits the (possibly layer-edited) PSD with full
+  // carry-through preservation. When the panel is at IDENTITY the bytes
+  // are the untouched re-emit (zero-edit ⇒ BYTE-IDENTICAL — §10.4
+  // survives); when it is not, the full-resolution adjusted composite is
+  // written first (`replace_channel_pixels` on the single canvas-sized
+  // content layer, else a flatten into a new single-layer PSD, which the
+  // panel/status announces). Null when no PSD is loaded — the Export
+  // Center shows the honest empty result.
+  //
+  // PNG / JPEG: the non-PSD lane, one exporter per format so the
+  // registry's declared `extension` is never a lie. The panel's "Apply
+  // to file" button picks the source's own format (JPEG only when the
+  // ingested bytes WERE a JPEG — a re-encode never invents a lossy
+  // format); these two let the user ask for either explicitly.
   if (host.supports("contribute.exporter@1")) {
     host.contribute.exporter({
       id: "media.paged.image.exporter.psd",
-      title: "PSD (edited layers)",
+      title: "PSD (adjusted pixels + edited layers)",
       extension: ".psd",
       mimeType: "image/vnd.adobe.photoshop",
-      export: () => session.psdExport(),
+      export: () => session.psdExportBytes(),
+    });
+    host.contribute.exporter({
+      id: "media.paged.image.exporter.png",
+      title: "PNG (adjusted pixels)",
+      extension: ".png",
+      mimeType: "image/png",
+      export: () => session.rasterExportBytes("png"),
+    });
+    host.contribute.exporter({
+      id: "media.paged.image.exporter.jpeg",
+      title: "JPEG (adjusted pixels)",
+      extension: ".jpg",
+      mimeType: "image/jpeg",
+      export: () => session.rasterExportBytes("jpeg"),
     });
   }
+
+  // The probe behind the save-back delivery seam (see the applyToFile
+  // command): `shell.pickFile@1` is the only file door the contract has,
+  // and it READS. Logged, not assumed — if a save door ever appears the
+  // log line is the first place the gap stops being true.
+  host.log.debug(
+    `save-back delivery: exporter registry only (shell.pickFile@1=${host.supports(
+      "shell.pickFile@1",
+    )} is a READ picker; no save-file door in the contract)`,
+  );
 
   host.log.info(`activated (apiVersion ${manifest.apiVersion})`);
 

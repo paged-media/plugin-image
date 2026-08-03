@@ -89,6 +89,45 @@ export function adjust_image(handle, exposure_ev, brightness, contrast, saturati
 }
 
 /**
+ * [`adjust_image_full`] PLUS the EXTENDED (kernel-breadth) stages —
+ * vibrance, color balance, black & white, posterize, threshold,
+ * photo filter, channel mixer and per-channel levels — carried in
+ * ONE flat `f32` block so the boundary does not grow an argument
+ * per stage. `ext` is either EMPTY (every extended stage at
+ * identity — what `adjust_image_full` passes) or exactly
+ * `ingest::ADJUST_EXT_LEN` floats in the layout documented on that
+ * constant. The chain order is documented on `ingest::adjust_rgba8`;
+ * every stage is mask-aware (the bound selection rides `@group(2)`).
+ * @param {number} handle
+ * @param {number} exposure_ev
+ * @param {number} brightness
+ * @param {number} contrast
+ * @param {number} saturation
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} in_black
+ * @param {number} in_white
+ * @param {number} gamma
+ * @param {number} out_black
+ * @param {number} out_white
+ * @param {Uint8Array} curve_lut
+ * @param {number} blur_sigma
+ * @param {number} sharpen_amount
+ * @param {number} hue_degrees
+ * @param {boolean} invert
+ * @param {Float32Array} ext
+ * @returns {Promise<Uint8Array>}
+ */
+export function adjust_image_ext(handle, exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, curve_lut, blur_sigma, sharpen_amount, hue_degrees, invert, ext) {
+    const ptr0 = passArray8ToWasm0(curve_lut, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(ext, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.adjust_image_ext(handle, exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, ptr0, len0, blur_sigma, sharpen_amount, hue_degrees, invert, ptr1, len1);
+    return ret;
+}
+
+/**
  * The FULL adjustments pass — the levels/curves/white-balance panel's
  * committed values. The 9 scalars are exposure/brightness/contrast/
  * saturation (as `adjust_image`), white balance (temp/tint), and the
@@ -195,8 +234,8 @@ export function crop_hit_handle(x, y, w, h, px, py, tol) {
  * register the result as a NEW engine-held image, returning its
  * handle. The source handle is left intact (the caller frees it). An
  * out-of-bounds / empty rectangle is a clean error (never a torn
- * image). The straighten-angle resample is a separate stage (not in
- * this axis-aligned cut — see the crop interaction machine).
+ * image). This door is the AXIS-ALIGNED cut only — the straighten
+ * angle rides `straighten_crop_image`, which rotates first.
  * @param {number} handle
  * @param {number} x
  * @param {number} y
@@ -242,6 +281,69 @@ export function decode_image(bytes) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return DecodedHandle.__wrap(ret[0]);
+}
+
+/**
+ * Re-encode straight RGBA8 as PNG or JPEG (`format` ∈ `png | jpeg`)
+ * — the NON-PSD save-back lane. Codec entropy coding is inherently
+ * CPU work (spec §1); JPEG rides the fixed v0 quality documented on
+ * `saveback::JPEG_QUALITY_DEFAULT`.
+ * @param {Uint8Array} rgba
+ * @param {number} width
+ * @param {number} height
+ * @param {string} format
+ * @returns {Uint8Array}
+ */
+export function encode_image(rgba, width, height, format) {
+    const ptr0 = passArray8ToWasm0(rgba, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.encode_image(ptr0, len0, width, height, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * FILL the current selection (the whole image when none) with a
+ * fixed TWO-STOP gradient. `kind` ∈ `linear | radial | angular |
+ * reflected | diamond`; `c0`/`c1` are straight RGBA in `[0, 1]`
+ * (4 floats each). The gradient GEOMETRY is derived from the
+ * selection's bounding box — there is no on-canvas drag handle in
+ * v0 (`crate::fill` documents the derivation). Returns the NEW
+ * engine-held image's handle.
+ * @param {number} handle
+ * @param {string} kind
+ * @param {Float32Array} c0
+ * @param {Float32Array} c1
+ * @returns {Promise<DecodedHandle>}
+ */
+export function fill_gradient(handle, kind, c0, c1) {
+    const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(c0, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayF32ToWasm0(c1, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.fill_gradient(handle, ptr0, len0, ptr1, len1, ptr2, len2);
+    return ret;
+}
+
+/**
+ * FILL the current selection (the whole image when none) with
+ * deterministic monochrome noise — `amount` scales the hash
+ * amplitude, `seed` makes a repeat reproducible. Returns the NEW
+ * engine-held image's handle.
+ * @param {number} handle
+ * @param {number} amount
+ * @param {number} seed
+ * @returns {Promise<DecodedHandle>}
+ */
+export function fill_noise(handle, amount, seed) {
+    const ret = wasm.fill_noise(handle, amount, seed);
+    return ret;
 }
 
 /**
@@ -406,6 +508,45 @@ export function kernel_count() {
 }
 
 /**
+ * PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
+ * retained parse behind `psd_handle` (the merged composite is always
+ * rewritten; the layer structure is handled per the returned shape)
+ * and answer the honest description the panel shows —
+ * `"layer-replaced: …"` when the file's single canvas-sized content
+ * layer was updated in place via `replace_channel_pixels`, or
+ * `"flattened: …"` when a multi-layer file was flattened into a NEW
+ * single-layer PSD. Call `psd_save` afterwards for the bytes.
+ *
+ * 8-bit RGB only, and the size must match the parsed header —
+ * anything else is a clean error, never a wrong-looking file.
+ * @param {number} psd_handle
+ * @param {number} width
+ * @param {number} height
+ * @param {Uint8Array} rgba
+ * @returns {string}
+ */
+export function psd_apply_adjusted(psd_handle, width, height, rgba) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(rgba, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.psd_apply_adjusted(psd_handle, width, height, ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * @param {number} handle
  */
 export function psd_close(handle) {
@@ -528,6 +669,214 @@ export function resize_image(handle, out_w, out_h, filter) {
     const ptr0 = passStringToWasm0(filter, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.resize_image(handle, out_w, out_h, ptr0, len0);
+    return ret;
+}
+
+/**
+ * Bind the session selection to an engine-held image (the selection
+ * field takes ITS resolution; the magic wand floods ITS pixels; the
+ * adjust doors mask only when adjusting THIS handle). Re-binding to
+ * the same handle keeps the selection; a different handle (a crop /
+ * resize swap) or resolution drops it.
+ * @param {number} handle
+ */
+export function selection_bind(handle) {
+    const ret = wasm.selection_bind(handle);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * The bounding box of the selection's non-zero coverage as
+ * `[x, y, w, h]`; an EMPTY array when there is no explicit selection
+ * OR the selection is empty (distinguish via `selection_stats`).
+ * @returns {Uint32Array}
+ */
+export function selection_bounds() {
+    const ret = wasm.selection_bounds();
+    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v1;
+}
+
+/**
+ * Deselect: back to "no selection" (adjustments run unmasked).
+ */
+export function selection_clear() {
+    wasm.selection_clear();
+}
+
+/**
+ * The raw u8 coverage bytes (`width·height`, row-major) — the
+ * overlay/debug readout. Empty when no explicit selection exists.
+ * @returns {Uint8Array}
+ */
+export function selection_coverage_bytes() {
+    const ret = wasm.selection_coverage_bytes();
+    return ret;
+}
+
+/**
+ * Feather the selection: a Gaussian of `sigma` px on the COVERAGE
+ * (mask prep — CPU on the u8 mask by design, not image processing;
+ * the softened mask is still consumed GPU-side). Errors when no
+ * explicit selection exists.
+ * @param {number} sigma
+ */
+export function selection_feather(sigma) {
+    const ret = wasm.selection_feather(sigma);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Invert the selection ("everything" inverts to the explicit EMPTY
+ * selection — adjust applies nowhere until reselected).
+ */
+export function selection_invert() {
+    const ret = wasm.selection_invert();
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * MAGIC WAND at `(x, y)`: color-distance flood over the BOUND
+ * image's straight-RGBA8 pixels — `contiguous` = 4-connected BFS
+ * from the seed; otherwise a global threshold. `tolerance` is the
+ * per-channel (Chebyshev) distance 0–255. Binary coverage (hard
+ * edges; `selection_feather` softens), folded under `mode`.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} tolerance
+ * @param {boolean} contiguous
+ * @param {number} mode
+ */
+export function selection_magic_wand(x, y, tolerance, contiguous, mode) {
+    const ret = wasm.selection_magic_wand(x, y, tolerance, contiguous, mode);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Select ALL explicitly (a full-extent selection in the readouts;
+ * the adjust chain still takes the trivial-mask fast path).
+ */
+export function selection_select_all() {
+    const ret = wasm.selection_select_all();
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Marquee ELLIPSE: center `(cx, cy)`, radii `(rx, ry)` (image px),
+ * anti-aliased (4×4 supersampled edge), folded under `mode`.
+ * @param {number} cx
+ * @param {number} cy
+ * @param {number} rx
+ * @param {number} ry
+ * @param {number} mode
+ */
+export function selection_set_ellipse(cx, cy, rx, ry, mode) {
+    const ret = wasm.selection_set_ellipse(cx, cy, rx, ry, mode);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * LASSO polygon: `points_flat` is `[x0, y0, x1, y1, …]` image-px
+ * vertices of a closed polygon (the closing edge is implicit),
+ * scanline-rasterized with AA coverage, folded under `mode`. Fewer
+ * than 3 vertices is a clean error (nothing to select).
+ * @param {Float32Array} points_flat
+ * @param {number} mode
+ */
+export function selection_set_polygon(points_flat, mode) {
+    const ptr0 = passArrayF32ToWasm0(points_flat, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.selection_set_polygon(ptr0, len0, mode);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Marquee RECT: fold the anti-aliased rectangle `[x, x+w) × [y, y+h)`
+ * (image px; fractional coords carry the AA edge) into the selection
+ * under `mode`.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} w
+ * @param {number} h
+ * @param {number} mode
+ */
+export function selection_set_rect(x, y, w, h, mode) {
+    const ret = wasm.selection_set_rect(x, y, w, h, mode);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Selection readout for the panel/tools, as 7 `f32`s:
+ * `[has_selection (0|1), x, y, w, h, coverage_fraction, revision]`.
+ * `has_selection == 0` ⇒ no explicit selection (everything, the
+ * unmasked default) and the box/fraction are 0. An explicit-but-
+ * empty selection reads `has == 1, w == h == 0, fraction == 0`.
+ * @returns {Float32Array}
+ */
+export function selection_stats() {
+    const ret = wasm.selection_stats();
+    var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v1;
+}
+
+/**
+ * Re-point the selection at a NEW image handle that holds the SAME
+ * extent, KEEPING the coverage — the door a destructive in-place
+ * edit (the generator FILL) uses so the selection survives its own
+ * result. Answers `true` when the coverage carried over, `false`
+ * when the extent changed (then it behaves exactly like
+ * `selection_bind`: the selection drops).
+ * @param {number} handle
+ * @returns {boolean}
+ */
+export function selection_transfer(handle) {
+    const ret = wasm.selection_transfer(handle);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
+ * STRAIGHTEN + CROP commit: rotate the image by `−degrees` about
+ * the crop rectangle's centre (`geom.rotate_bilinear`, backward
+ * mapped, bilinear, clamp-to-edge) so the rotated FRAME the overlay
+ * previewed lands upright, then cut `(x, y, w, h)` out of the
+ * result and register it as a NEW engine-held image. The source
+ * handle is left intact.
+ *
+ * `degrees == 0` takes the pure-windowing [`crop_image`] path — no
+ * GPU, no resample, no interpolation blur for an axis-aligned crop.
+ * A non-zero angle IS a resample and so is GPU-only (`init_gpu`
+ * first); it rejects honestly without a device.
+ * @param {number} handle
+ * @param {number} x
+ * @param {number} y
+ * @param {number} w
+ * @param {number} h
+ * @param {number} degrees
+ * @returns {Promise<DecodedHandle>}
+ */
+export function straighten_crop_image(handle, x, y, w, h, degrees) {
+    const ret = wasm.straighten_crop_image(handle, x, y, w, h, degrees);
     return ret;
 }
 function __wbg_get_imports() {
@@ -866,6 +1215,10 @@ function __wbg_get_imports() {
         },
         __wbg_new_with_byte_offset_and_length_d836f26d916dd9ad: function(arg0, arg1, arg2) {
             const ret = new Uint8Array(arg0, arg1 >>> 0, arg2 >>> 0);
+            return ret;
+        },
+        __wbg_new_with_length_36a4998e27b014c5: function(arg0) {
+            const ret = new Uint8Array(arg0 >>> 0);
             return ret;
         },
         __wbg_onSubmittedWorkDone_5f36409816d68e04: function(arg0) {
@@ -1221,12 +1574,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 165, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 284, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 201, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 320, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

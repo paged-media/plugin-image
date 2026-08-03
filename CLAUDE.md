@@ -117,7 +117,8 @@ image-core/          frozen types: PixelFormat, Tile/TileMap, Region, slices
 image-kernels/       KernelDef + WGSL ABI + kernel_family! (T0 families)
 image-gpu/           wgpu device, tile pool, residency, dispatch, WGSL assembly
 image-pipeline/      Engine A: lazy DAG, demand-driven ROI, op cache, sinks
-image-graph/         Engine B types + stubs (engine lands M2)
+image-graph/         Engine B: tiled buffer graph — store, eval, tile cache,
+                     set_params/gesture split (COW undo journaling deferred)
 image-cms/           CmsEngine trait; qcms display backend (D-11: hybrid)
 image-codecs/        ImageSource/ImageTarget/ByteSource + adapters
 image-psd/           PSD/PSB model + parser + preservation writer

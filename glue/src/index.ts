@@ -33,18 +33,52 @@ export { activate, PANEL_ID };
 export {
   wrapEngine,
   isIdentity,
+  freshIdentityParams,
+  packAdjustExt,
+  ADJUST_EXT_LEN,
+  DEFAULT_BW_WEIGHTS,
+  DEFAULT_PHOTO_FILTER_COLOR,
+  GRADIENT_KINDS,
   IDENTITY_PARAMS,
+  IDENTITY_LEVELS_CHANNEL,
   ENGINE_NOT_BUILT,
   type AdjustParams,
+  type BlackWhiteParams,
+  type ChannelMixerParams,
+  type ColorBalanceParams,
+  type GradientKind,
   type ImageEngine,
   type ImageWasmModule,
+  type LevelsChannel,
+  type LevelsRgbParams,
+  type PhotoFilterParams,
+  type RasterFormat,
+  type Rgba01,
 } from "./engine";
 export {
   createImageSession,
   elementIdOf,
+  FEATHER_SIGMA_DEFAULT,
+  FILL_NOISE_SEED_DEFAULT,
+  type FillRequest,
   type ImageSession,
   type ImageSessionState,
+  type SaveBackResult,
 } from "./session";
+export {
+  createSelectionMachine,
+  modeFromModifiers,
+  WAND_TOLERANCE_DEFAULT,
+  WAND_CONTIGUOUS_DEFAULT,
+  type SelectionMachine,
+  type SelectionShapeKind,
+} from "./selection-machine";
+export { makeSelectionGesture } from "./selection-tool";
+export {
+  selectionModeCode,
+  type SelectionMode,
+  type SelectionStats,
+} from "./engine";
 export {
   createDecodePool,
   DECODE_WORKER_MODULE,

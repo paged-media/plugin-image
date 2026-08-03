@@ -37,14 +37,26 @@
 //! fan-out agent didn't land before the session reset — written here
 //! against the live (and naga-validated) kernels.
 //! feat: adjust.exposure/brightness_contrast/levels/saturation/hue_rotate/invert_rgb.
+//!
+//! KERNEL-BREADTH BATCH: adjust.vibrance / color_balance / black_white
+//! / posterize / threshold / photo_filter / channel_mixer / levels_rgb.
+//! posterize and threshold contain hard discontinuities (bin edges /
+//! the luma cut), so their stimulus uses POWER-OF-TWO alphas
+//! ([`premul_tile_pow2`]): the unpremultiply division is then EXACT on
+//! both lanes (exponent shift) and the discontinuity cannot flip
+//! between lanes.
 
 use image_conformance::harness::{assert_within, parity, RefTile};
 use image_conformance::Px;
 use image_kernels::families::adjust::{
-    adjust_invert_rgb, AdjustBrightnessContrastParams, AdjustExposureParams, AdjustHueRotateParams,
-    AdjustInvertRgbParams, AdjustLevelsParams, AdjustSaturationParams, AdjustWhiteBalanceParams,
-    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB,
-    ADJUST_LEVELS, ADJUST_SATURATION, ADJUST_WHITE_BALANCE,
+    adjust_invert_rgb, AdjustBlackWhiteParams, AdjustBrightnessContrastParams,
+    AdjustChannelMixerParams, AdjustColorBalanceParams, AdjustExposureParams,
+    AdjustHueRotateParams, AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams,
+    AdjustPhotoFilterParams, AdjustPosterizeParams, AdjustSaturationParams, AdjustThresholdParams,
+    AdjustVibranceParams, AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST,
+    ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE, ADJUST_HUE_ROTATE,
+    ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE,
+    ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE, ADJUST_WHITE_BALANCE,
 };
 
 /// `unpremul_rgb` — the module preamble helper (a==0 → 0).
@@ -124,6 +136,148 @@ fn white_balance_ref(a: Px, _b: Px, p: &AdjustWhiteBalanceParams) -> Px {
     Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
 }
 
+// ─────────────── kernel-breadth batch reference twins ───────────────
+
+/// `lum` in the family's fixed r,g,b summation order.
+fn lum3(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+/// WGSL builtin `smoothstep(e0, e1, x)` — the 3t²−2t³ Hermite.
+fn smoothstep_ref(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn vibrance_ref(a: Px, _b: Px, p: &AdjustVibranceParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    let lum = lum3(c);
+    let mx = c[0].max(c[1].max(c[2]));
+    let mn = c[0].min(c[1].min(c[2]));
+    let satl = mx - mn;
+    let f = 1.0 + p.saturation + p.vibrance * (1.0 - satl);
+    // mix(splat(lum), c, f) per channel.
+    let cp = [
+        lum * (1.0 - f) + c[0] * f,
+        lum * (1.0 - f) + c[1] * f,
+        lum * (1.0 - f) + c[2] * f,
+    ];
+    Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
+}
+
+fn color_balance_ref(a: Px, _b: Px, p: &AdjustColorBalanceParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    let lum = lum3(c);
+    let ws = 1.0 - smoothstep_ref(0.0, 0.5, lum);
+    let wh = smoothstep_ref(0.5, 1.0, lum);
+    let wm = 1.0 - ws - wh;
+    let rr = c[0] + p.sh_cr * ws + p.mid_cr * wm + p.hi_cr * wh;
+    let gg = c[1] + p.sh_mg * ws + p.mid_mg * wm + p.hi_mg * wh;
+    let bb = c[2] + p.sh_yb * ws + p.mid_yb * wm + p.hi_yb * wh;
+    let lum2 = lum3([rr, gg, bb]);
+    let d = lum - lum2;
+    let cp = [
+        (rr + d).clamp(0.0, 1.0),
+        (gg + d).clamp(0.0, 1.0),
+        (bb + d).clamp(0.0, 1.0),
+    ];
+    Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
+}
+
+fn black_white_ref(a: Px, _b: Px, p: &AdjustBlackWhiteParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    let (r, g, b) = (c[0], c[1], c[2]);
+    // The SAME six-way ladder as BLACK_WHITE_WGSL, in the same order.
+    let gray = if r >= g && g >= b {
+        b + (g - b) * p.yellows + (r - g) * p.reds
+    } else if r >= b && b >= g {
+        g + (b - g) * p.magentas + (r - b) * p.reds
+    } else if g >= r && r >= b {
+        b + (r - b) * p.yellows + (g - r) * p.greens
+    } else if g >= b && b >= r {
+        r + (b - r) * p.cyans + (g - b) * p.greens
+    } else if b >= g && g >= r {
+        r + (g - r) * p.cyans + (b - g) * p.blues
+    } else {
+        g + (r - g) * p.magentas + (b - r) * p.blues
+    };
+    let gc = gray.clamp(0.0, 1.0);
+    Px([gc * al, gc * al, gc * al, al])
+}
+
+fn posterize_ref(a: Px, _b: Px, p: &AdjustPosterizeParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    let n = p.levels.max(2.0);
+    let cp = c.map(|x| {
+        let t = x.clamp(0.0, 1.0);
+        ((t * n).floor() / (n - 1.0)).min(1.0)
+    });
+    Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
+}
+
+fn threshold_ref(a: Px, _b: Px, p: &AdjustThresholdParams) -> Px {
+    // Premultiplied-space compare (mirrors THRESHOLD_WGSL): lum is
+    // linear, so lum(premul) >= threshold*alpha avoids the unpremul
+    // division entirely.
+    let lum_p = 0.3 * a.0[0] + 0.59 * a.0[1] + 0.11 * a.0[2];
+    let cutoff = p.threshold * a.0[3];
+    let v = if lum_p >= cutoff { a.0[3] } else { 0.0 };
+    Px([v, v, v, a.0[3]])
+}
+
+fn photo_filter_ref(a: Px, _b: Px, p: &AdjustPhotoFilterParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    let tinted = [c[0] * p.fr, c[1] * p.fg, c[2] * p.fb];
+    // mix(c, tinted, density) per channel.
+    let mut cp = [
+        c[0] * (1.0 - p.density) + tinted[0] * p.density,
+        c[1] * (1.0 - p.density) + tinted[1] * p.density,
+        c[2] * (1.0 - p.density) + tinted[2] * p.density,
+    ];
+    if p.preserve != 0 {
+        let lum0 = lum3(c);
+        let lum1 = lum3(cp);
+        let d = lum0 - lum1;
+        cp = [
+            (cp[0] + d).clamp(0.0, 1.0),
+            (cp[1] + d).clamp(0.0, 1.0),
+            (cp[2] + d).clamp(0.0, 1.0),
+        ];
+    }
+    Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
+}
+
+fn channel_mixer_ref(a: Px, _b: Px, p: &AdjustChannelMixerParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    // Fixed left-to-right sums, identical to CHANNEL_MIXER_WGSL.
+    let rr = p.rr * c[0] + p.rg * c[1] + p.rb * c[2] + p.rc;
+    let gg = p.gr * c[0] + p.gg * c[1] + p.gb * c[2] + p.gc;
+    let bb = p.br * c[0] + p.bg * c[1] + p.bb * c[2] + p.bc;
+    Px([rr * al, gg * al, bb * al, al])
+}
+
+fn levels_rgb_ref(a: Px, _b: Px, p: &AdjustLevelsRgbParams) -> Px {
+    let c = unpremul(a);
+    let al = a.0[3];
+    let ch = |x: f32, ib: f32, iw: f32, ga: f32| {
+        let t0 = (x - ib) / (iw - ib);
+        let t1 = t0.clamp(0.0, 1.0);
+        t1.powf(1.0 / ga)
+    };
+    let cp = [
+        ch(c[0], p.r_in_black, p.r_in_white, p.r_gamma),
+        ch(c[1], p.g_in_black, p.g_in_white, p.g_gamma),
+        ch(c[2], p.b_in_black, p.b_in_white, p.b_gamma),
+    ];
+    Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
+}
+
 /// A finite premultiplied tile: per-texel straight color in [0,1] and a
 /// per-texel alpha in {0.25,…,1}, stored premultiplied (rgb = straight·α)
 /// so `unpremul` recovers a valid color. Alpha is never 0 (the unpremul
@@ -138,15 +292,37 @@ fn premul_tile(w: u32, h: u32) -> RefTile {
     })
 }
 
+/// A premultiplied tile whose alphas are POWERS OF TWO ({0.25, 0.5, 1})
+/// — the unpremultiply division is exact on both lanes (exponent
+/// shift), so kernels with hard discontinuities (posterize bin edges,
+/// the threshold cut) see BIT-identical unpremultiplied stimulus and
+/// cannot flip across the discontinuity between lanes.
+fn premul_tile_pow2(w: u32, h: u32) -> RefTile {
+    const ALPHAS: [f32; 3] = [0.25, 0.5, 1.0];
+    RefTile::from_fn(w, h, |x, y| {
+        let al = ALPHAS[((x + y) % 3) as usize];
+        let r = (x as f32 * 0.013).fract();
+        let g = (y as f32 * 0.017).fract();
+        let bl = ((x + y) as f32 * 0.007).fract();
+        Px([r * al, g * al, bl * al, al])
+    })
+}
+
 const TILE: u32 = image_core::TILE;
 
 macro_rules! parity_test {
     ($name:ident, $def:expr, $ref:expr, $params:expr) => {
+        parity_test!($name, $def, $ref, $params, premul_tile);
+    };
+    ($name:ident, $def:expr, $ref:expr, $params:expr, $tile:ident) => {
         #[test]
         fn $name() {
-            let t = premul_tile(TILE, TILE);
+            let t = $tile(TILE, TILE);
             match parity(&$def, $ref, &[&t], &$params) {
-                Some(r) => assert_within(r, &$def),
+                Some(r) => {
+                    eprintln!("{}: measured max f16 ULP {}", $def.id, r.max_ulp);
+                    assert_within(r, &$def)
+                }
                 None => eprintln!("SKIP: no GPU adapter"),
             }
         }
@@ -195,6 +371,68 @@ parity_test!(
     white_balance_ref,
     AdjustWhiteBalanceParams::new(0.15, -0.08)
 );
+parity_test!(
+    vibrance_parity,
+    ADJUST_VIBRANCE,
+    vibrance_ref,
+    AdjustVibranceParams::new(0.6, 0.15)
+);
+parity_test!(
+    color_balance_parity,
+    ADJUST_COLOR_BALANCE,
+    color_balance_ref,
+    AdjustColorBalanceParams::new([0.1, -0.05, 0.08], [-0.06, 0.04, -0.02], [0.05, 0.02, -0.1])
+);
+parity_test!(
+    black_white_parity,
+    ADJUST_BLACK_WHITE,
+    black_white_ref,
+    // The classic Black & White default weights.
+    AdjustBlackWhiteParams::new(0.4, 0.6, 0.4, 0.6, 0.2, 0.8)
+);
+parity_test!(
+    posterize_parity,
+    ADJUST_POSTERIZE,
+    posterize_ref,
+    AdjustPosterizeParams::new(6.0),
+    premul_tile_pow2
+);
+parity_test!(
+    threshold_parity,
+    ADJUST_THRESHOLD,
+    threshold_ref,
+    AdjustThresholdParams::new(0.5),
+    premul_tile_pow2
+);
+parity_test!(
+    photo_filter_parity,
+    ADJUST_PHOTO_FILTER,
+    photo_filter_ref,
+    // A warming-gel color at density 0.6, luminosity preserved.
+    AdjustPhotoFilterParams::new([0.93, 0.66, 0.27], 0.6, true)
+);
+parity_test!(
+    photo_filter_no_preserve_parity,
+    ADJUST_PHOTO_FILTER,
+    photo_filter_ref,
+    AdjustPhotoFilterParams::new([0.35, 0.6, 0.93], 0.8, false)
+);
+parity_test!(
+    channel_mixer_parity,
+    ADJUST_CHANNEL_MIXER,
+    channel_mixer_ref,
+    AdjustChannelMixerParams::new(
+        [0.7, 0.2, 0.1, 0.05],
+        [0.1, 0.8, 0.1, 0.0],
+        [0.0, 0.3, 0.6, -0.02]
+    )
+);
+parity_test!(
+    levels_rgb_parity,
+    ADJUST_LEVELS_RGB,
+    levels_rgb_ref,
+    AdjustLevelsRgbParams::new([0.05, 0.95, 1.3], [0.0, 1.0, 0.8], [0.1, 0.9, 1.0])
+);
 
 /// Identity-parameter cases: each op at its no-op params is a
 /// near-passthrough (within tolerance) of a premultiplied input.
@@ -232,5 +470,106 @@ fn adjust_identity_params() {
         &AdjustWhiteBalanceParams::new(0.0, 0.0),
     ) {
         assert_within(r, &ADJUST_WHITE_BALANCE);
+    }
+}
+
+/// Identity-parameter cases for the breadth batch: each op at its no-op
+/// params is a near-passthrough (within tolerance).
+#[test]
+fn adjust_breadth_identity_params() {
+    let t = premul_tile(64, 48);
+    if let Some(r) = parity(
+        &ADJUST_VIBRANCE,
+        vibrance_ref,
+        &[&t],
+        &AdjustVibranceParams::new(0.0, 0.0),
+    ) {
+        assert_within(r, &ADJUST_VIBRANCE);
+    }
+    if let Some(r) = parity(
+        &ADJUST_COLOR_BALANCE,
+        color_balance_ref,
+        &[&t],
+        &AdjustColorBalanceParams::new([0.0; 3], [0.0; 3], [0.0; 3]),
+    ) {
+        assert_within(r, &ADJUST_COLOR_BALANCE);
+    }
+    if let Some(r) = parity(
+        &ADJUST_PHOTO_FILTER,
+        photo_filter_ref,
+        &[&t],
+        // density 0 = identity regardless of filter color / preserve.
+        &AdjustPhotoFilterParams::new([0.9, 0.5, 0.1], 0.0, true),
+    ) {
+        assert_within(r, &ADJUST_PHOTO_FILTER);
+    }
+    if let Some(r) = parity(
+        &ADJUST_CHANNEL_MIXER,
+        channel_mixer_ref,
+        &[&t],
+        &AdjustChannelMixerParams::new(
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ),
+    ) {
+        assert_within(r, &ADJUST_CHANNEL_MIXER);
+    }
+    if let Some(r) = parity(
+        &ADJUST_LEVELS_RGB,
+        levels_rgb_ref,
+        &[&t],
+        &AdjustLevelsRgbParams::new([0.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 1.0]),
+    ) {
+        assert_within(r, &ADJUST_LEVELS_RGB);
+    }
+}
+
+/// Pure-reference sanity for the discontinuous / branchy ops (no GPU):
+/// pins the documented selection rules.
+#[test]
+fn adjust_breadth_reference_semantics() {
+    // threshold: opaque mid-gray splits exactly at the cut (>= keeps
+    // white at equality).
+    let p = AdjustThresholdParams::new(0.5);
+    let white = threshold_ref(Px([0.6, 0.6, 0.6, 1.0]), Px([0.0; 4]), &p);
+    assert_eq!(white.0, [1.0, 1.0, 1.0, 1.0]);
+    let black = threshold_ref(Px([0.2, 0.2, 0.2, 1.0]), Px([0.0; 4]), &p);
+    assert_eq!(black.0, [0.0, 0.0, 0.0, 1.0]);
+    // Exactly at the cut: pure red has lum = 0.3 bit-exactly (single
+    // product, no summation rounding); threshold 0.3 → `>=` keeps white.
+    let p_cut = AdjustThresholdParams::new(0.3);
+    let at_cut = threshold_ref(Px([1.0, 0.0, 0.0, 1.0]), Px([0.0; 4]), &p_cut);
+    assert_eq!(at_cut.0, [1.0, 1.0, 1.0, 1.0], ">= keeps white at the cut");
+
+    // posterize: 2 levels snaps below/above 0.5 to the two extremes.
+    let p = AdjustPosterizeParams::new(2.0);
+    let lo = posterize_ref(Px([0.3, 0.3, 0.3, 1.0]), Px([0.0; 4]), &p);
+    assert_eq!(lo.0, [0.0, 0.0, 0.0, 1.0]);
+    let hi = posterize_ref(Px([0.7, 0.7, 0.7, 1.0]), Px([0.0; 4]), &p);
+    assert_eq!(hi.0, [1.0, 1.0, 1.0, 1.0]);
+
+    // black_white: a gray input is unchanged by ANY weights; a pure red
+    // reads exactly the reds weight.
+    let p = AdjustBlackWhiteParams::new(0.4, 0.6, 0.4, 0.6, 0.2, 0.8);
+    let gray = black_white_ref(Px([0.42, 0.42, 0.42, 1.0]), Px([0.0; 4]), &p);
+    assert!((gray.0[0] - 0.42).abs() < 1e-6);
+    let red = black_white_ref(Px([1.0, 0.0, 0.0, 1.0]), Px([0.0; 4]), &p);
+    assert!((red.0[0] - 0.4).abs() < 1e-6, "pure red -> reds weight");
+
+    // vibrance: a fully-saturated primary gets NO vibrance contribution
+    // (satl = 1), only the uniform saturation offset.
+    let p = AdjustVibranceParams::new(0.8, 0.0);
+    let sat_red = vibrance_ref(Px([1.0, 0.0, 0.0, 1.0]), Px([0.0; 4]), &p);
+    let id_red = vibrance_ref(
+        Px([1.0, 0.0, 0.0, 1.0]),
+        Px([0.0; 4]),
+        &AdjustVibranceParams::new(0.0, 0.0),
+    );
+    for c in 0..4 {
+        assert!(
+            (sat_red.0[c] - id_red.0[c]).abs() < 1e-6,
+            "saturated color protected from vibrance (channel {c})"
+        );
     }
 }

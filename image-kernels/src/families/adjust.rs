@@ -628,6 +628,924 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
 "
 );
 
+// ═══════════════ kernel-breadth batch (2026-08) ═════════════════════
+//
+// Eight further editor-bearing tone/color point kernels, same module
+// contract as above (unpremul → math → re-premul, alpha preserved,
+// mask-mixed by the shared `main`). Provenance: the publicly documented
+// Photoshop adjustment semantics (Vibrance, Color Balance, Black &
+// White, Posterize, Threshold, Photo Filter, Channel Mixer, per-channel
+// Levels) re-derived from standard image-processing literature — the
+// exact formulas are DEFINED in the per-kernel comments below and are
+// mirrored term-for-term by the scalar references in
+// `image-conformance/tests/family_adjust.rs`. No reference reading.
+
+// ───────────────────────────── vibrance ────────────────────────────
+//
+// Saturation-protecting saturation. On UNpremultiplied rgb:
+//   lum   = 0.3r + 0.59g + 0.11b            (the family Lum weights)
+//   satl  = max(r,g,b) − min(r,g,b)         (0 gray … 1 fully saturated)
+//   f     = 1 + saturation + vibrance·(1 − satl)
+//   c'    = mix(splat(lum), c, f)
+// `vibrance` scales DOWN as the pixel's own saturation rises (already-
+// saturated colors are protected); `saturation` is the uniform offset
+// (both 0 = identity). Re-premultiplied, alpha preserved. Pure
+// min/max/mix algebra — no transcendental.
+
+/// Vibrance params: `vibrance` (saturation-protected boost) and
+/// `saturation` (uniform offset); both 0 = identity.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustVibranceParams {
+    pub vibrance: f32,
+    pub saturation: f32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustVibranceParams {
+    pub fn new(vibrance: f32, saturation: f32) -> Self {
+        Self {
+            vibrance,
+            saturation,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const VIBRANCE_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "vibrance",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "saturation",
+        wgsl_ty: "f32",
+    },
+];
+
+/// c' = mix(splat(lum), c, 1 + saturation + vibrance·(1 − sat_level)) on
+/// unpremult rgb; re-premultiplied, alpha preserved.
+pub static ADJUST_VIBRANCE: KernelDef = KernelDef {
+    id: "adjust.vibrance",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustVibranceParams>(),
+        fields: VIBRANCE_PARAMS_FIELDS,
+    },
+    wgsl: VIBRANCE_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+// lum dot in fixed r,g,b order; the per-pixel factor f feeds the same
+// mix the saturation kernel uses. The scalar reference mirrors the
+// expression order exactly.
+const VIBRANCE_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    vibrance: f32,
+    saturation: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let lum = 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    let satl = mx - mn;
+    let f = 1.0 + params.saturation + params.vibrance * (1.0 - satl);
+    let cp = mix(vec3<f32>(lum), c, vec3<f32>(f));
+    return vec4<f32>(cp * a.a, a.a);
+}
+"
+);
+
+// ─────────────────────────── color_balance ─────────────────────────
+//
+// Shadows/midtones/highlights × cyan-red/magenta-green/yellow-blue with
+// luminosity preservation. On UNpremultiplied rgb:
+//   lum = 0.3r + 0.59g + 0.11b
+//   w_s = 1 − smoothstep(0, 0.5, lum)     (shadows weight)
+//   w_h = smoothstep(0.5, 1, lum)         (highlights weight)
+//   w_m = 1 − w_s − w_h                   (midtones weight)
+//   r' = r + sh_cr·w_s + mid_cr·w_m + hi_cr·w_h   (cyan↔red axis, +→red)
+//   g' = g + sh_mg·w_s + mid_mg·w_m + hi_mg·w_h   (magenta↔green, +→green)
+//   b' = b + sh_yb·w_s + mid_yb·w_m + hi_yb·w_h   (yellow↔blue, +→blue)
+//   c'' = clamp(c' + splat(lum − lum(c')), 0, 1)  (luminosity restore)
+// The three weights form a smooth partition of unity over the tonal
+// range (smoothstep is the WGSL builtin 3t²−2t³ Hermite, mirrored
+// exactly by the scalar reference). All params 0 = identity (the
+// luminosity-restore delta is then 0 and clamp is a no-op on in-gamut
+// colors). Re-premultiplied, alpha preserved.
+
+/// Color-balance params: per tonal range (shadows/midtones/highlights)
+/// one offset per opponent axis (cyan-red, magenta-green, yellow-blue).
+/// All 0 = identity.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustColorBalanceParams {
+    pub sh_cr: f32,
+    pub sh_mg: f32,
+    pub sh_yb: f32,
+    pub mid_cr: f32,
+    pub mid_mg: f32,
+    pub mid_yb: f32,
+    pub hi_cr: f32,
+    pub hi_mg: f32,
+    pub hi_yb: f32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+impl AdjustColorBalanceParams {
+    pub fn new(shadows: [f32; 3], midtones: [f32; 3], highlights: [f32; 3]) -> Self {
+        Self {
+            sh_cr: shadows[0],
+            sh_mg: shadows[1],
+            sh_yb: shadows[2],
+            mid_cr: midtones[0],
+            mid_mg: midtones[1],
+            mid_yb: midtones[2],
+            hi_cr: highlights[0],
+            hi_mg: highlights[1],
+            hi_yb: highlights[2],
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const COLOR_BALANCE_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "sh_cr",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "sh_mg",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "sh_yb",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "mid_cr",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "mid_mg",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "mid_yb",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "hi_cr",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "hi_mg",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "hi_yb",
+        wgsl_ty: "f32",
+    },
+];
+
+/// Tonal-range-weighted opponent-axis offsets with luminosity restore on
+/// unpremult rgb; re-premultiplied, alpha preserved.
+pub static ADJUST_COLOR_BALANCE: KernelDef = KernelDef {
+    id: "adjust.color_balance",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustColorBalanceParams>(),
+        fields: COLOR_BALANCE_PARAMS_FIELDS,
+    },
+    wgsl: COLOR_BALANCE_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(8),
+};
+
+// Fixed evaluation order: weights first, then the three per-channel
+// three-term sums (left to right), then the luminosity restore. The
+// scalar reference mirrors every step.
+const COLOR_BALANCE_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    sh_cr: f32,
+    sh_mg: f32,
+    sh_yb: f32,
+    mid_cr: f32,
+    mid_mg: f32,
+    mid_yb: f32,
+    hi_cr: f32,
+    hi_mg: f32,
+    hi_yb: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let lum = 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
+    let ws = 1.0 - smoothstep(0.0, 0.5, lum);
+    let wh = smoothstep(0.5, 1.0, lum);
+    let wm = 1.0 - ws - wh;
+    let rr = c.r + params.sh_cr * ws + params.mid_cr * wm + params.hi_cr * wh;
+    let gg = c.g + params.sh_mg * ws + params.mid_mg * wm + params.hi_mg * wh;
+    let bb = c.b + params.sh_yb * ws + params.mid_yb * wm + params.hi_yb * wh;
+    let lum2 = 0.3 * rr + 0.59 * gg + 0.11 * bb;
+    let cp = clamp(
+        vec3<f32>(rr, gg, bb) + vec3<f32>(lum - lum2),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0)
+    );
+    return vec4<f32>(cp * a.a, a.a);
+}
+"
+);
+
+// ─────────────────────────── black_white ───────────────────────────
+//
+// Six-channel grayscale mix. Any rgb decomposes EXACTLY as
+//   c = mn·white + (mid − mn)·secondary + (mx − mid)·primary
+// where mn ≤ mid ≤ mx are the sorted channels, `primary` is the pure
+// primary of the max channel (red/green/blue) and `secondary` the pure
+// secondary shared by the top two channels (yellow/cyan/magenta). The
+// gray value weights the two chromatic parts by the user's per-hue
+// weights:
+//   gray = mn + (mid − mn)·w_secondary + (mx − mid)·w_primary
+// then clamp to [0,1]. A six-way branch ladder on channel order picks
+// (primary, secondary); at every sector boundary the adjacent formulas
+// COINCIDE (the vanishing term switches weight), so the function is
+// continuous and branch-tie divergence between lanes is harmless.
+// Weights all 1 = luminance-free identity gray = mx. Gray input (r=g=b)
+// → gray = r regardless of weights. Output splats gray to rgb;
+// re-premultiplied, alpha preserved.
+
+/// Black & White params: grayscale weights for the six hue sectors.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustBlackWhiteParams {
+    pub reds: f32,
+    pub yellows: f32,
+    pub greens: f32,
+    pub cyans: f32,
+    pub blues: f32,
+    pub magentas: f32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+impl AdjustBlackWhiteParams {
+    pub fn new(
+        reds: f32,
+        yellows: f32,
+        greens: f32,
+        cyans: f32,
+        blues: f32,
+        magentas: f32,
+    ) -> Self {
+        Self {
+            reds,
+            yellows,
+            greens,
+            cyans,
+            blues,
+            magentas,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const BLACK_WHITE_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "reds",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "yellows",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "greens",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "cyans",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "blues",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "magentas",
+        wgsl_ty: "f32",
+    },
+];
+
+/// gray = mn + (mid−mn)·w_secondary + (mx−mid)·w_primary per the hue
+/// sector; splatted to rgb, re-premultiplied, alpha preserved.
+pub static ADJUST_BLACK_WHITE: KernelDef = KernelDef {
+    id: "adjust.black_white",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustBlackWhiteParams>(),
+        fields: BLACK_WHITE_PARAMS_FIELDS,
+    },
+    wgsl: BLACK_WHITE_WGSL,
+    module: true,
+    mip_exact: true,
+    // Pure min/max/compare algebra + two multiplies (no transcendental):
+    // the family's unpremul-amplification floor. Measured worst 1 ULP on
+    // Metal over the mixed-alpha stimulus.
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+// The six-way ladder, in the FIXED order r≥g≥b, r≥b≥g, g≥r≥b, g≥b≥r,
+// b≥g≥r, else (b≥r≥g) — identical in the scalar reference.
+const BLACK_WHITE_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    reds: f32,
+    yellows: f32,
+    greens: f32,
+    cyans: f32,
+    blues: f32,
+    magentas: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let r = c.r;
+    let g = c.g;
+    let b = c.b;
+    var gray: f32;
+    if (r >= g && g >= b) {
+        gray = b + (g - b) * params.yellows + (r - g) * params.reds;
+    } else if (r >= b && b >= g) {
+        gray = g + (b - g) * params.magentas + (r - b) * params.reds;
+    } else if (g >= r && r >= b) {
+        gray = b + (r - b) * params.yellows + (g - r) * params.greens;
+    } else if (g >= b && b >= r) {
+        gray = r + (b - r) * params.cyans + (g - b) * params.greens;
+    } else if (b >= g && g >= r) {
+        gray = r + (g - r) * params.cyans + (b - g) * params.blues;
+    } else {
+        gray = g + (r - g) * params.magentas + (b - r) * params.blues;
+    }
+    let gc = clamp(gray, 0.0, 1.0);
+    return vec4<f32>(vec3<f32>(gc) * a.a, a.a);
+}
+"
+);
+
+// ───────────────────────────── posterize ───────────────────────────
+//
+// Quantize each channel of the UNpremultiplied rgb into `levels`
+// discrete output values evenly spanning [0,1]:
+//   n  = max(levels, 2)
+//   t  = clamp(c, 0, 1)
+//   c' = min(floor(t·n) / (n − 1), 1)
+// (t = 1 lands in the top bin via the min guard). floor is a builtin in
+// both lanes; multiplication is correctly rounded on both, so the bin
+// choice agrees except for stimuli sitting within f32 noise of a bin
+// edge — the parity stimulus uses power-of-two alphas so the
+// unpremultiply is EXACT and the lanes see identical t. Re-premultiplied,
+// alpha preserved.
+
+/// Posterize params: `levels` — number of output values per channel
+/// (effective minimum 2).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustPosterizeParams {
+    pub levels: f32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustPosterizeParams {
+    pub fn new(levels: f32) -> Self {
+        Self {
+            levels,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const POSTERIZE_PARAMS_FIELDS: &[ParamField] = &[ParamField {
+    name: "levels",
+    wgsl_ty: "f32",
+}];
+
+/// c' = min(floor(clamp(c,0,1)·n)/(n−1), 1), n = max(levels, 2), on
+/// unpremult rgb; re-premultiplied, alpha preserved.
+pub static ADJUST_POSTERIZE: KernelDef = KernelDef {
+    id: "adjust.posterize",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustPosterizeParams>(),
+        fields: POSTERIZE_PARAMS_FIELDS,
+    },
+    wgsl: POSTERIZE_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const POSTERIZE_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    levels: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let n = max(params.levels, 2.0);
+    let t = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let q = min(floor(t * n) / (n - 1.0), vec3<f32>(1.0));
+    return vec4<f32>(q * a.a, a.a);
+}
+"
+);
+
+// ───────────────────────────── threshold ───────────────────────────
+//
+// Luma threshold → black/white. To avoid the unpremultiply division
+// entirely (division noise could flip the comparison), the compare runs
+// in PREMULTIPLIED space: lum is linear, so
+//   lum(unpremul rgb) ≥ threshold  ⇔  lum(premul rgb) ≥ threshold·α.
+//   out.rgb = α·1 = α if on, else 0   (premultiplied white/black)
+// Both sides are products/sums of identical inputs — deterministic on
+// both lanes. Alpha preserved.
+
+/// Threshold params: luma `threshold` in [0,1].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustThresholdParams {
+    pub threshold: f32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustThresholdParams {
+    pub fn new(threshold: f32) -> Self {
+        Self {
+            threshold,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const THRESHOLD_PARAMS_FIELDS: &[ParamField] = &[ParamField {
+    name: "threshold",
+    wgsl_ty: "f32",
+}];
+
+/// rgb = α·(lum ≥ threshold ? 1 : 0) via the premultiplied-luma compare;
+/// alpha preserved.
+pub static ADJUST_THRESHOLD: KernelDef = KernelDef {
+    id: "adjust.threshold",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustThresholdParams>(),
+        fields: THRESHOLD_PARAMS_FIELDS,
+    },
+    wgsl: THRESHOLD_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(1),
+};
+
+const THRESHOLD_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    threshold: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let lum_p = 0.3 * a.r + 0.59 * a.g + 0.11 * a.b;
+    let cutoff = params.threshold * a.a;
+    var v = 0.0;
+    if (lum_p >= cutoff) { v = a.a; }
+    return vec4<f32>(v, v, v, a.a);
+}
+"
+);
+
+// ─────────────────────────── photo_filter ──────────────────────────
+//
+// A colored-gel filter: the filter color multiplies the light passing
+// through (absorption model), `density` fades the effect in, and the
+// preserve-luminosity flag restores the original luma:
+//   tinted = c · filter_rgb
+//   c'     = mix(c, tinted, density)
+//   if preserve ≠ 0: c'' = clamp(c' + splat(lum(c) − lum(c')), 0, 1)
+// on UNpremultiplied rgb; re-premultiplied, alpha preserved. density 0 =
+// identity.
+
+/// Photo-filter params: filter color rgb, `density` in [0,1], and the
+/// preserve-luminosity flag (0 = off, else on).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustPhotoFilterParams {
+    pub fr: f32,
+    pub fg: f32,
+    pub fb: f32,
+    pub density: f32,
+    pub preserve: u32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustPhotoFilterParams {
+    pub fn new(filter: [f32; 3], density: f32, preserve: bool) -> Self {
+        Self {
+            fr: filter[0],
+            fg: filter[1],
+            fb: filter[2],
+            density,
+            preserve: u32::from(preserve),
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const PHOTO_FILTER_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "fr",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "fg",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "fb",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "density",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "preserve",
+        wgsl_ty: "u32",
+    },
+];
+
+/// c' = mix(c, c·filter, density) with optional luminosity restore on
+/// unpremult rgb; re-premultiplied, alpha preserved.
+pub static ADJUST_PHOTO_FILTER: KernelDef = KernelDef {
+    id: "adjust.photo_filter",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustPhotoFilterParams>(),
+        fields: PHOTO_FILTER_PARAMS_FIELDS,
+    },
+    wgsl: PHOTO_FILTER_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const PHOTO_FILTER_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    fr: f32,
+    fg: f32,
+    fb: f32,
+    density: f32,
+    preserve: u32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let fcol = vec3<f32>(params.fr, params.fg, params.fb);
+    let tinted = c * fcol;
+    var cp = mix(c, tinted, vec3<f32>(params.density));
+    if (params.preserve != 0u) {
+        let lum0 = 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
+        let lum1 = 0.3 * cp.r + 0.59 * cp.g + 0.11 * cp.b;
+        cp = clamp(cp + vec3<f32>(lum0 - lum1), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return vec4<f32>(cp * a.a, a.a);
+}
+"
+);
+
+// ─────────────────────────── channel_mixer ─────────────────────────
+//
+// 3×4 matrix: each output channel is a weighted mix of the three input
+// channels plus a constant, on UNpremultiplied rgb:
+//   r' = rr·r + rg·g + rb·b + rc     (fixed left-to-right sums)
+//   g' = gr·r + gg·g + gb·b + gc
+//   b' = br·r + bg·g + bb·b + bc
+// Identity = the identity matrix with zero constants. No clamp (the f16
+// working space carries over/under-range like the other adjust ops).
+// Re-premultiplied, alpha preserved.
+
+/// Channel-mixer params: row-major 3×4 matrix (output channel × input
+/// r,g,b + constant).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustChannelMixerParams {
+    pub rr: f32,
+    pub rg: f32,
+    pub rb: f32,
+    pub rc: f32,
+    pub gr: f32,
+    pub gg: f32,
+    pub gb: f32,
+    pub gc: f32,
+    pub br: f32,
+    pub bg: f32,
+    pub bb: f32,
+    pub bc: f32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustChannelMixerParams {
+    /// Rows are `[in_r, in_g, in_b, constant]` for the r, g, b outputs.
+    pub fn new(r_row: [f32; 4], g_row: [f32; 4], b_row: [f32; 4]) -> Self {
+        Self {
+            rr: r_row[0],
+            rg: r_row[1],
+            rb: r_row[2],
+            rc: r_row[3],
+            gr: g_row[0],
+            gg: g_row[1],
+            gb: g_row[2],
+            gc: g_row[3],
+            br: b_row[0],
+            bg: b_row[1],
+            bb: b_row[2],
+            bc: b_row[3],
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const CHANNEL_MIXER_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "rr",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "rg",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "rb",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "rc",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "gr",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "gg",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "gb",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "gc",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "br",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "bg",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "bb",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "bc",
+        wgsl_ty: "f32",
+    },
+];
+
+/// 3×4 channel-mix matrix on unpremult rgb; re-premultiplied, alpha
+/// preserved.
+pub static ADJUST_CHANNEL_MIXER: KernelDef = KernelDef {
+    id: "adjust.channel_mixer",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustChannelMixerParams>(),
+        fields: CHANNEL_MIXER_PARAMS_FIELDS,
+    },
+    wgsl: CHANNEL_MIXER_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CHANNEL_MIXER_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    rr: f32,
+    rg: f32,
+    rb: f32,
+    rc: f32,
+    gr: f32,
+    gg: f32,
+    gb: f32,
+    gc: f32,
+    br: f32,
+    bg: f32,
+    bb: f32,
+    bc: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let rr = params.rr * c.r + params.rg * c.g + params.rb * c.b + params.rc;
+    let gg = params.gr * c.r + params.gg * c.g + params.gb * c.b + params.gc;
+    let bb = params.br * c.r + params.bg * c.g + params.bb * c.b + params.bc;
+    return vec4<f32>(vec3<f32>(rr, gg, bb) * a.a, a.a);
+}
+"
+);
+
+// ─────────────────────────── levels_rgb ────────────────────────────
+//
+// Per-channel Levels input remap (in_black / in_white / gamma per r, g,
+// b; the output range stays composite — use `adjust.levels` for output
+// remaps). Per channel, on UNpremultiplied rgb:
+//   t  = clamp((c − in_black) / (in_white − in_black), 0, 1)
+//   c' = pow(t, 1 / gamma)
+// Identity = {0, 1, 1} per channel. Same pow-tolerance rationale as
+// `adjust.levels` (GPU pow approximation × unpremultiply f16-noise
+// amplification): ChannelEpsF16(16).
+
+/// Per-channel levels params: in_black/in_white/gamma for r, g, b.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustLevelsRgbParams {
+    pub r_in_black: f32,
+    pub r_in_white: f32,
+    pub r_gamma: f32,
+    pub g_in_black: f32,
+    pub g_in_white: f32,
+    pub g_gamma: f32,
+    pub b_in_black: f32,
+    pub b_in_white: f32,
+    pub b_gamma: f32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustLevelsRgbParams {
+    /// Per channel: `[in_black, in_white, gamma]`.
+    pub fn new(r: [f32; 3], g: [f32; 3], b: [f32; 3]) -> Self {
+        Self {
+            r_in_black: r[0],
+            r_in_white: r[1],
+            r_gamma: r[2],
+            g_in_black: g[0],
+            g_in_white: g[1],
+            g_gamma: g[2],
+            b_in_black: b[0],
+            b_in_white: b[1],
+            b_gamma: b[2],
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const LEVELS_RGB_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "r_in_black",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "r_in_white",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "r_gamma",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "g_in_black",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "g_in_white",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "g_gamma",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "b_in_black",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "b_in_white",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "b_gamma",
+        wgsl_ty: "f32",
+    },
+];
+
+/// Per-channel input/gamma levels remap on unpremult rgb;
+/// re-premultiplied, alpha preserved.
+pub static ADJUST_LEVELS_RGB: KernelDef = KernelDef {
+    id: "adjust.levels_rgb",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustLevelsRgbParams>(),
+        fields: LEVELS_RGB_PARAMS_FIELDS,
+    },
+    wgsl: LEVELS_RGB_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(16),
+};
+
+// The vector pow applies componentwise; per-channel windows/gammas are
+// packed into vec3 registers first. WGSL pow / Rust powf mirror.
+const LEVELS_RGB_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    r_in_black: f32,
+    r_in_white: f32,
+    r_gamma: f32,
+    g_in_black: f32,
+    g_in_white: f32,
+    g_gamma: f32,
+    b_in_black: f32,
+    b_in_white: f32,
+    b_gamma: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let ib = vec3<f32>(params.r_in_black, params.g_in_black, params.b_in_black);
+    let iw = vec3<f32>(params.r_in_white, params.g_in_white, params.b_in_white);
+    let ga = vec3<f32>(params.r_gamma, params.g_gamma, params.b_gamma);
+    let t0 = (c - ib) / (iw - ib);
+    let t1 = clamp(t0, vec3<f32>(0.0), vec3<f32>(1.0));
+    let cp = pow(t1, vec3<f32>(1.0) / ga);
+    return vec4<f32>(cp * a.a, a.a);
+}
+"
+);
+
 pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_EXPOSURE,
     &ADJUST_BRIGHTNESS_CONTRAST,
@@ -636,4 +1554,12 @@ pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_HUE_ROTATE,
     &ADJUST_INVERT_RGB,
     &ADJUST_WHITE_BALANCE,
+    &ADJUST_VIBRANCE,
+    &ADJUST_COLOR_BALANCE,
+    &ADJUST_BLACK_WHITE,
+    &ADJUST_POSTERIZE,
+    &ADJUST_THRESHOLD,
+    &ADJUST_PHOTO_FILTER,
+    &ADJUST_CHANNEL_MIXER,
+    &ADJUST_LEVELS_RGB,
 ];

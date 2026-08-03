@@ -73,6 +73,7 @@ export function makeFakeEditor() {
   const panels = fakeRegistry();
   const commands = fakeRegistry();
   const importers = fakeRegistry();
+  const exporters = fakeRegistry();
   const tools = fakeRegistry();
   // The overlay signal sink (host.overlay.setToolPreview forwards here);
   // records the last published shape so a test can assert the crop frame.
@@ -147,7 +148,7 @@ export function makeFakeEditor() {
   /** elementId → element geometry (the crop tool's frame-box read). */
   const geometry = new Map<string, ElementGeometryItem>();
   const editor = {
-    registries: { panels, commands, importers, tools },
+    registries: { panels, commands, importers, exporters, tools },
     overlaySignals,
     selection: {
       elementSelection: [] as unknown[],
@@ -223,6 +224,7 @@ export function makeFakeEditor() {
     panels,
     commands,
     importers,
+    exporters,
     tools,
     sceneLayers,
     images,

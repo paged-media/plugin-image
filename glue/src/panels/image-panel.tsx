@@ -27,12 +27,20 @@
 // reduce histogram); this leaf only renders + forwards.
 
 import { useEffect, useReducer, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import manifest from "../../manifest.json";
 
 import type { ImageSession } from "../session";
-import type { AdjustParams, ImageHistogram, ResampleFilter } from "../engine";
+import type {
+  AdjustParams,
+  GradientKind,
+  ImageHistogram,
+  LevelsChannel,
+  ResampleFilter,
+  Rgba01,
+} from "../engine";
+import { DEFAULT_BW_WEIGHTS, GRADIENT_KINDS } from "../engine";
 import type { AspectPreset } from "../crop-machine";
 
 const row: CSSProperties = {
@@ -96,6 +104,86 @@ function Slider({ label, min, max, step, value, onChange, disabled }: SliderSpec
         </span>
       </span>
     </div>
+  );
+}
+
+/** A compact numeric cell — the Channel-Mixer / per-channel-Levels grid
+ *  idiom (sliders would not fit three columns; the number IS the value). */
+function Num({
+  value,
+  onChange,
+  disabled,
+  step = 0.05,
+  title,
+  width = 46,
+  testAttr,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  disabled: boolean;
+  step?: number;
+  title?: string;
+  width?: number;
+  testAttr?: string;
+}) {
+  const attrs = testAttr ? { [testAttr]: "" } : {};
+  return (
+    <input
+      type="number"
+      step={step}
+      value={value}
+      title={title}
+      disabled={disabled}
+      onChange={(e) => onChange(Number(e.target.value))}
+      style={{ width, font: "11px var(--font-mono, monospace)" }}
+      {...attrs}
+    />
+  );
+}
+
+/** A labelled row of compact numbers (the grid idiom's line). */
+function NumRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div style={{ ...row, gap: "var(--space-1, 4px)" }}>
+      <label style={{ flex: 1, minWidth: 0 }}>{label}</label>
+      <span style={{ display: "flex", gap: 3 }}>{children}</span>
+    </div>
+  );
+}
+
+/** A checkbox gate (the "this looks destructive, opt in" idiom). */
+function Gate({
+  label,
+  checked,
+  onChange,
+  disabled,
+  testAttr,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled: boolean;
+  testAttr?: string;
+}) {
+  const attrs = testAttr ? { [testAttr]: "" } : {};
+  return (
+    <label
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        font: "12px var(--font-sans, sans-serif)",
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        {...attrs}
+      />
+      {label}
+    </label>
   );
 }
 
@@ -248,6 +336,38 @@ function CurveEditor({
 
 const ASPECTS: AspectPreset[] = ["free", "original", "1:1", "3:2", "4:3", "16:9"];
 
+// ── colour presets ───────────────────────────────────────────────────
+
+/** A few conventional photo-filter gels (straight RGB in [0,1]). The
+ *  kernel takes an arbitrary colour — this is the shortlist the panel
+ *  offers instead of a colour picker the shell does not provide. */
+const PHOTO_FILTERS: Array<{ name: string; rgb: [number, number, number] }> = [
+  { name: "Warming (85)", rgb: [0.925, 0.639, 0.365] },
+  { name: "Warming (81)", rgb: [0.92, 0.78, 0.55] },
+  { name: "Cooling (80)", rgb: [0.0, 0.44, 0.88] },
+  { name: "Cooling (82)", rgb: [0.44, 0.71, 0.94] },
+  { name: "Sepia", rgb: [0.67, 0.51, 0.25] },
+  { name: "Red", rgb: [0.91, 0.14, 0.16] },
+  { name: "Green", rgb: [0.14, 0.71, 0.32] },
+  { name: "Blue", rgb: [0.11, 0.28, 0.82] },
+];
+
+/** The gradient stop wells (no colour-picker door in the contract, so
+ *  the panel offers a shortlist — the ENGINE takes any RGBA). */
+const STOPS: Array<{ name: string; rgba: Rgba01 }> = [
+  { name: "Black", rgba: [0, 0, 0, 1] },
+  { name: "White", rgba: [1, 1, 1, 1] },
+  { name: "Red", rgba: [1, 0, 0, 1] },
+  { name: "Green", rgba: [0, 1, 0, 1] },
+  { name: "Blue", rgba: [0, 0, 1, 1] },
+  { name: "Transparent", rgba: [0, 0, 0, 0] },
+];
+
+const stopCss = (c: Rgba01) =>
+  `rgba(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(
+    c[2] * 255,
+  )}, ${c[3]})`;
+
 export function makeImagePanel(session: ImageSession) {
   return function ImagePanel() {
     const [, bump] = useReducer((n: number) => n + 1, 0);
@@ -255,6 +375,11 @@ export function makeImagePanel(session: ImageSession) {
       useState<Array<[number, number]>>(IDENTITY_CURVE);
     const [aspect, setAspect] = useState<AspectPreset>("free");
     const [angle, setAngle] = useState(0);
+    // Generate-section local state (the request shape, not engine state).
+    const [gradKind, setGradKind] = useState<GradientKind>("linear");
+    const [stop0, setStop0] = useState(0);
+    const [stop1, setStop1] = useState(1);
+    const [noiseAmount, setNoiseAmount] = useState(0.5);
 
     useEffect(() => {
       const sub = session.onDidChange(bump);
@@ -281,6 +406,40 @@ export function makeImagePanel(session: ImageSession) {
         : s.engine;
 
     const setBase = (k: keyof AdjustParams, v: number) => session.setParams({ [k]: v });
+
+    // The extended stages are nested objects — patch them immutably and
+    // hand the whole sub-object back to the session (shallow-merged).
+    const setBalance = (
+      range: "shadows" | "midtones" | "highlights",
+      axis: 0 | 1 | 2,
+      v: number,
+    ) => {
+      const next = { ...p.colorBalance };
+      const row3 = [...next[range]] as [number, number, number];
+      row3[axis] = v;
+      next[range] = row3;
+      session.setParams({ colorBalance: next });
+    };
+    const setMixer = (out: "r" | "g" | "b", i: 0 | 1 | 2 | 3, v: number) => {
+      const next = { ...p.channelMixer };
+      const r4 = [...next[out]] as [number, number, number, number];
+      r4[i] = v;
+      next[out] = r4;
+      session.setParams({ channelMixer: next });
+    };
+    const setLevelsRgb = (
+      ch: "r" | "g" | "b",
+      key: keyof LevelsChannel,
+      v: number,
+    ) => {
+      const next = { ...p.levelsRgb, [ch]: { ...p.levelsRgb[ch], [key]: v } };
+      session.setParams({ levelsRgb: next });
+    };
+    const setBw = (i: number, v: number) => {
+      const w = [...p.blackWhite.weights] as typeof p.blackWhite.weights;
+      w[i] = v;
+      session.setParams({ blackWhite: { ...p.blackWhite, weights: w } });
+    };
 
     const pushCurve = (next: Array<[number, number]>) => {
       setCurvePoints(next);
@@ -340,8 +499,49 @@ export function makeImagePanel(session: ImageSession) {
           balance and fills the sliders below; click Apply to composite.
         </div>
 
+        {/* Selection readout — the engine-side coverage the marquee /
+            lasso / wand tools build. When one exists, the committed Apply
+            masks every adjust/filter dispatch (GPU mix(a, result, mask))
+            + the CPU curves pass by it. */}
+        <div style={sectionTitle}>Selection</div>
+        {s.selection ? (
+          <>
+            <div style={row}>
+              <span>Bounds</span>
+              <span style={mono} data-image-selection-bounds>
+                {`${Math.round(s.selection.x)},${Math.round(s.selection.y)} ` +
+                  `${Math.round(s.selection.w)}×${Math.round(s.selection.h)}`}
+              </span>
+            </div>
+            <div style={row}>
+              <span>Coverage</span>
+              <span style={mono} data-image-selection-coverage>
+                {(s.selection.coverage * 100).toFixed(1)}%
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: "var(--space-2, 8px)", marginTop: "var(--space-1, 4px)" }}>
+              <button
+                type="button"
+                data-image-deselect
+                disabled={s.busy}
+                onClick={() => session.deselect()}
+              >
+                Deselect
+              </button>
+            </div>
+          </>
+        ) : (
+          <div style={note}>
+            No selection — adjustments apply to the whole image. Use the
+            marquee / lasso / wand tools (shift = add, alt = subtract,
+            shift+alt = intersect).
+          </div>
+        )}
+
         {/* Tone / color base */}
-        <div style={sectionTitle}>Tone</div>
+        <div style={sectionTitle}>
+          Tone{s.selection ? " — applies to selection" : ""}
+        </div>
         <Slider label="Exposure (EV)" min={-5} max={5} step={0.1} value={p.exposureEv} disabled={disabled} onChange={(v) => setBase("exposureEv", v)} />
         <Slider label="Brightness" min={-1} max={1} step={0.05} value={p.brightness} disabled={disabled} onChange={(v) => setBase("brightness", v)} />
         <Slider label="Contrast" min={0} max={4} step={0.05} value={p.contrast} disabled={disabled} onChange={(v) => setBase("contrast", v)} />
@@ -359,6 +559,310 @@ export function makeImagePanel(session: ImageSession) {
         <Slider label="In white" min={0} max={1} step={0.01} value={p.levels.inWhite} disabled={disabled} onChange={(v) => session.setLevels({ inWhite: v })} />
         <Slider label="Out black" min={0} max={1} step={0.01} value={p.levels.outBlack} disabled={disabled} onChange={(v) => session.setLevels({ outBlack: v })} />
         <Slider label="Out white" min={0} max={1} step={0.01} value={p.levels.outWhite} disabled={disabled} onChange={(v) => session.setLevels({ outWhite: v })} />
+
+        {/* Levels — PER CHANNEL (adjust.levels_rgb). Same Levels row
+            idiom, three columns: in black / gamma / in white. The OUTPUT
+            range stays composite above (the kernel has no output remap). */}
+        <div style={sectionTitle}>Levels (per channel)</div>
+        <NumRow label="&nbsp;">
+          <span style={{ ...mono, width: 46, fontSize: 10, opacity: 0.6, textAlign: "center" }}>blk</span>
+          <span style={{ ...mono, width: 46, fontSize: 10, opacity: 0.6, textAlign: "center" }}>gam</span>
+          <span style={{ ...mono, width: 46, fontSize: 10, opacity: 0.6, textAlign: "center" }}>wht</span>
+        </NumRow>
+        {(["r", "g", "b"] as const).map((ch) => (
+          <NumRow key={ch} label={ch.toUpperCase()}>
+            <Num testAttr={`data-image-levels-${ch}-black`} step={0.01} value={p.levelsRgb[ch].inBlack} disabled={disabled} onChange={(v) => setLevelsRgb(ch, "inBlack", v)} title={`${ch.toUpperCase()} in black`} />
+            <Num testAttr={`data-image-levels-${ch}-gamma`} step={0.05} value={p.levelsRgb[ch].gamma} disabled={disabled} onChange={(v) => setLevelsRgb(ch, "gamma", v)} title={`${ch.toUpperCase()} gamma`} />
+            <Num testAttr={`data-image-levels-${ch}-white`} step={0.01} value={p.levelsRgb[ch].inWhite} disabled={disabled} onChange={(v) => setLevelsRgb(ch, "inWhite", v)} title={`${ch.toUpperCase()} in white`} />
+          </NumRow>
+        ))}
+
+        {/* COLOR — the grading stages (adjust.vibrance, .color_balance,
+            .photo_filter, .channel_mixer). Chain order is fixed in the
+            engine (documented on ingest::adjust_rgba8); this section only
+            edits + forwards. */}
+        <div style={sectionTitle}>Color</div>
+        <Slider label="Vibrance" min={-1} max={1} step={0.05} value={p.vibrance} disabled={disabled} onChange={(v) => setBase("vibrance", v)} />
+
+        <div style={{ ...kicker, marginTop: "var(--space-2, 8px)" }}>Color balance</div>
+        <NumRow label="&nbsp;">
+          <span style={{ ...mono, width: 46, fontSize: 10, opacity: 0.6, textAlign: "center" }}>C↔R</span>
+          <span style={{ ...mono, width: 46, fontSize: 10, opacity: 0.6, textAlign: "center" }}>M↔G</span>
+          <span style={{ ...mono, width: 46, fontSize: 10, opacity: 0.6, textAlign: "center" }}>Y↔B</span>
+        </NumRow>
+        {(["shadows", "midtones", "highlights"] as const).map((range) => (
+          <NumRow key={range} label={range[0].toUpperCase() + range.slice(1)}>
+            {([0, 1, 2] as const).map((axis) => (
+              <Num
+                key={axis}
+                testAttr={`data-image-balance-${range}-${axis}`}
+                step={0.02}
+                value={p.colorBalance[range][axis]}
+                disabled={disabled}
+                onChange={(v) => setBalance(range, axis, v)}
+              />
+            ))}
+          </NumRow>
+        ))}
+
+        <div style={{ ...kicker, marginTop: "var(--space-2, 8px)" }}>Photo filter</div>
+        <div style={row}>
+          <label htmlFor="pg-image-photofilter">Gel</label>
+          <select
+            id="pg-image-photofilter"
+            data-image-photo-filter
+            disabled={disabled}
+            value={
+              PHOTO_FILTERS.findIndex(
+                (f) =>
+                  f.rgb[0] === p.photoFilter.color[0] &&
+                  f.rgb[1] === p.photoFilter.color[1] &&
+                  f.rgb[2] === p.photoFilter.color[2],
+              ) < 0
+                ? 0
+                : PHOTO_FILTERS.findIndex(
+                    (f) =>
+                      f.rgb[0] === p.photoFilter.color[0] &&
+                      f.rgb[1] === p.photoFilter.color[1] &&
+                      f.rgb[2] === p.photoFilter.color[2],
+                  )
+            }
+            onChange={(e) =>
+              session.setParams({
+                photoFilter: {
+                  ...p.photoFilter,
+                  color: [...PHOTO_FILTERS[Number(e.target.value)].rgb],
+                },
+              })
+            }
+          >
+            {PHOTO_FILTERS.map((f, i) => (
+              <option key={f.name} value={i}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <Slider
+          label="Density"
+          min={0}
+          max={1}
+          step={0.05}
+          value={p.photoFilter.density}
+          disabled={disabled}
+          onChange={(v) =>
+            session.setParams({ photoFilter: { ...p.photoFilter, density: v } })
+          }
+        />
+        <Gate
+          label="Preserve luminosity"
+          testAttr="data-image-photo-preserve"
+          checked={p.photoFilter.preserveLuminosity}
+          disabled={disabled}
+          onChange={(preserveLuminosity) =>
+            session.setParams({ photoFilter: { ...p.photoFilter, preserveLuminosity } })
+          }
+        />
+
+        <div style={{ ...kicker, marginTop: "var(--space-2, 8px)" }}>Channel mixer</div>
+        <NumRow label="&nbsp;">
+          {["R", "G", "B", "+"].map((h) => (
+            <span key={h} style={{ ...mono, width: 46, fontSize: 10, opacity: 0.6, textAlign: "center" }}>
+              {h}
+            </span>
+          ))}
+        </NumRow>
+        {(["r", "g", "b"] as const).map((out) => (
+          <NumRow key={out} label={`out ${out.toUpperCase()}`}>
+            {([0, 1, 2, 3] as const).map((i) => (
+              <Num
+                key={i}
+                testAttr={`data-image-mixer-${out}-${i}`}
+                step={0.05}
+                value={p.channelMixer[out][i]}
+                disabled={disabled}
+                onChange={(v) => setMixer(out, i, v)}
+              />
+            ))}
+          </NumRow>
+        ))}
+
+        {/* EFFECTS — the range-destroying stages. Each sits behind an
+            enable GATE (they look destructive, so they never ride a
+            "neutral value" default the user could hit by accident). */}
+        <div style={sectionTitle}>Effects</div>
+        <Gate
+          label="Black &amp; white"
+          testAttr="data-image-bw-enable"
+          checked={p.blackWhite.enabled}
+          disabled={disabled}
+          onChange={(enabled) => session.setParams({ blackWhite: { ...p.blackWhite, enabled } })}
+        />
+        {p.blackWhite.enabled && (
+          <>
+            <NumRow label="R / Y / G">
+              {[0, 1, 2].map((i) => (
+                <Num key={i} testAttr={`data-image-bw-${i}`} value={p.blackWhite.weights[i]} disabled={disabled} onChange={(v) => setBw(i, v)} />
+              ))}
+            </NumRow>
+            <NumRow label="C / B / M">
+              {[3, 4, 5].map((i) => (
+                <Num key={i} testAttr={`data-image-bw-${i}`} value={p.blackWhite.weights[i]} disabled={disabled} onChange={(v) => setBw(i, v)} />
+              ))}
+            </NumRow>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                session.setParams({
+                  blackWhite: { enabled: true, weights: [...DEFAULT_BW_WEIGHTS] },
+                })
+              }
+            >
+              Default mix
+            </button>
+          </>
+        )}
+        <Gate
+          label="Posterize"
+          testAttr="data-image-posterize-enable"
+          checked={p.posterizeLevels !== null}
+          disabled={disabled}
+          onChange={(on) => session.setParams({ posterizeLevels: on ? 6 : null })}
+        />
+        {p.posterizeLevels !== null && (
+          <Slider
+            label="Levels"
+            min={2}
+            max={32}
+            step={1}
+            value={p.posterizeLevels}
+            disabled={disabled}
+            onChange={(v) => session.setParams({ posterizeLevels: v })}
+          />
+        )}
+        <Gate
+          label="Threshold"
+          testAttr="data-image-threshold-enable"
+          checked={p.threshold !== null}
+          disabled={disabled}
+          onChange={(on) => session.setParams({ threshold: on ? 0.5 : null })}
+        />
+        {p.threshold !== null && (
+          <Slider
+            label="Cut (luma)"
+            min={0}
+            max={1}
+            step={0.01}
+            value={p.threshold}
+            disabled={disabled}
+            onChange={(v) => session.setParams({ threshold: v })}
+          />
+        )}
+
+        {/* GENERATE — the gen.* family. Unlike everything above this is
+            NOT a re-runnable chain stage: it paints ONCE into the working
+            image (composited through the selection mask on the GPU) and
+            swaps the engine source, like a crop commit. Honest v0: a
+            fixed TWO-STOP gradient whose geometry is derived from the
+            selection bounds (no on-canvas drag handle yet). */}
+        <div style={sectionTitle}>
+          Generate{s.selection ? " — fills the selection" : " — fills the whole image"}
+        </div>
+        <div style={row}>
+          <label htmlFor="pg-image-gradient">Gradient</label>
+          <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <select
+              id="pg-image-gradient"
+              data-image-gradient-kind
+              value={gradKind}
+              disabled={disabled}
+              onChange={(e) => setGradKind(e.target.value as GradientKind)}
+            >
+              {GRADIENT_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+            <select
+              data-image-gradient-stop0
+              value={stop0}
+              disabled={disabled}
+              onChange={(e) => setStop0(Number(e.target.value))}
+              style={{ background: stopCss(STOPS[stop0].rgba) }}
+              title="Start colour"
+            >
+              {STOPS.map((c, i) => (
+                <option key={c.name} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <select
+              data-image-gradient-stop1
+              value={stop1}
+              disabled={disabled}
+              onChange={(e) => setStop1(Number(e.target.value))}
+              style={{ background: stopCss(STOPS[stop1].rgba) }}
+              title="End colour"
+            >
+              {STOPS.map((c, i) => (
+                <option key={c.name} value={i}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              data-image-fill-gradient
+              disabled={disabled || !s.gpu}
+              title={s.gpu ? "Paint the gradient into the selection" : "Generators are GPU-only — no WebGPU device"}
+              onClick={() =>
+                void session.fillSelection({
+                  kind: "gradient",
+                  gradient: gradKind,
+                  c0: [...STOPS[stop0].rgba],
+                  c1: [...STOPS[stop1].rgba],
+                })
+              }
+            >
+              Fill
+            </button>
+          </span>
+        </div>
+        <div style={row}>
+          <label htmlFor="pg-image-noise">Noise</label>
+          <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <input
+              id="pg-image-noise"
+              data-image-noise-amount
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={noiseAmount}
+              disabled={disabled}
+              onChange={(e) => setNoiseAmount(Number(e.target.value))}
+            />
+            <span style={{ ...mono, minWidth: "3.5em", textAlign: "right" }}>
+              {noiseAmount.toFixed(2)}
+            </span>
+            <button
+              type="button"
+              data-image-fill-noise
+              disabled={disabled || !s.gpu}
+              onClick={() => void session.fillSelection({ kind: "noise", amount: noiseAmount })}
+            >
+              Fill
+            </button>
+          </span>
+        </div>
+        <div style={note}>
+          A fill is DESTRUCTIVE into the engine source (the document and the
+          placed file are untouched — re-ingest restores). Two stops only in
+          v0; the gradient geometry follows the selection bounds.
+        </div>
 
         {/* Filters — the T1/T2 kernels' first editor reach (blur, unsharp,
             hue rotation, invert); same GPU chain, same Apply commit. */}
@@ -545,6 +1049,43 @@ export function makeImagePanel(session: ImageSession) {
           </button>
         </div>
 
+        {/* SAVE-BACK — bake the adjustments into the SOURCE FILE bytes.
+            The button computes + STAGES them; the Export Center delivers
+            them, because the host contract has no save-file door
+            (shell.pickFile READS bytes in). Stated, not hidden. */}
+        <div style={sectionTitle}>Apply to file</div>
+        <div style={{ display: "flex", gap: "var(--space-2, 8px)" }}>
+          <button
+            type="button"
+            data-image-apply-to-file
+            disabled={disabled}
+            onClick={() => void session.applyToFile()}
+          >
+            Apply to file
+          </button>
+        </div>
+        {s.saveBack ? (
+          <>
+            <div style={row}>
+              <span>Ready</span>
+              <span style={mono} data-image-saveback-file>
+                {s.saveBack.fileName} · {s.saveBack.bytes.length} B
+              </span>
+            </div>
+            <div style={note} data-image-saveback-note>
+              {s.saveBack.note}
+            </div>
+          </>
+        ) : (
+          <div style={note}>
+            Bakes the adjustments into the source file&apos;s bytes at full
+            resolution: a PSD writes its channel pixels back (single-layer;
+            a MULTI-layer PSD is flattened into a new single-layer PSD and
+            says so), a PNG/JPEG is re-encoded. The bytes are handed to the
+            Export Center — the host wires no save-file door.
+          </div>
+        )}
+
         {/* Commit */}
         <div style={{ display: "flex", gap: "var(--space-2, 8px)", marginTop: "var(--space-3, 12px)" }}>
           <button type="button" disabled={disabled} onClick={() => void session.apply()}>
@@ -552,12 +1093,20 @@ export function makeImagePanel(session: ImageSession) {
           </button>
           <button
             type="button"
+            data-image-reset
             disabled={s.busy}
             onClick={() => {
+              // session.reset() restores the FULL identity params — every
+              // stage above, including the extended ones; the local
+              // pickers below are the panel's own state.
               void session.reset();
               setCurvePoints(IDENTITY_CURVE);
               setAspect("free");
               setAngle(0);
+              setGradKind("linear");
+              setStop0(0);
+              setStop1(1);
+              setNoiseAmount(0.5);
             }}
           >
             Reset
@@ -568,9 +1117,10 @@ export function makeImagePanel(session: ImageSession) {
         <div style={note}>
           Apply composites an in-frame PREVIEW layer (C-1 Stage A) — the
           document and the placed file are unchanged. The crop commit cuts
-          the engine source (axis-aligned; the straighten angle previews the
-          frame but the rotation resample is a follow-on stage). Adjusted-
-          pixel save-back and per-drag preview are later milestones.
+          the engine source, straightening first when the angle is non-zero
+          (a bilinear resample, so it needs the GPU; 0&deg; stays an exact
+          axis-aligned cut). &ldquo;Apply to file&rdquo; is the save-back lane;
+          per-drag preview is still a later milestone.
         </div>
       </div>
     );

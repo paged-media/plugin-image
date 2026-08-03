@@ -54,17 +54,22 @@ use image_core::{
     AlphaMode, ChannelLayout, ColorSpaceRef, NamedSpace, PixelFormat, Region, SampleDepth,
     TileSliceMut, Transfer,
 };
-use image_gpu::GpuContext;
+use image_gpu::{GpuContext, SelectionCoverage};
 use image_kernels::families::adjust::{
-    AdjustBrightnessContrastParams, AdjustExposureParams, AdjustHueRotateParams,
-    AdjustInvertRgbParams, AdjustLevelsParams, AdjustSaturationParams, AdjustWhiteBalanceParams,
-    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB,
-    ADJUST_LEVELS, ADJUST_SATURATION, ADJUST_WHITE_BALANCE,
+    AdjustBlackWhiteParams, AdjustBrightnessContrastParams, AdjustChannelMixerParams,
+    AdjustColorBalanceParams, AdjustExposureParams, AdjustHueRotateParams, AdjustInvertRgbParams,
+    AdjustLevelsParams, AdjustLevelsRgbParams, AdjustPhotoFilterParams, AdjustPosterizeParams,
+    AdjustSaturationParams, AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams,
+    ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE,
+    ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB,
+    ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE,
+    ADJUST_WHITE_BALANCE,
 };
 use image_kernels::families::conv::{
     ConvGaussianParams, ConvUnsharpParams, CONV_GAUSSIAN_H, CONV_GAUSSIAN_V, CONV_UNSHARP,
     GAUSSIAN_MAX_RADIUS,
 };
+use image_kernels::families::geom::{RotateBilinearParams, GEOM_ROTATE_BILINEAR};
 use image_pipeline::Pipeline;
 use image_psd::PsdFile;
 
@@ -117,6 +122,121 @@ impl LevelsParams {
     }
 }
 
+/// PER-CHANNEL levels (`adjust.levels_rgb`): `[in_black, in_white,
+/// gamma]` for r, g, b. Identity `[0, 1, 1]` per channel (the composite
+/// output range stays on [`LevelsParams`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelsRgbParams {
+    pub r: [f32; 3],
+    pub g: [f32; 3],
+    pub b: [f32; 3],
+}
+
+impl Default for LevelsRgbParams {
+    fn default() -> Self {
+        LevelsRgbParams {
+            r: [0.0, 1.0, 1.0],
+            g: [0.0, 1.0, 1.0],
+            b: [0.0, 1.0, 1.0],
+        }
+    }
+}
+
+impl LevelsRgbParams {
+    fn is_identity(&self) -> bool {
+        *self == LevelsRgbParams::default()
+    }
+}
+
+/// Color balance (`adjust.color_balance`): one offset per opponent axis
+/// (cyan↔red, magenta↔green, yellow↔blue) per tonal range. All 0 = off.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ColorBalanceParams {
+    pub shadows: [f32; 3],
+    pub midtones: [f32; 3],
+    pub highlights: [f32; 3],
+}
+
+impl ColorBalanceParams {
+    fn is_identity(&self) -> bool {
+        *self == ColorBalanceParams::default()
+    }
+}
+
+/// Photo filter (`adjust.photo_filter`): a colored gel with `density`
+/// (0 = OFF — the stage is skipped) and optional luminosity preservation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhotoFilterParams {
+    pub color: [f32; 3],
+    pub density: f32,
+    pub preserve_luminosity: bool,
+}
+
+impl Default for PhotoFilterParams {
+    fn default() -> Self {
+        // Warming filter (85) — the canonical default gel; density 0
+        // keeps the stage off until the panel raises it.
+        PhotoFilterParams {
+            color: [0.925, 0.639, 0.365],
+            density: 0.0,
+            preserve_luminosity: true,
+        }
+    }
+}
+
+impl PhotoFilterParams {
+    fn is_identity(&self) -> bool {
+        self.density == 0.0
+    }
+}
+
+/// Channel mixer (`adjust.channel_mixer`): each row is
+/// `[in_r, in_g, in_b, constant]` for the r, g, b outputs. Identity = the
+/// identity matrix with zero constants.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelMixerParams {
+    pub r: [f32; 4],
+    pub g: [f32; 4],
+    pub b: [f32; 4],
+}
+
+impl Default for ChannelMixerParams {
+    fn default() -> Self {
+        ChannelMixerParams {
+            r: [1.0, 0.0, 0.0, 0.0],
+            g: [0.0, 1.0, 0.0, 0.0],
+            b: [0.0, 0.0, 1.0, 0.0],
+        }
+    }
+}
+
+impl ChannelMixerParams {
+    fn is_identity(&self) -> bool {
+        *self == ChannelMixerParams::default()
+    }
+}
+
+/// Black & White (`adjust.black_white`): the six hue-sector grayscale
+/// weights behind an explicit `enabled` flag (the conversion is
+/// destructive-looking, so it never rides a "neutral value" default).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlackWhiteParams {
+    pub enabled: bool,
+    /// reds, yellows, greens, cyans, blues, magentas.
+    pub weights: [f32; 6],
+}
+
+impl Default for BlackWhiteParams {
+    fn default() -> Self {
+        // The conventional default mix (reds .4, yellows .6, greens .4,
+        // cyans .6, blues .2, magentas .8).
+        BlackWhiteParams {
+            enabled: false,
+            weights: [0.4, 0.6, 0.4, 0.6, 0.2, 0.8],
+        }
+    }
+}
+
 /// The M4 adjustments parameter set (the panel's committed values).
 /// Identity: ev 0, brightness 0, contrast 1, saturation 1, WB 0/0, levels
 /// identity, and no curve LUT.
@@ -148,6 +268,29 @@ pub struct AdjustParams {
     pub hue_degrees: f32,
     /// Per-color negate, alpha preserved (`adjust.invert_rgb`).
     pub invert: bool,
+    // ── the EXTENDED (kernel-breadth) adjust stages ──────────────────
+    // Each is identity-neutral by default and short-circuits exactly
+    // like the stages above; see `adjust_rgba8` for the fixed chain
+    // order and the rationale.
+    /// `adjust.vibrance` — saturation weighted by (1 − existing sat).
+    /// 0 = off. (The kernel's own `saturation` term stays 0 here; the
+    /// panel's global saturation is its OWN later stage.)
+    pub vibrance: f32,
+    /// `adjust.color_balance` — per tonal range opponent-axis offsets.
+    pub color_balance: ColorBalanceParams,
+    /// `adjust.photo_filter` — a colored gel; `density` 0 = off.
+    pub photo_filter: PhotoFilterParams,
+    /// `adjust.channel_mixer` — the 3×4 channel-mix matrix.
+    pub channel_mixer: ChannelMixerParams,
+    /// `adjust.levels_rgb` — per-channel input/gamma remap.
+    pub levels_rgb: LevelsRgbParams,
+    /// `adjust.black_white` — the six-weight grayscale mix (gated).
+    pub black_white: BlackWhiteParams,
+    /// `adjust.posterize` — quantize each channel to N levels.
+    /// `None` = off (the panel gates it behind a checkbox).
+    pub posterize: Option<f32>,
+    /// `adjust.threshold` — luma cut to black/white. `None` = off.
+    pub threshold: Option<f32>,
 }
 
 impl Default for AdjustParams {
@@ -165,13 +308,97 @@ impl Default for AdjustParams {
             sharpen_amount: 0.0,
             hue_degrees: 0.0,
             invert: false,
+            vibrance: 0.0,
+            color_balance: ColorBalanceParams::default(),
+            photo_filter: PhotoFilterParams::default(),
+            channel_mixer: ChannelMixerParams::default(),
+            levels_rgb: LevelsRgbParams::default(),
+            black_white: BlackWhiteParams::default(),
+            posterize: None,
+            threshold: None,
         }
     }
 }
 
+/// Wire length of the EXTENDED adjust parameter block
+/// ([`AdjustParams::apply_extended`] / the `adjust_image_ext` wasm door).
+/// A FLAT `f32` array so the boundary stays one argument as the stage set
+/// grows. Layout (fixed, mirrored by `glue/src/engine.ts`
+/// `packAdjustExt`):
+///
+/// ```text
+///  0      vibrance
+///  1..=3  color_balance shadows    (cyan-red, magenta-green, yellow-blue)
+///  4..=6  color_balance midtones
+///  7..=9  color_balance highlights
+/// 10      black_white enabled (0 | 1)
+/// 11..=16 black_white weights (reds, yellows, greens, cyans, blues, magentas)
+/// 17      posterize enabled (0 | 1)
+/// 18      posterize levels
+/// 19      threshold enabled (0 | 1)
+/// 20      threshold value
+/// 21      photo_filter density (0 = off)
+/// 22..=24 photo_filter color (r, g, b)
+/// 25      photo_filter preserve-luminosity (0 | 1)
+/// 26..=37 channel_mixer rows r[4], g[4], b[4] (in_r, in_g, in_b, const)
+/// 38..=46 levels_rgb r[3], g[3], b[3] (in_black, in_white, gamma)
+/// ```
+pub const ADJUST_EXT_LEN: usize = 47;
+
 impl AdjustParams {
+    /// Is the whole chain a NO-OP? SEMANTIC, not structural: a stage
+    /// whose gate is off (photo-filter density 0, black & white
+    /// disabled, `posterize`/`threshold` `None`) contributes nothing no
+    /// matter what its other fields hold, so `is_identity` asks the
+    /// stages, never `== Default::default()`. This is exactly the
+    /// short-circuit gate `adjust_rgba8` uses to return the decode
+    /// verbatim.
     pub fn is_identity(&self) -> bool {
-        *self == AdjustParams::default()
+        !self.has_gpu_stage() && self.curve_lut.is_none()
+    }
+
+    /// Decode the flat [`ADJUST_EXT_LEN`] block onto these params. An
+    /// EMPTY slice leaves every extended stage at identity (the
+    /// back-compatible `adjust_image_full` door); any other length is a
+    /// clean error, never a half-applied chain.
+    pub fn apply_extended(&mut self, ext: &[f32]) -> Result<(), IngestError> {
+        if ext.is_empty() {
+            return Ok(());
+        }
+        if ext.len() != ADJUST_EXT_LEN {
+            return Err(IngestError::Unsupported(format!(
+                "extended adjust block must be {ADJUST_EXT_LEN} f32s or empty (got {})",
+                ext.len()
+            )));
+        }
+        self.vibrance = ext[0];
+        self.color_balance = ColorBalanceParams {
+            shadows: [ext[1], ext[2], ext[3]],
+            midtones: [ext[4], ext[5], ext[6]],
+            highlights: [ext[7], ext[8], ext[9]],
+        };
+        self.black_white = BlackWhiteParams {
+            enabled: ext[10] != 0.0,
+            weights: [ext[11], ext[12], ext[13], ext[14], ext[15], ext[16]],
+        };
+        self.posterize = (ext[17] != 0.0).then_some(ext[18]);
+        self.threshold = (ext[19] != 0.0).then_some(ext[20]);
+        self.photo_filter = PhotoFilterParams {
+            density: ext[21],
+            color: [ext[22], ext[23], ext[24]],
+            preserve_luminosity: ext[25] != 0.0,
+        };
+        self.channel_mixer = ChannelMixerParams {
+            r: [ext[26], ext[27], ext[28], ext[29]],
+            g: [ext[30], ext[31], ext[32], ext[33]],
+            b: [ext[34], ext[35], ext[36], ext[37]],
+        };
+        self.levels_rgb = LevelsRgbParams {
+            r: [ext[38], ext[39], ext[40]],
+            g: [ext[41], ext[42], ext[43]],
+            b: [ext[44], ext[45], ext[46]],
+        };
+        Ok(())
     }
 
     /// Do any GPU adjust stages run (everything except the CPU curve LUT)?
@@ -188,6 +415,19 @@ impl AdjustParams {
             || self.sharpen_amount > 0.0
             || self.hue_degrees != 0.0
             || self.invert
+            || self.has_extended_stage()
+    }
+
+    /// Do any of the EXTENDED (kernel-breadth) stages run?
+    fn has_extended_stage(&self) -> bool {
+        self.vibrance != 0.0
+            || !self.color_balance.is_identity()
+            || !self.photo_filter.is_identity()
+            || !self.channel_mixer.is_identity()
+            || !self.levels_rgb.is_identity()
+            || self.black_white.enabled
+            || self.posterize.is_some()
+            || self.threshold.is_some()
     }
 }
 
@@ -424,7 +664,44 @@ fn apply_orientation(rgba: Vec<u8>, w: u32, h: u32, o: Orientation) -> (Vec<u8>,
 }
 
 /// Run the M4 adjustments chain through Engine A's ASYNC sink and return
-/// straight RGBA8. Stage order (each only when non-neutral):
+/// straight RGBA8.
+///
+/// # The fixed chain order
+///
+/// Every stage runs only when non-neutral (each has an identity
+/// short-circuit) and every stage is mask-aware — the bound selection's
+/// coverage rides `@group(2)` on EVERY dispatch (`mix(a, result, m)`).
+/// The order is FIXED and deliberate; the extended (kernel-breadth)
+/// stages slot in WITHOUT changing any pre-existing stage's relative
+/// position:
+///
+/// ```text
+///  1 exposure            (input remap: scene-referred stops)
+///  2 white_balance       (input remap: illuminant)
+///  3 levels              (input remap: composite black/gamma/white)
+///  4 levels_rgb          (input remap: PER-CHANNEL black/gamma/white)   ← new
+///  5 brightness/contrast (tonal)
+///  6 color_balance       (color grade: tonal-range opponent offsets)    ← new
+///  7 photo_filter        (color grade: gel absorption)                  ← new
+///  8 channel_mixer       (color grade: 3×4 channel matrix)              ← new
+///  9 vibrance            (chroma: weighted by existing saturation)      ← new
+/// 10 saturation          (chroma: global)
+/// 11 black_white         (chroma destroy: six-weight grayscale mix)     ← new
+/// 12 posterize           (quantize)                                     ← new
+/// 13 threshold           (quantize to 1 bit)                            ← new
+/// 14 hue_rotate          (FILTER stages, unchanged relative order)
+/// 15 invert
+/// 16 blur (separable Gaussian H then V)
+/// 17 sharpen (unsharp against a fixed σ1.5 blur)
+/// 18 curves              (CPU tone LUT — no GPU LUT kernel yet)
+/// ```
+///
+/// Rationale: input remaps first (they define the working range), then
+/// tone, then colour grading, then chroma, then the range-destroying
+/// quantizers, then spatial filters, and the CPU curve last (it is a
+/// final tone map over the composited result).
+///
+/// The legacy summary line, kept for orientation:
 ///   exposure → white-balance → levels → brightness/contrast → saturation
 /// on the GPU, then the optional CURVES tone LUT as a CPU pass (there is
 /// no GPU LUT kernel yet — the honest deferral; the LUT itself is built
@@ -433,10 +710,22 @@ fn apply_orientation(rgba: Vec<u8>, w: u32, h: u32, o: Orientation) -> (Vec<u8>,
 /// (no GPU stage) the GPU is skipped entirely and the LUT runs straight
 /// on the decoded buffer. GPU-only by construction for the kernel stages:
 /// no adapter ⇒ the caller never reaches here with a context.
+///
+/// `selection` is the session's coverage mask (spec §6.1): when `Some`,
+/// EVERY GPU adjust/filter dispatch binds its r16float window at
+/// `@group(2)` so the kernel applies `mix(input, result, mask)` — the
+/// adjustment lands only inside the selection — and the CPU curve LUT
+/// pass blends per-pixel by the same coverage. `None` (or an all-one
+/// coverage upstream) is the constant-1 default: the whole image. The
+/// mask is applied PER STAGE, so with intermediate (feathered) weights a
+/// multi-stage chain compounds slightly differently than one final blend
+/// of the fully adjusted image — the standard "each op runs through the
+/// selection" semantics; {0,1} regions are unaffected by the difference.
 pub async fn adjust_rgba8(
     ctx: &GpuContext,
     image: &DecodedImage,
     params: &AdjustParams,
+    selection: Option<Arc<SelectionCoverage>>,
 ) -> Result<Vec<u8>, IngestError> {
     if params.is_identity() {
         return Ok(image.rgba.to_vec());
@@ -445,6 +734,7 @@ pub async fn adjust_rgba8(
     // The GPU kernel chain (skipped wholesale when only a curve is set).
     let mut pixels = if params.has_gpu_stage() {
         let mut pipe = Pipeline::new();
+        pipe.set_selection(selection.clone());
         let src = RawSource::new(image.width, image.height, RGBA8, image.rgba.clone())
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         let mut node = pipe.source(Box::new(src));
@@ -481,6 +771,16 @@ pub async fn adjust_rgba8(
                 ),
             );
         }
+        // 4 — per-channel levels (the composite output range stays on
+        // stage 3; this one is the input/gamma remap per r, g, b).
+        if !params.levels_rgb.is_identity() {
+            let l = &params.levels_rgb;
+            node = pipe.apply(
+                node,
+                &ADJUST_LEVELS_RGB,
+                Arc::<[u8]>::from(AdjustLevelsRgbParams::new(l.r, l.g, l.b).as_bytes()),
+            );
+        }
         if params.brightness != 0.0 || params.contrast != 1.0 {
             node = pipe.apply(
                 node,
@@ -491,11 +791,79 @@ pub async fn adjust_rgba8(
                 ),
             );
         }
+        // 6, 7, 8 — the colour-grading trio.
+        if !params.color_balance.is_identity() {
+            let c = &params.color_balance;
+            node = pipe.apply(
+                node,
+                &ADJUST_COLOR_BALANCE,
+                Arc::<[u8]>::from(
+                    AdjustColorBalanceParams::new(c.shadows, c.midtones, c.highlights).as_bytes(),
+                ),
+            );
+        }
+        if !params.photo_filter.is_identity() {
+            let f = &params.photo_filter;
+            node = pipe.apply(
+                node,
+                &ADJUST_PHOTO_FILTER,
+                Arc::<[u8]>::from(
+                    AdjustPhotoFilterParams::new(f.color, f.density, f.preserve_luminosity)
+                        .as_bytes(),
+                ),
+            );
+        }
+        if !params.channel_mixer.is_identity() {
+            let m = &params.channel_mixer;
+            node = pipe.apply(
+                node,
+                &ADJUST_CHANNEL_MIXER,
+                Arc::<[u8]>::from(AdjustChannelMixerParams::new(m.r, m.g, m.b).as_bytes()),
+            );
+        }
+        // 9 — vibrance BEFORE the global saturation (it reads the
+        // still-unsaturated chroma to weight its own boost). The kernel's
+        // second term is the global saturation offset; we keep it 0 so
+        // stage 10 stays the single global control.
+        if params.vibrance != 0.0 {
+            node = pipe.apply(
+                node,
+                &ADJUST_VIBRANCE,
+                Arc::<[u8]>::from(AdjustVibranceParams::new(params.vibrance, 0.0).as_bytes()),
+            );
+        }
         if params.saturation != 1.0 {
             node = pipe.apply(
                 node,
                 &ADJUST_SATURATION,
                 Arc::<[u8]>::from(AdjustSaturationParams::new(params.saturation).as_bytes()),
+            );
+        }
+        // 11, 12, 13 — the range-destroying stages, LAST among the point
+        // adjustments (posterize/threshold quantize, so anything after
+        // them would work on a collapsed range).
+        if params.black_white.enabled {
+            let w = params.black_white.weights;
+            node = pipe.apply(
+                node,
+                &ADJUST_BLACK_WHITE,
+                Arc::<[u8]>::from(
+                    AdjustBlackWhiteParams::new(w[0], w[1], w[2], w[3], w[4], w[5]).as_bytes(),
+                ),
+            );
+        }
+        if let Some(levels) = params.posterize {
+            node = pipe.apply(
+                node,
+                &ADJUST_POSTERIZE,
+                Arc::<[u8]>::from(AdjustPosterizeParams::new(levels).as_bytes()),
+            );
+        }
+        if let Some(t) = params.threshold {
+            node = pipe.apply(
+                node,
+                &ADJUST_THRESHOLD,
+                Arc::<[u8]>::from(AdjustThresholdParams::new(t).as_bytes()),
             );
         }
         // FILTER stages (first wasm reach for the registered T1/T2
@@ -533,9 +901,7 @@ pub async fn adjust_rgba8(
                 node,
                 blurred,
                 &CONV_UNSHARP,
-                Arc::<[u8]>::from(
-                    ConvUnsharpParams::new(params.sharpen_amount, 0.0).as_bytes(),
-                ),
+                Arc::<[u8]>::from(ConvUnsharpParams::new(params.sharpen_amount, 0.0).as_bytes()),
             );
         }
 
@@ -551,8 +917,14 @@ pub async fn adjust_rgba8(
 
     // Curves: a 256-entry tone LUT over the RGB channels (alpha untouched).
     // A deterministic CPU table lookup — no GPU LUT kernel exists yet.
+    // Under a selection the LUT result blends per-pixel by the SAME
+    // coverage the GPU stages masked with, so the whole chain honors one
+    // selection contract.
     if let Some(lut) = &params.curve_lut {
-        apply_curve_lut(&mut pixels, lut);
+        match &selection {
+            Some(cov) => apply_curve_lut_masked(&mut pixels, lut, cov),
+            None => apply_curve_lut(&mut pixels, lut),
+        }
     }
     Ok(pixels)
 }
@@ -569,14 +941,41 @@ pub fn apply_curve_lut(pixels: &mut [u8], lut: &[u8; 256]) {
     }
 }
 
+/// [`apply_curve_lut`] under a selection: each pixel blends
+/// `mix(original, lut(original), coverage)` — the CPU curves stage's
+/// mirror of the GPU mask contract (`out = mix(a, result, m)`), so a
+/// masked chain with curves changes only selected pixels. `pixels` must
+/// be the coverage field's `w·h·4` bytes (the ingest slice's full-frame
+/// buffer); a size mismatch falls back to the unmasked LUT (defensive —
+/// the session always adjusts at image resolution).
+pub fn apply_curve_lut_masked(pixels: &mut [u8], lut: &[u8; 256], coverage: &SelectionCoverage) {
+    let expected = (coverage.width() as usize) * (coverage.height() as usize) * 4;
+    if pixels.len() != expected {
+        apply_curve_lut(pixels, lut);
+        return;
+    }
+    for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+        let m = coverage.data()[i] as u16;
+        if m == 0 {
+            continue;
+        }
+        for c in 0..3 {
+            let orig = px[c] as u16;
+            let mapped = lut[px[c] as usize] as u16;
+            // Rounded integer mix(orig, mapped, m/255).
+            px[c] = ((orig * (255 - m) + mapped * m + 127) / 255) as u8;
+        }
+    }
+}
+
 /// Commit a CROP: cut the integer pixel rectangle `(x, y, w, h)` (clamped
 /// to the image extent) out of `image` as a new [`DecodedImage`]. Pure
 /// windowing of the already-decoded buffer (orchestration, spec §6) — it
 /// reuses [`DecodedImage::tile_window_rgba8`]'s clipped-cut math. An empty
 /// intersection (the rect lies fully outside, or is zero-size) is a clean
-/// error, never a torn/zero image. The straighten-angle resample is NOT
-/// part of this axis-aligned cut (the crop machine commits the rect; the
-/// rotation is a follow-on resample stage).
+/// error, never a torn/zero image. This is the AXIS-ALIGNED cut only —
+/// the straighten angle rides [`straighten_crop_rgba8`], which rotates
+/// through `geom.rotate_bilinear` first and then calls this.
 pub fn crop_rgba8(
     image: &DecodedImage,
     x: u32,
@@ -596,6 +995,61 @@ pub fn crop_rgba8(
         height: ch,
         rgba: bytes.into(),
     })
+}
+
+/// STRAIGHTEN + CROP — the crop tool's rotated-frame commit.
+///
+/// The crop overlay previews the crop rectangle ROTATED by `degrees`
+/// about its own centre (`image_core::frame_corners`); committing it
+/// means "the content inside that rotated frame becomes the
+/// axis-aligned result". So the image is rotated by `−degrees` about the
+/// RECT's centre (`geom.rotate_bilinear`, backward-mapped, clamp-to-edge)
+/// and the now-upright rectangle is cut out of the result.
+///
+/// `degrees == 0` short-circuits to the pure windowing [`crop_rgba8`] —
+/// an axis-aligned crop never touches the GPU and never resamples (no
+/// interpolation blur for the common case). A non-zero angle IS a
+/// resample, so it is GPU-only like every other kernel.
+///
+/// HONEST EDGE RULE: the rotation clamps to the source edge, so if the
+/// rotated frame swings OUTSIDE the image the border texels smear into
+/// those corners instead of going transparent (the alpha-aware
+/// transparent-outside variant would be a second kernel). The crop tool
+/// clamps the rect to the image extent, which keeps the common case
+/// inside valid data.
+pub async fn straighten_crop_rgba8(
+    ctx: &GpuContext,
+    image: &DecodedImage,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    degrees: f32,
+) -> Result<DecodedImage, IngestError> {
+    if degrees == 0.0 {
+        return crop_rgba8(image, x, y, w, h);
+    }
+    let center = (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
+    // Rotate by −degrees: the FRAME turned by +degrees, so the content
+    // must turn back by the same amount to land upright.
+    let params = RotateBilinearParams::new(-degrees, center, center);
+    let win = crate::fill::rgba8_to_f16(&image.rgba);
+    let out = image_gpu::execute_windowed_once_async(
+        ctx,
+        &GEOM_ROTATE_BILINEAR,
+        &win,
+        image.width,
+        image.height,
+        params.as_bytes(),
+        None,
+        image.width,
+        image.height,
+    )
+    .await
+    .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+    let rotated =
+        DecodedImage::from_rgba8(image.width, image.height, crate::fill::f16_to_rgba8(&out))?;
+    crop_rgba8(&rotated, x, y, w, h)
 }
 
 #[cfg(test)]
@@ -742,6 +1196,40 @@ mod tests {
         let lut: [u8; 256] = std::array::from_fn(|k| 255 - k as u8);
         apply_curve_lut(&mut px, &lut);
         assert_eq!(px, vec![245, 235, 225, 128], "RGB inverted, alpha kept");
+    }
+
+    // feat: image.selection.mask — the CPU curves stage honors the same
+    // coverage contract as the GPU mask (mix by coverage).
+    #[test]
+    fn image_selection_curves_lut_masked_changes_only_selected_pixels() {
+        // A 2×1 buffer; coverage selects ONLY pixel 0.
+        let mut px = vec![10u8, 20, 30, 128, 40, 50, 60, 255];
+        let lut: [u8; 256] = std::array::from_fn(|k| 255 - k as u8);
+        let cov = SelectionCoverage::from_data(2, 1, vec![255, 0]).expect("2 px");
+        apply_curve_lut_masked(&mut px, &lut, &cov);
+        assert_eq!(&px[0..4], &[245, 235, 225, 128], "selected pixel remapped");
+        assert_eq!(&px[4..8], &[40, 50, 60, 255], "deselected pixel untouched");
+    }
+
+    #[test]
+    fn image_selection_curves_lut_masked_blends_at_half_coverage() {
+        // Coverage 128 (~50.2%): out ≈ mix(orig, lut(orig), 128/255).
+        let mut px = vec![0u8, 0, 0, 255];
+        let lut: [u8; 256] = std::array::from_fn(|k| 255 - k as u8);
+        let cov = SelectionCoverage::from_data(1, 1, vec![128]).expect("1 px");
+        apply_curve_lut_masked(&mut px, &lut, &cov);
+        // (0·127 + 255·128 + 127) / 255 = 128.
+        assert_eq!(&px[0..3], &[128, 128, 128]);
+        assert_eq!(px[3], 255, "alpha never remapped");
+    }
+
+    #[test]
+    fn image_selection_curves_lut_masked_size_mismatch_falls_back_unmasked() {
+        let mut px = vec![10u8, 20, 30, 128];
+        let lut: [u8; 256] = std::array::from_fn(|k| 255 - k as u8);
+        let cov = SelectionCoverage::from_data(3, 3, vec![0; 9]).expect("9 px");
+        apply_curve_lut_masked(&mut px, &lut, &cov);
+        assert_eq!(px, vec![245, 235, 225, 128], "defensive unmasked fallback");
     }
 
     #[test]

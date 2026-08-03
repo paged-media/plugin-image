@@ -24,7 +24,7 @@
 // Rust geometry — the TS NEVER re-implements the handle/rect/angle math
 // (it lives in image-core, property-tested). The caller (the crop tool's
 // gesture + the panel) drives this and renders `overlayPolyline()` through
-// `host.overlay.setToolPreview`; `commit()` cuts the rect via the engine
+// `host.overlay.setToolPreview`; `commit()` straightens + cuts via the engine
 // crop lane and re-composites in-frame through the existing Stage-A path.
 //
 // Coordinates everywhere are IMAGE-PIXEL space (origin top-left). The
@@ -88,15 +88,19 @@ export interface CropMachine {
    *  (TL, TR, BR, BL), rotated by the straighten angle — the overlay
    *  signal the caller passes to `host.overlay.setToolPreview`. */
   overlayPolyline(): Array<[number, number]>;
-  /** Commit the crop: cut the rect (axis-aligned, angle-0) out of the
-   *  source image via the engine and return the NEW image handle/info.
-   *  Throws (engine message) on an empty rect. The straighten-angle
-   *  resample is not part of this axis-aligned cut — the honest subset. */
-  commit(engine: ImageEngine, sourceHandle: number): {
-    handle: number;
-    width: number;
-    height: number;
-  };
+  /** Commit the crop INCLUDING the straighten angle: the engine rotates
+   *  the image by `−angle` about the rect centre (`geom.rotate_bilinear`,
+   *  backward-mapped bilinear, clamp-to-edge) so the rotated FRAME the
+   *  overlay drew lands upright, then cuts the rect. Returns the NEW
+   *  image handle/info; throws (engine message) on an empty rect.
+   *
+   *  At angle 0 this is the pure axis-aligned cut — no GPU, no resample,
+   *  no interpolation blur. A non-zero angle IS a resample, so it needs
+   *  the WebGPU device (the engine says so honestly without one). */
+  commit(
+    engine: ImageEngine,
+    sourceHandle: number,
+  ): Promise<{ handle: number; width: number; height: number }>;
 }
 
 /** Resolve a preset to the wasm aspect lock given the source dimensions
@@ -205,12 +209,16 @@ export function createCropMachine(
 
     commit(eng, sourceHandle) {
       const r = state.rect;
-      return eng.crop(sourceHandle, {
-        x: Math.round(r.x),
-        y: Math.round(r.y),
-        w: Math.round(r.w),
-        h: Math.round(r.h),
-      });
+      return eng.straightenCrop(
+        sourceHandle,
+        {
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          w: Math.round(r.w),
+          h: Math.round(r.h),
+        },
+        state.angle,
+      );
     },
   };
 }

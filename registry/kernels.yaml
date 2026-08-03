@@ -822,6 +822,149 @@
   tests:
     rust: ["image-conformance/tests/family_compose.rs"]
 
+# ── compose family, extended set (Photoshop modes beyond W3C L1;
+#    kernel-breadth batch) ──────────────────────────────────────
+
+- id: compose.linear_burn
+  rust_path: families::compose::COMPOSE_LINEAR_BURN
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop/PDF-extended blend mode — linear burn: max(Cb+Cs-1, 0); public formula, no reference reading"
+    - "PSD blend key 'lbrn'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.linear_dodge
+  rust_path: families::compose::COMPOSE_LINEAR_DODGE
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop/PDF-extended blend mode — linear dodge (add): min(Cb+Cs, 1); public formula, no reference reading"
+    - "PSD blend key 'lddg'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.darker_color
+  rust_path: families::compose::COMPOSE_DARKER_COLOR
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — darker color (non-separable, whole-triple select by Lum); public formula, no reference reading"
+    - "PSD blend key 'dkCl'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.lighter_color
+  rust_path: families::compose::COMPOSE_LIGHTER_COLOR
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — lighter color (non-separable, whole-triple select by Lum); public formula, no reference reading"
+    - "PSD blend key 'lgCl'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.vivid_light
+  rust_path: families::compose::COMPOSE_VIVID_LIGHT
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 8 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — vivid light: burn below Cs=0.5, dodge above; public formula, no reference reading"
+    - "PSD blend key 'vLit'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.linear_light
+  rust_path: families::compose::COMPOSE_LINEAR_LIGHT
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — linear light: clamp(Cb+2Cs-1, 0, 1); public formula, no reference reading"
+    - "PSD blend key 'lLit'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.pin_light
+  rust_path: families::compose::COMPOSE_PIN_LIGHT
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — pin light: min(Cb,2Cs) below Cs=0.5, max(Cb,2Cs-1) above; public formula, no reference reading"
+    - "PSD blend key 'pLit'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.hard_mix
+  rust_path: families::compose::COMPOSE_HARD_MIX
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — hard mix: channel snaps to (Cb+Cs<1 ? 0 : 1); public formula, no reference reading"
+    - "PSD blend key 'hMix'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.subtract
+  rust_path: families::compose::COMPOSE_SUBTRACT
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — subtract: max(Cb-Cs, 0); public formula, no reference reading"
+    - "PSD blend key 'fsub'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
+- id: compose.divide
+  rust_path: families::compose::COMPOSE_DIVIDE
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 6 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "Photoshop blend mode — divide: min(Cb/Cs, 1), Cs=0 -> 1; public formula, no reference reading"
+    - "PSD blend key 'fdiv'"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs"]
+
 # ── adjust family (T2; tone/color point ops) ─────────────────
 
 - id: adjust.exposure
@@ -915,6 +1058,113 @@
   tests:
     rust: ["image-conformance/tests/family_adjust.rs"]
 
+# ── adjust family, breadth batch (Photoshop-class adjustments;
+#    semantics DEFINED in families/adjust.rs comments) ─────────
+
+- id: adjust.vibrance
+  rust_path: families::adjust::ADJUST_VIBRANCE
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "vibrance: saturation-protected mix toward luma, factor 1+sat+vib*(1-satlevel); semantics defined in-file; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.color_balance
+  rust_path: families::adjust::ADJUST_COLOR_BALANCE
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 8 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "color balance: smoothstep shadows/midtones/highlights partition x 3 opponent axes + luminosity restore; semantics defined in-file; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.black_white
+  rust_path: families::adjust::ADJUST_BLACK_WHITE
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "black & white: exact min/mid/max hue-sector decomposition, gray = mn + (mid-mn)*w_sec + (mx-mid)*w_pri (continuous across sectors); semantics defined in-file; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.posterize
+  rust_path: families::adjust::ADJUST_POSTERIZE
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "posterize: min(floor(clamp(c,0,1)*n)/(n-1), 1), n = max(levels,2); standard quantization; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.threshold
+  rust_path: families::adjust::ADJUST_THRESHOLD
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "threshold: luma >= threshold -> white else black, compared in premultiplied space (lum(premul) >= threshold*alpha) to avoid division noise; standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.photo_filter
+  rust_path: families::adjust::ADJUST_PHOTO_FILTER
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "photo filter: gel-absorption mix(c, c*filter, density) + optional luminosity restore; semantics defined in-file; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.channel_mixer
+  rust_path: families::adjust::ADJUST_CHANNEL_MIXER
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: gegl
+  status: implemented
+  provenance:
+    - "channel mixer: 3x4 matrix (3 outputs x rgb+constant), fixed left-to-right sums; standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
+- id: adjust.levels_rgb
+  rust_path: families::adjust::ADJUST_LEVELS_RGB
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 16 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "per-channel levels: in_black/in_white/gamma per r,g,b (pow; same tolerance rationale as adjust.levels); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
 # ── geom family (T2; coordinate remaps) ──────────────────────
 
 - id: geom.flip_h
@@ -982,6 +1232,20 @@
   tests:
     rust: ["image-conformance/tests/family_geom.rs"]
 
+- id: geom.rotate_bilinear
+  rust_path: families::geom::GEOM_ROTATE_BILINEAR
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: vips
+  status: implemented
+  provenance:
+    - "backward-mapped affine warp with bilinear reconstruction: Wolberg, Digital Image Warping (IEEE CS Press, 1990), inverse mapping + bilinear interpolation; no reference reading"
+    - "differential oracle: vips similarity/rotate at interpolate=bilinear"
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
 # ── gen family (T2; procedural generators, unary-dummy lane) ─
 
 - id: gen.solid
@@ -1020,6 +1284,71 @@
   status: implemented
   provenance:
     - "procedural linear gradient (projection parameter); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]
+
+- id: gen.radial_gradient
+  rust_path: families::gen::GEN_RADIAL_GRADIENT
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural radial gradient (euclidean distance / radius); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]
+
+- id: gen.angular_gradient
+  rust_path: families::gen::GEN_ANGULAR_GRADIENT
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural angular (conic) gradient; own deterministic atan2 (octant fold + odd polynomial, Abramowitz & Stegun 4.4-class) mirrored in both lanes; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]
+
+- id: gen.reflected_gradient
+  rust_path: families::gen::GEN_REFLECTED_GRADIENT
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural reflected gradient (|signed projection| about p0); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]
+
+- id: gen.diamond_gradient
+  rust_path: families::gen::GEN_DIAMOND_GRADIENT
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural diamond gradient (rotated L1-distance contours / scale); standard; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_gen.rs"]
+
+- id: gen.noise
+  rust_path: families::gen::GEN_NOISE
+  state_row: image.kernel.family-t2
+  class: generator
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 1 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "deterministic uniform noise via PCG integer hash of (x, y, seed) — Jarzynski & Olano, 'Hash Functions for GPU Rendering', JCGT 2020 (public literature); bit-identical u32 lanes; no Math.random / platform PRNG"
   tests:
     rust: ["image-conformance/tests/family_gen.rs"]
 

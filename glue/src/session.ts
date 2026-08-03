@@ -33,27 +33,50 @@ import type { BundleHost, Disposable } from "@paged-media/plugin-api";
 
 import {
   bootEngine,
+  freshIdentityParams,
   isIdentity,
-  IDENTITY_PARAMS,
   type AdjustParams,
+  type GradientKind,
   type ImageEngine,
   type ImageHistogram,
   type PsdLayerInfo,
+  type RasterFormat,
   type ResampleFilter,
+  type Rgba01,
   type LevelsParams,
+  type SelectionStats,
 } from "./engine";
 import { claimImageTiles } from "./tile-provider";
 import { createDecodePool, type DecodePool } from "./decode-pool";
 import { createCropMachine, type CropMachine } from "./crop-machine";
+import {
+  createSelectionMachine,
+  type SelectionMachine,
+} from "./selection-machine";
 
-/** A deep clone of the identity adjustment params (the nested `levels`
- *  object must not be shared between the live params and the constant). */
-function freshIdentityParams(): AdjustParams {
-  return {
-    ...IDENTITY_PARAMS,
-    levels: { ...IDENTITY_PARAMS.levels },
-    curveLut: null,
-  };
+/** The fixed v0 feather sigma (px) the `featherSelection` command uses
+ *  when the caller passes none (a slider is a follow-up). */
+export const FEATHER_SIGMA_DEFAULT = 4;
+
+/** The fixed v0 noise seed the `fillSelection` command uses when the
+ *  caller passes none (a seed field is a follow-up). */
+export const FILL_NOISE_SEED_DEFAULT = 1;
+
+/** What to paint into the selection (the `gen.*` family's editor
+ *  reach). Colours are straight RGBA in [0,1]. */
+export type FillRequest =
+  | { kind: "gradient"; gradient: GradientKind; c0: Rgba01; c1: Rgba01 }
+  | { kind: "noise"; amount: number; seed?: number };
+
+/** Save-back bytes staged by `applyToFile` — what the exporters hand
+ *  out and what the panel reports. */
+export interface SaveBackResult {
+  bytes: Uint8Array;
+  fileName: string;
+  mimeType: string;
+  /** The HONEST one-liner (which lane ran, what it did to the layer
+   *  structure). Shown in the panel verbatim. */
+  note: string;
 }
 
 /** The ingested source image (engine-held pixels behind `handle`). */
@@ -95,6 +118,16 @@ export interface ImageSessionState {
    *  composite stays the import-time flatten (re-flatten after record
    *  edits is a follow-up). */
   psd: { name: string; layers: PsdLayerInfo[] } | null;
+  /** The active SELECTION readout (engine-side coverage; §6.1), or null
+   *  when no explicit selection exists — adjustments then apply to the
+   *  whole image. When set, the committed Apply masks every GPU
+   *  adjust/filter dispatch (and the CPU curves pass) by the coverage. */
+  selection: SelectionStats | null;
+  /** The SAVE-BACK bytes staged by `applyToFile` (null until asked
+   *  for). The panel reports them; the Export Center delivers them —
+   *  the host wires no save-FILE door (`shell.pickFile` reads, it does
+   *  not write), so the exporter registry is the whole delivery lane. */
+  saveBack: SaveBackResult | null;
 }
 
 export interface ImageSession {
@@ -116,6 +149,37 @@ export interface ImageSession {
   /** The edited PSD, preservation-safe (zero-edit ⇒ byte-identical).
    *  Null when no PSD is loaded / the engine is gone. */
   psdExport(): { bytes: Uint8Array; fileName: string } | null;
+  /** SAVE-BACK: composite the current adjustments at FULL resolution and
+   *  bake them into the source file's bytes.
+   *
+   *  * PSD source → `replace_channel_pixels` on the single canvas-sized
+   *    content layer when there is one, else the composite is FLATTENED
+   *    into a new single-layer PSD (announced in `note`, never silent);
+   *    then `psd_save` (full carry-through preservation).
+   *  * PNG/JPEG source → re-encode through `image-codecs` (PNG by
+   *    default; JPEG when the ingested source was a JPEG, fixed v0
+   *    quality).
+   *
+   *  Stages the result on `state().saveBack` and returns it; null (with
+   *  an honest status) when there is nothing to save or the lane is
+   *  unsupported. The DOCUMENT is untouched either way — this produces
+   *  bytes, it does not write files (the host wires no save-file door). */
+  applyToFile(): Promise<SaveBackResult | null>;
+  /** What the PSD exporter hands out: the ADJUSTED save-back when the
+   *  panel is off identity, else the preservation-safe re-emit
+   *  (zero-edit ⇒ BYTE-IDENTICAL — the §10.4 invariant survives; a plain
+   *  export never rewrites the composite). Null when no PSD is loaded. */
+  psdExportBytes(): Promise<{ bytes: Uint8Array; fileName: string } | null>;
+  /** What the PNG / JPEG exporters hand out: the adjusted result
+   *  re-encoded in the REQUESTED format (whatever the source was). */
+  rasterExportBytes(
+    format: RasterFormat,
+  ): Promise<{ bytes: Uint8Array; fileName: string } | null>;
+  /** FILL the current selection (the whole image when none) with a
+   *  generator, composited through the coverage mask. DESTRUCTIVE: it
+   *  swaps the engine-held source like a crop commit (the document and
+   *  the placed file are still untouched; re-ingest restores). */
+  fillSelection(req: FillRequest): Promise<boolean>;
   setParams(p: Partial<AdjustParams>): void;
   /** Set the composite levels (merged into params.levels). */
   setLevels(l: Partial<LevelsParams>): void;
@@ -132,6 +196,22 @@ export interface ImageSession {
    *  image is ingested + the engine is ready). The crop tool's gesture and
    *  the panel's crop controls drive it. */
   cropMachine(): CropMachine | null;
+  /** The SELECTION interaction machine (null until an image is
+   *  ingested). The marquee/lasso/wand tools drive it; the selection
+   *  itself is engine state bound to the live source handle. */
+  selectionMachine(): SelectionMachine | null;
+  /** Re-read the engine's selection stats into `state().selection` and
+   *  notify (the machines call this after every committed change). */
+  refreshSelection(): void;
+  /** Select the whole image (an explicit full-extent selection). */
+  selectAll(): boolean;
+  /** Deselect (back to "no selection" — adjust applies everywhere). */
+  deselect(): boolean;
+  /** Invert the selection ("everything" inverts to the empty selection). */
+  invertSelection(): boolean;
+  /** Gaussian-feather the selection edge (σ px; the fixed v0 default
+   *  when omitted). False when there is no selection to feather. */
+  featherSelection(sigma?: number): boolean;
   /** Commit the crop: cut the machine's rect out of the source image, swap
    *  the engine-held source to the cropped result, recompute the
    *  histogram, and re-composite in-frame. Returns false when there is
@@ -175,6 +255,9 @@ export function createImageSession(host: BundleHost): ImageSession {
   let decodePoolPromise: Promise<DecodePool | null> | null = null;
   // The crop interaction machine for the live source (rebuilt on ingest).
   let cropMachineRef: CropMachine | null = null;
+  // The selection interaction machine (rebuilt alongside the crop
+  // machine; the selection itself is ENGINE state keyed to the handle).
+  let selectionMachineRef: SelectionMachine | null = null;
   let disposed = false;
 
   const state: ImageSessionState = {
@@ -188,9 +271,15 @@ export function createImageSession(host: BundleHost): ImageSession {
     busy: false,
     status: "Select a placed image frame, then ingest.",
     psd: null,
+    selection: null,
+    saveBack: null,
   };
   /** The retained PSD parse handle (wasm-side), when state.psd is set. */
   let psdHandle: number | null = null;
+  /** The ingested source's container, for the PNG/JPEG save-back lane
+   *  ("jpeg" only when the ORIGINAL bytes were a JPEG — a re-encode
+   *  never invents a lossy format). */
+  let sourceFormat: RasterFormat | "psd" | null = null;
 
   const emit = () => {
     for (const l of [...listeners]) l();
@@ -293,9 +382,13 @@ export function createImageSession(host: BundleHost): ImageSession {
     state.source = null;
     state.histogram = null;
     cropMachineRef = null;
+    selectionMachineRef = null;
+    state.selection = null;
     if (psdHandle !== null && engine) engine.psdClose(psdHandle);
     psdHandle = null;
     state.psd = null;
+    sourceFormat = null;
+    state.saveBack = null;
   };
 
   /** "8BPS" — the PSD/PSB magic. */
@@ -305,6 +398,24 @@ export function createImageSession(host: BundleHost): ImageSession {
     bytes[1] === 0x42 &&
     bytes[2] === 0x50 &&
     bytes[3] === 0x53;
+
+  /** Sniff the ORIGINAL container so the save-back lane re-encodes into
+   *  the format the file already was (never inventing a lossy one).
+   *  Unknown containers fall to PNG — the lossless default. */
+  const sniffFormat = (bytes: Uint8Array): RasterFormat | "psd" => {
+    if (isPsd(bytes)) return "psd";
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+      return "jpeg";
+    return "png";
+  };
+
+  /** Strip the extension off a display name (a link URI or file name) so
+   *  the save-back can stamp its own. */
+  const baseName = (name: string): string => {
+    const leaf = name.split(/[\\/]/).pop() || "image";
+    const dot = leaf.lastIndexOf(".");
+    return dot > 0 ? leaf.slice(0, dot) : leaf;
+  };
 
   /** Open the PSD structural session for an imported PSD (the mutatable
    *  tier's editor reach). Failure is honest-null — the raster lane
@@ -343,6 +454,17 @@ export function createImageSession(host: BundleHost): ImageSession {
       state.histogram = null;
     }
     cropMachineRef = createCropMachine(engine, state.source.width, state.source.height);
+    // Bind the engine selection to the LIVE handle (a crop/resize swap
+    // is a different handle, so the old selection drops engine-side —
+    // honest: a selection is meaningless across resolutions) and rebuild
+    // the machine + readout.
+    try {
+      engine.selectionBind(state.source.handle);
+    } catch (err) {
+      host.log.debug("selection bind failed", err);
+    }
+    selectionMachineRef = createSelectionMachine(engine, () => api.refreshSelection());
+    state.selection = engine.selectionStats();
   };
 
   const clearLayer = async () => {
@@ -373,6 +495,12 @@ export function createImageSession(host: BundleHost): ImageSession {
         origin,
         elementId,
       };
+      sourceFormat = sniffFormat(bytes);
+      state.saveBack = null;
+      // The PSD structural session rides EVERY PSD ingest (the K-2
+      // import AND the C-5 selection lane) — it is what the PSD
+      // save-back writes into.
+      openPsdSession(name, bytes);
       // Compute the levels/curves histogram + build the crop machine.
       refreshSourceReadout();
       const lane = decodePool ? " (off-thread)" : "";
@@ -453,7 +581,6 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         const ok = await decodeInto(name, bytes, "import", null);
         if (ok) {
-          openPsdSession(name, bytes);
           setStatus(
             `${name} — ${state.source?.width}×${state.source?.height} decoded. ` +
               "Select an image frame and Apply to composite.",
@@ -524,6 +651,161 @@ export function createImageSession(host: BundleHost): ImageSession {
       }
     },
 
+    async applyToFile() {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return null;
+      }
+      if (!state.gpu && !isIdentity(state.params)) {
+        setStatus("WebGPU unavailable — the adjusted save-back needs a device.");
+        return null;
+      }
+      state.busy = true;
+      setStatus("Compositing the full-resolution result…");
+      try {
+        // The SAME chain the canvas preview runs, at full resolution and
+        // through the same selection mask — the file gets exactly what
+        // the user saw.
+        const rgba = await engine.adjust(src.handle, state.params);
+        const stem = baseName(src.name);
+        let result: SaveBackResult;
+        if (sourceFormat === "psd" && psdHandle !== null) {
+          const shape = engine.psdApplyAdjusted(psdHandle, src.width, src.height, rgba);
+          refreshPsdLayers();
+          result = {
+            bytes: engine.psdSave(psdHandle),
+            fileName: `${stem}.psd`,
+            mimeType: "image/vnd.adobe.photoshop",
+            note: `PSD save-back — ${shape}.`,
+          };
+        } else if (sourceFormat === "psd") {
+          // A PSD whose structural parse failed (the raster lane still
+          // decoded it) — say so instead of silently writing a PNG.
+          setStatus(
+            "PSD save-back unavailable — the structural parse failed on this file " +
+              "(the adjusted PNG lane is still available via Export).",
+          );
+          return null;
+        } else {
+          const fmt: RasterFormat = sourceFormat === "jpeg" ? "jpeg" : "png";
+          result = {
+            bytes: engine.encode(rgba, src.width, src.height, fmt),
+            fileName: `${stem}${fmt === "jpeg" ? ".jpg" : ".png"}`,
+            mimeType: fmt === "jpeg" ? "image/jpeg" : "image/png",
+            note:
+              fmt === "jpeg"
+                ? "JPEG save-back — re-encoded at the fixed v0 quality (the source was a JPEG)."
+                : "PNG save-back — lossless re-encode of the adjusted pixels.",
+          };
+        }
+        state.saveBack = result;
+        setStatus(
+          `${result.note} ${result.fileName}, ${result.bytes.length} bytes — ready. ` +
+            "Deliver it from the Export Center (the host wires no save-file door).",
+        );
+        return result;
+      } catch (err) {
+        setStatus(`Save-back failed: ${err instanceof Error ? err.message : err}`);
+        return null;
+      } finally {
+        state.busy = false;
+        emit();
+      }
+    },
+
+    async psdExportBytes() {
+      if (psdHandle === null || !engine || !state.psd) return null;
+      // PRESERVATION FIRST: an unadjusted export must stay byte-identical,
+      // so the save-back only runs when the panel is actually off
+      // identity.
+      if (isIdentity(state.params)) return api.psdExport();
+      const back = await api.applyToFile();
+      if (back && back.mimeType === "image/vnd.adobe.photoshop") {
+        return { bytes: back.bytes, fileName: back.fileName };
+      }
+      // The save-back lane declined (unsupported mode/size) — fall back
+      // to the record-edit re-emit rather than exporting nothing.
+      return api.psdExport();
+    },
+
+    async rasterExportBytes(format) {
+      const src = state.source;
+      if (!src || !engine) return null;
+      if (!state.gpu && !isIdentity(state.params)) {
+        setStatus("WebGPU unavailable — the adjusted export needs a device.");
+        return null;
+      }
+      try {
+        const rgba = await engine.adjust(src.handle, state.params);
+        const bytes = engine.encode(rgba, src.width, src.height, format);
+        return {
+          bytes,
+          fileName: `${baseName(src.name)}${format === "jpeg" ? ".jpg" : ".png"}`,
+        };
+      } catch (err) {
+        setStatus(`Export failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return null;
+      }
+    },
+
+    async fillSelection(req) {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      if (!state.gpu) {
+        setStatus("WebGPU unavailable — the generators are GPU-only kernels.");
+        return false;
+      }
+      state.busy = true;
+      emit();
+      let filled: { handle: number; width: number; height: number };
+      try {
+        filled =
+          req.kind === "gradient"
+            ? await engine.fillGradient(src.handle, req.gradient, req.c0, req.c1)
+            : await engine.fillNoise(
+                src.handle,
+                req.amount,
+                req.seed ?? FILL_NOISE_SEED_DEFAULT,
+              );
+      } catch (err) {
+        setStatus(`Fill failed: ${err instanceof Error ? err.message : err}`);
+        state.busy = false;
+        emit();
+        return false;
+      }
+      // Swap the engine-held source (the crop-commit pattern): the fill
+      // is DESTRUCTIVE into the working image by design (see fill.rs).
+      releaseTiles();
+      engine.freeImage(src.handle);
+      src.handle = filled.handle;
+      src.width = filled.width;
+      src.height = filled.height;
+      state.saveBack = null;
+      // The fill is same-size, so the SELECTION is still meaningful on
+      // the result — carry it over instead of making the user reselect
+      // (a crop/resize swap still drops it; the extents differ there).
+      try {
+        engine.selectionTransfer(filled.handle);
+      } catch (err) {
+        host.log.debug("selection transfer failed", err);
+      }
+      refreshSourceReadout();
+      const where = state.selection ? "the selection" : "the whole image";
+      setStatus(
+        `Filled ${where} with ${
+          req.kind === "gradient" ? `a ${req.gradient} gradient` : "noise"
+        } (engine source only — document unchanged; Apply to recomposite).`,
+      );
+      state.busy = false;
+      emit();
+      return true;
+    },
+
     setLevels(l) {
       state.params = {
         ...state.params,
@@ -579,6 +861,73 @@ export function createImageSession(host: BundleHost): ImageSession {
       return cropMachineRef;
     },
 
+    selectionMachine() {
+      return selectionMachineRef;
+    },
+
+    refreshSelection() {
+      if (!engine || !state.source) return;
+      state.selection = engine.selectionStats();
+      emit();
+    },
+
+    selectAll() {
+      if (!engine || !state.source) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      try {
+        engine.selectionSelectAll();
+      } catch (err) {
+        setStatus(`Select all failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      api.refreshSelection();
+      setStatus("Selected all — adjustments apply to the whole image.");
+      return true;
+    },
+
+    deselect() {
+      if (!engine || !state.source) return false;
+      engine.selectionClear();
+      api.refreshSelection();
+      setStatus("Deselected — adjustments apply to the whole image.");
+      return true;
+    },
+
+    invertSelection() {
+      if (!engine || !state.source) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      try {
+        engine.selectionInvert();
+      } catch (err) {
+        setStatus(`Invert selection failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      api.refreshSelection();
+      setStatus("Selection inverted.");
+      return true;
+    },
+
+    featherSelection(sigma = FEATHER_SIGMA_DEFAULT) {
+      if (!engine || !state.source) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      try {
+        engine.selectionFeather(sigma);
+      } catch (err) {
+        // The honest miss: feather needs an explicit selection.
+        setStatus(`Feather failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      api.refreshSelection();
+      setStatus(`Selection feathered (σ ${sigma}px).`);
+      return true;
+    },
+
     async resizeTo(w, h, filter) {
       const src = state.source;
       if (!src || !engine) {
@@ -617,7 +966,10 @@ export function createImageSession(host: BundleHost): ImageSession {
       }
       let cropped: { handle: number; width: number; height: number };
       try {
-        cropped = cropMachineRef.commit(engine, src.handle);
+        // The commit carries the STRAIGHTEN angle: at 0° it is the pure
+        // axis-aligned cut, otherwise the engine rotates first
+        // (geom.rotate_bilinear) so the rotated frame lands upright.
+        cropped = await cropMachineRef.commit(engine, src.handle);
       } catch (err) {
         setStatus(`Crop failed: ${err instanceof Error ? err.message : err}`);
         return false;
@@ -630,9 +982,13 @@ export function createImageSession(host: BundleHost): ImageSession {
       src.width = cropped.width;
       src.height = cropped.height;
       refreshSourceReadout();
+      const straightened = cropMachineRef.state().angle !== 0;
       setStatus(
-        `Cropped to ${cropped.width}×${cropped.height} ` +
-          "(document unchanged — engine source only; Apply to recomposite).",
+        `Cropped to ${cropped.width}×${cropped.height}` +
+          (straightened
+            ? ` (straightened ${cropMachineRef.state().angle}° — bilinear resample)`
+            : "") +
+          " (document unchanged — engine source only; Apply to recomposite).",
       );
       // Re-composite the cropped pixels in-frame when a frame is targeted.
       if (src.elementId) await api.apply();
@@ -711,9 +1067,12 @@ export function createImageSession(host: BundleHost): ImageSession {
           ],
         });
         state.compositedFrame = target;
+        // The engine masked the chain by the bound selection (if any) —
+        // say so, honestly.
+        const sel = state.selection ? " (adjustments masked to the selection)" : "";
         setStatus(
-          `Composited ${src.width}×${src.height} into the frame ` +
-            "(document unchanged — preview layer only).",
+          `Composited ${src.width}×${src.height} into the frame` +
+            `${sel} (document unchanged — preview layer only).`,
         );
         return true;
       } catch (err) {
@@ -772,6 +1131,7 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     async reset() {
       state.params = freshIdentityParams();
+      state.saveBack = null;
       cropMachineRef?.reset(state.source?.width ?? 0, state.source?.height ?? 0);
       await clearLayer();
       setStatus("Reset — in-frame preview cleared.");

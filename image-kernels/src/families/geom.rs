@@ -404,12 +404,199 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+// ─────────────────────── rotate_bilinear ──────────────────────────
+//
+// ARBITRARY-ANGLE rotation — the STRAIGHTEN commit's resample (the
+// crop tool previewed a rotated frame long before anything could
+// commit it). Unlike the rest of this family it INTERPOLATES, so it is
+// `KernelClass::Resample { support: 1.0 }` (a 2×2 bilinear footprint)
+// with a f16 tolerance rather than `Exact`.
+//
+// # Coordinate model (frozen)
+//
+// Output texel `(x, y)` is the CONTINUOUS point `(x + 0.5, y + 0.5)`
+// in destination space. The forward map "rotate the source by θ about
+// `src_c`, landing its centre on `dst_c`" is
+//
+//     dst = R(θ)·(src − src_c) + dst_c ,  R(θ) = [[cos, −sin], [sin, cos]]
+//
+// so the BACKWARD map this kernel evaluates (one source point per
+// output texel, no scatter) is
+//
+//     src = R(−θ)·(dst − dst_c) + src_c
+//         = ( cos·dx + sin·dy + src_cx ,  −sin·dx + cos·dy + src_cy )
+//
+// with `dx = x + 0.5 − dst_cx`, `dy = y + 0.5 − dst_cy`. Subtracting
+// 0.5 converts the continuous source point back to texel-index space.
+// Screen convention: y grows DOWN, so a positive θ reads as a
+// clockwise rotation of the image.
+//
+// # Edge rule + summation order (determinism, §6.3)
+//
+// The four taps are `clamp`ed to `[0, dim−1]` — clamp-to-edge, the
+// same rule `resample.*` and `geom.crop` use, so the corners the
+// rotation swings past the source repeat the border instead of going
+// transparent (the straighten flow then CROPS the valid interior; a
+// transparent-outside variant would need an alpha-aware second kernel
+// and is NOT this one). The blend is the FIXED order
+// `mix(mix(p00, p10, fx), mix(p01, p11, fx), fy)` — x first, then y —
+// mirrored term-for-term by the scalar reference.
+//
+// `mip_exact: false` — like every coordinate remap it runs at level 0.
+//
+// Provenance: backward-mapped affine resampling with bilinear
+// reconstruction is textbook (Wolberg, *Digital Image Warping*, IEEE CS
+// Press 1990, §3–§5: inverse mapping + bilinear interpolation). No
+// reference reading. (vips oracle: `similarity`/`rotate` at
+// `interpolate=bilinear`.)
+
+/// Rotation params: `cos_t`/`sin_t` of the angle, the SOURCE centre the
+/// rotation pivots on, and the DESTINATION centre it lands on (the two
+/// differ whenever the output canvas grows to hold the rotated bounds).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct RotateBilinearParams {
+    pub cos_t: f32,
+    pub sin_t: f32,
+    pub src_cx: f32,
+    pub src_cy: f32,
+    pub dst_cx: f32,
+    pub dst_cy: f32,
+    /// Explicit pad → a 32-byte (16-aligned) uniform block.
+    pub _pad0: u32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl RotateBilinearParams {
+    /// Build from `degrees` (positive = clockwise on screen) plus the
+    /// source and destination centres in continuous pixel coordinates.
+    pub fn new(degrees: f32, src_c: (f32, f32), dst_c: (f32, f32)) -> Self {
+        let t = degrees.to_radians();
+        Self {
+            cos_t: t.cos(),
+            sin_t: t.sin(),
+            src_cx: src_c.0,
+            src_cy: src_c.1,
+            dst_cx: dst_c.0,
+            dst_cy: dst_c.1,
+            _pad0: 0,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const ROTATE_BILINEAR_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "cos_t",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "sin_t",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "src_cx",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "src_cy",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "dst_cx",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "dst_cy",
+        wgsl_ty: "f32",
+    },
+];
+
+/// Backward-mapped arbitrary-angle rotation with bilinear
+/// reconstruction, clamp-to-edge. One 2×2 tap footprint per output
+/// texel ⇒ `Resample { support: 1.0 }`; the two `mix` levels are
+/// correctly rounded on both lanes, so the f16 output quantisation
+/// absorbs the last-ulp trig divergence — `ChannelEpsF16(4)`.
+pub static GEOM_ROTATE_BILINEAR: KernelDef = KernelDef {
+    id: "geom.rotate_bilinear",
+    class: KernelClass::Resample { support: 1.0 },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<RotateBilinearParams>(),
+        fields: ROTATE_BILINEAR_FIELDS,
+    },
+    wgsl: GEOM_ROTATE_BILINEAR_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const GEOM_ROTATE_BILINEAR_WGSL: &str = "\
+// paged.image kernel `geom.rotate_bilinear` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    cos_t: f32,
+    sin_t: f32,
+    src_cx: f32,
+    src_cy: f32,
+    dst_cx: f32,
+    dst_cy: f32,
+    _pad0: u32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+fn tap(p: vec2<i32>, dims: vec2<i32>) -> vec4<f32> {
+    let c = clamp(p, vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+    return textureLoad(in0, c, 0);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(outp);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let wdims = vec2<i32>(textureDimensions(in0));
+
+    let dx = f32(xy.x) + 0.5 - params.dst_cx;
+    let dy = f32(xy.y) + 0.5 - params.dst_cy;
+    let sx = params.cos_t * dx + params.sin_t * dy + params.src_cx - 0.5;
+    let sy = -params.sin_t * dx + params.cos_t * dy + params.src_cy - 0.5;
+
+    let x0 = floor(sx);
+    let y0 = floor(sy);
+    let fx = sx - x0;
+    let fy = sy - y0;
+    let i0 = vec2<i32>(i32(x0), i32(y0));
+
+    let p00 = tap(i0, wdims);
+    let p10 = tap(i0 + vec2<i32>(1, 0), wdims);
+    let p01 = tap(i0 + vec2<i32>(0, 1), wdims);
+    let p11 = tap(i0 + vec2<i32>(1, 1), wdims);
+
+    let top = mix(p00, p10, fx);
+    let bot = mix(p01, p11, fx);
+    textureStore(outp, xy, mix(top, bot, fy));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
     &GEOM_FLIP_H,
     &GEOM_FLIP_V,
     &GEOM_ROTATE90_CW,
     &GEOM_ROTATE90_CCW,
     &GEOM_CROP,
+    &GEOM_ROTATE_BILINEAR,
 ];
 
 #[cfg(test)]

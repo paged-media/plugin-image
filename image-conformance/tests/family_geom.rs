@@ -46,13 +46,22 @@
 //!     offsets clamp to the source edge.
 //!
 //! feat: geom.flip_h, geom.flip_v, geom.rotate90_cw, geom.rotate90_ccw,
-//! geom.crop (registry/kernels.yaml).
+//! geom.crop, geom.rotate_bilinear (registry/kernels.yaml).
+//!
+//! ROTATE_BILINEAR NOTE. The arbitrary-angle rotation is the family's
+//! only INTERPOLATING member (2×2 bilinear), so its reference mirrors
+//! the WGSL term-for-term: the same `dx/dy` centre-relative continuous
+//! coords, the same `R(−θ)` backward map, the same `− 0.5` shift into
+//! texel-index space, the same clamp-to-edge taps, and the same fixed
+//! `mix(mix(p00,p10,fx), mix(p01,p11,fx), fy)` blend order (x then y).
+//! The trig runs HOST-side into the param block, so both lanes consume
+//! bit-identical `cos_t`/`sin_t`.
 
 use image_conformance::harness::{assert_within, parity_windowed, RefTile};
 use image_conformance::Px;
 use image_kernels::families::geom::{
-    CropParams, FlipHParams, FlipVParams, Rotate90Params, GEOM_CROP, GEOM_FLIP_H, GEOM_FLIP_V,
-    GEOM_ROTATE90_CCW, GEOM_ROTATE90_CW,
+    CropParams, FlipHParams, FlipVParams, Rotate90Params, RotateBilinearParams, GEOM_CROP,
+    GEOM_FLIP_H, GEOM_FLIP_V, GEOM_ROTATE90_CCW, GEOM_ROTATE90_CW, GEOM_ROTATE_BILINEAR,
 };
 
 /// A labeled source window: each texel encodes its own (x, y) source
@@ -253,5 +262,134 @@ fn geom_crop_negative_offset_clamps() {
     match parity_windowed(&GEOM_CROP, crop_ref, &win, out_w, out_h, &p) {
         Some(r) => assert_within(r, &GEOM_CROP),
         None => eprintln!("SKIP: no GPU adapter"),
+    }
+}
+
+// ─────────────────────── rotate_bilinear ──────────────────────────
+
+/// Clamp-to-edge tap (the module's `tap`).
+fn tap(win: &[Px], win_w: u32, win_h: u32, x: i32, y: i32) -> Px {
+    let cx = x.clamp(0, win_w as i32 - 1);
+    let cy = y.clamp(0, win_h as i32 - 1);
+    at(win, win_w, cx, cy)
+}
+
+fn lerp(a: Px, b: Px, t: f32) -> Px {
+    // WGSL `mix(a, b, t)` is `a + t*(b - a)` — mirrored exactly.
+    Px(std::array::from_fn(|c| a.0[c] + t * (b.0[c] - a.0[c])))
+}
+
+/// The scalar twin of `geom.rotate_bilinear` (see the module note).
+fn rotate_bilinear_ref(
+    win: &[Px],
+    win_w: u32,
+    win_h: u32,
+    ox: u32,
+    oy: u32,
+    p: &RotateBilinearParams,
+) -> Px {
+    let dx = ox as f32 + 0.5 - p.dst_cx;
+    let dy = oy as f32 + 0.5 - p.dst_cy;
+    let sx = p.cos_t * dx + p.sin_t * dy + p.src_cx - 0.5;
+    let sy = -p.sin_t * dx + p.cos_t * dy + p.src_cy - 0.5;
+    let x0 = sx.floor();
+    let y0 = sy.floor();
+    let fx = sx - x0;
+    let fy = sy - y0;
+    let (ix, iy) = (x0 as i32, y0 as i32);
+    let p00 = tap(win, win_w, win_h, ix, iy);
+    let p10 = tap(win, win_w, win_h, ix + 1, iy);
+    let p01 = tap(win, win_w, win_h, ix, iy + 1);
+    let p11 = tap(win, win_w, win_h, ix + 1, iy + 1);
+    lerp(lerp(p00, p10, fx), lerp(p01, p11, fx), fy)
+}
+
+#[test]
+fn geom_rotate_bilinear_parity_same_canvas() {
+    // A 13.5° straighten about the image centre, output = source dims
+    // (the crop-commit case: the valid interior is cut afterwards).
+    let (w, h) = (64u32, 48u32);
+    let win = labeled(w, h);
+    let c = (w as f32 / 2.0, h as f32 / 2.0);
+    let p = RotateBilinearParams::new(13.5, c, c);
+    match parity_windowed(&GEOM_ROTATE_BILINEAR, rotate_bilinear_ref, &win, w, h, &p) {
+        Some(r) => assert_within(r, &GEOM_ROTATE_BILINEAR),
+        None => eprintln!("SKIP: no GPU adapter"),
+    }
+}
+
+#[test]
+fn geom_rotate_bilinear_parity_grown_canvas_negative_angle() {
+    // A negative angle onto a LARGER destination canvas (the "hold the
+    // whole rotated bounds" case) — dst_c ≠ src_c, and every corner tap
+    // exercises the clamp.
+    let (w, h) = (40u32, 30u32);
+    let win = labeled(w, h);
+    let (out_w, out_h) = (56u32, 48u32);
+    let p = RotateBilinearParams::new(
+        -22.0,
+        (w as f32 / 2.0, h as f32 / 2.0),
+        (out_w as f32 / 2.0, out_h as f32 / 2.0),
+    );
+    match parity_windowed(
+        &GEOM_ROTATE_BILINEAR,
+        rotate_bilinear_ref,
+        &win,
+        out_w,
+        out_h,
+        &p,
+    ) {
+        Some(r) => assert_within(r, &GEOM_ROTATE_BILINEAR),
+        None => eprintln!("SKIP: no GPU adapter"),
+    }
+}
+
+#[test]
+fn geom_rotate_bilinear_zero_angle_is_a_passthrough() {
+    // θ = 0 with matching centres ⇒ the identity map: fx = fy = 0 and
+    // every texel reads its own source texel. Pure reference (no GPU) —
+    // it pins the coordinate convention itself.
+    let (w, h) = (8u32, 6u32);
+    let win = labeled(w, h);
+    let px = win.quantized_px();
+    let c = (w as f32 / 2.0, h as f32 / 2.0);
+    let p = RotateBilinearParams::new(0.0, c, c);
+    for y in 0..h {
+        for x in 0..w {
+            let got = rotate_bilinear_ref(&px, w, h, x, y, &p);
+            let want = at(&px, w, x as i32, y as i32);
+            for ch in 0..4 {
+                assert!(
+                    (got.0[ch] - want.0[ch]).abs() < 1e-6,
+                    "({x},{y}) ch{ch}: {} vs {}",
+                    got.0[ch],
+                    want.0[ch]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn geom_rotate_bilinear_180_degrees_matches_the_corner_swap() {
+    // θ = 180° about the centre maps (x, y) → (w-1-x, h-1-y) exactly
+    // (cos = −1, sin ≈ 0 ⇒ the taps land on integers). Pure reference:
+    // it pins the ROTATION DIRECTION, which a parity test alone cannot.
+    let (w, h) = (8u32, 6u32);
+    let win = labeled(w, h);
+    let px = win.quantized_px();
+    let c = (w as f32 / 2.0, h as f32 / 2.0);
+    let p = RotateBilinearParams::new(180.0, c, c);
+    for (x, y) in [(0u32, 0u32), (7, 5), (3, 2)] {
+        let got = rotate_bilinear_ref(&px, w, h, x, y, &p);
+        let want = at(&px, w, (w - 1 - x) as i32, (h - 1 - y) as i32);
+        for ch in 0..4 {
+            assert!(
+                (got.0[ch] - want.0[ch]).abs() < 1e-3,
+                "({x},{y}) ch{ch}: {} vs {}",
+                got.0[ch],
+                want.0[ch]
+            );
+        }
     }
 }

@@ -53,9 +53,66 @@ export const IDENTITY_LEVELS: LevelsParams = {
   outWhite: 1,
 };
 
+/** One channel's Levels input remap (`adjust.levels_rgb`). Identity
+ *  `{0, 1, 1}` — the OUTPUT range stays composite on [`LevelsParams`]. */
+export interface LevelsChannel {
+  inBlack: number;
+  inWhite: number;
+  gamma: number;
+}
+
+export const IDENTITY_LEVELS_CHANNEL: LevelsChannel = {
+  inBlack: 0,
+  inWhite: 1,
+  gamma: 1,
+};
+
+/** Per-channel Levels (`adjust.levels_rgb`). */
+export interface LevelsRgbParams {
+  r: LevelsChannel;
+  g: LevelsChannel;
+  b: LevelsChannel;
+}
+
+/** Color balance (`adjust.color_balance`): one offset per opponent axis
+ *  — `[cyan↔red, magenta↔green, yellow↔blue]` — per tonal range. All 0
+ *  = off. */
+export interface ColorBalanceParams {
+  shadows: [number, number, number];
+  midtones: [number, number, number];
+  highlights: [number, number, number];
+}
+
+/** Photo filter (`adjust.photo_filter`): a colored gel. `density` 0 =
+ *  OFF (the stage is skipped whatever the color is). */
+export interface PhotoFilterParams {
+  /** Straight RGB in [0,1]. */
+  color: [number, number, number];
+  density: number;
+  preserveLuminosity: boolean;
+}
+
+/** Channel mixer (`adjust.channel_mixer`): each row is
+ *  `[inR, inG, inB, constant]` for the r/g/b outputs. */
+export interface ChannelMixerParams {
+  r: [number, number, number, number];
+  g: [number, number, number, number];
+  b: [number, number, number, number];
+}
+
+/** Black & White (`adjust.black_white`): the six hue-sector grayscale
+ *  weights behind an explicit `enabled` gate (the conversion looks
+ *  destructive, so it never rides a "neutral value" default). */
+export interface BlackWhiteParams {
+  enabled: boolean;
+  /** reds, yellows, greens, cyans, blues, magentas. */
+  weights: [number, number, number, number, number, number];
+}
+
 /** The committed adjustment parameters. Identity = every field neutral:
  *  exposure 0 / brightness 0 / contrast 1 / saturation 1, white balance
- *  0/0, levels identity, no curve LUT. */
+ *  0/0, levels identity, no curve LUT, and every EXTENDED stage gated
+ *  off. */
 export interface AdjustParams {
   exposureEv: number;
   brightness: number;
@@ -76,7 +133,34 @@ export interface AdjustParams {
   sharpenAmount: number;
   hueDegrees: number;
   invert: boolean;
+  // ── the EXTENDED (kernel-breadth) stages ────────────────────────────
+  // Chain order + rationale live on the Rust `ingest::adjust_rgba8`
+  // doc; the panel groups them as "Color" / "Effects" / "Levels (per
+  // channel)". Every one is mask-aware and identity-short-circuited.
+  /** `adjust.vibrance` — saturation weighted by (1 − existing sat). */
+  vibrance: number;
+  colorBalance: ColorBalanceParams;
+  photoFilter: PhotoFilterParams;
+  channelMixer: ChannelMixerParams;
+  levelsRgb: LevelsRgbParams;
+  blackWhite: BlackWhiteParams;
+  /** `adjust.posterize` — output levels per channel; `null` = off. */
+  posterizeLevels: number | null;
+  /** `adjust.threshold` — luma cut in [0,1]; `null` = off. */
+  threshold: number | null;
 }
+
+/** The Black & White default mix (the conventional reds .4 / yellows .6
+ *  / greens .4 / cyans .6 / blues .2 / magentas .8). */
+export const DEFAULT_BW_WEIGHTS: BlackWhiteParams["weights"] = [
+  0.4, 0.6, 0.4, 0.6, 0.2, 0.8,
+];
+
+/** The default photo-filter gel: Warming filter (85). Density 0 keeps
+ *  the stage off until the panel raises it. */
+export const DEFAULT_PHOTO_FILTER_COLOR: [number, number, number] = [
+  0.925, 0.639, 0.365,
+];
 
 export const IDENTITY_PARAMS: AdjustParams = {
   exposureEv: 0,
@@ -91,7 +175,59 @@ export const IDENTITY_PARAMS: AdjustParams = {
   sharpenAmount: 0,
   hueDegrees: 0,
   invert: false,
+  vibrance: 0,
+  colorBalance: {
+    shadows: [0, 0, 0],
+    midtones: [0, 0, 0],
+    highlights: [0, 0, 0],
+  },
+  photoFilter: {
+    color: [...DEFAULT_PHOTO_FILTER_COLOR],
+    density: 0,
+    preserveLuminosity: true,
+  },
+  channelMixer: {
+    r: [1, 0, 0, 0],
+    g: [0, 1, 0, 0],
+    b: [0, 0, 1, 0],
+  },
+  levelsRgb: {
+    r: { ...IDENTITY_LEVELS_CHANNEL },
+    g: { ...IDENTITY_LEVELS_CHANNEL },
+    b: { ...IDENTITY_LEVELS_CHANNEL },
+  },
+  blackWhite: { enabled: false, weights: [...DEFAULT_BW_WEIGHTS] },
+  posterizeLevels: null,
+  threshold: null,
 };
+
+/** A DEEP clone of the identity params — the nested objects/arrays must
+ *  never be shared with the constant (a mutation would poison it). */
+export function freshIdentityParams(): AdjustParams {
+  const p = IDENTITY_PARAMS;
+  return {
+    ...p,
+    levels: { ...p.levels },
+    curveLut: null,
+    colorBalance: {
+      shadows: [...p.colorBalance.shadows],
+      midtones: [...p.colorBalance.midtones],
+      highlights: [...p.colorBalance.highlights],
+    },
+    photoFilter: { ...p.photoFilter, color: [...p.photoFilter.color] },
+    channelMixer: {
+      r: [...p.channelMixer.r],
+      g: [...p.channelMixer.g],
+      b: [...p.channelMixer.b],
+    },
+    levelsRgb: {
+      r: { ...p.levelsRgb.r },
+      g: { ...p.levelsRgb.g },
+      b: { ...p.levelsRgb.b },
+    },
+    blackWhite: { enabled: false, weights: [...p.blackWhite.weights] },
+  };
+}
 
 function levelsIdentity(l: LevelsParams): boolean {
   return (
@@ -113,7 +249,8 @@ export function isIdentity(p: AdjustParams): boolean {
     p.tint === 0 &&
     levelsIdentity(p.levels) &&
     p.curveLut === null &&
-    filtersIdentity(p)
+    filtersIdentity(p) &&
+    extendedIdentity(p)
   );
 }
 
@@ -123,16 +260,90 @@ function filtersIdentity(p: AdjustParams): boolean {
   );
 }
 
+function levelsChannelIdentity(c: LevelsChannel): boolean {
+  return c.inBlack === 0 && c.inWhite === 1 && c.gamma === 1;
+}
+
+const allZero = (v: readonly number[]) => v.every((n) => n === 0);
+
+/** True when every EXTENDED stage is gated off / neutral. SEMANTIC (it
+ *  mirrors the Rust `AdjustParams::has_extended_stage`): a gated-off
+ *  stage is identity whatever its other fields hold, so the photo
+ *  filter's color and the black & white weights never matter here. */
+function extendedIdentity(p: AdjustParams): boolean {
+  const m = p.channelMixer;
+  return (
+    p.vibrance === 0 &&
+    allZero(p.colorBalance.shadows) &&
+    allZero(p.colorBalance.midtones) &&
+    allZero(p.colorBalance.highlights) &&
+    p.photoFilter.density === 0 &&
+    m.r[0] === 1 &&
+    m.r[1] === 0 &&
+    m.r[2] === 0 &&
+    m.r[3] === 0 &&
+    m.g[0] === 0 &&
+    m.g[1] === 1 &&
+    m.g[2] === 0 &&
+    m.g[3] === 0 &&
+    m.b[0] === 0 &&
+    m.b[1] === 0 &&
+    m.b[2] === 1 &&
+    m.b[3] === 0 &&
+    levelsChannelIdentity(p.levelsRgb.r) &&
+    levelsChannelIdentity(p.levelsRgb.g) &&
+    levelsChannelIdentity(p.levelsRgb.b) &&
+    !p.blackWhite.enabled &&
+    p.posterizeLevels === null &&
+    p.threshold === null
+  );
+}
+
 /** True when ONLY the base exposure/brightness/contrast/saturation are set
- *  (no WB / levels / curves) — the legacy `adjust_image` fast path. */
+ *  (no WB / levels / curves / extended) — the legacy `adjust_image` fast
+ *  path. */
 function isBaseOnly(p: AdjustParams): boolean {
   return (
     p.temp === 0 &&
     p.tint === 0 &&
     levelsIdentity(p.levels) &&
     p.curveLut === null &&
-    filtersIdentity(p)
+    filtersIdentity(p) &&
+    extendedIdentity(p)
   );
+}
+
+/** Wire length of the EXTENDED adjust block — MUST match the Rust
+ *  `image_js::ingest::ADJUST_EXT_LEN`. */
+export const ADJUST_EXT_LEN = 47;
+
+/** Pack the extended stages into the flat `f32` block the
+ *  `adjust_image_ext` door reads. The layout is the ONE cross-language
+ *  contract (documented on the Rust `ADJUST_EXT_LEN`); keep the two in
+ *  lockstep — `packAdjustExt` is unit-tested against it. */
+export function packAdjustExt(p: AdjustParams): Float32Array {
+  const e = new Float32Array(ADJUST_EXT_LEN);
+  e[0] = p.vibrance;
+  e.set(p.colorBalance.shadows, 1);
+  e.set(p.colorBalance.midtones, 4);
+  e.set(p.colorBalance.highlights, 7);
+  e[10] = p.blackWhite.enabled ? 1 : 0;
+  e.set(p.blackWhite.weights, 11);
+  e[17] = p.posterizeLevels === null ? 0 : 1;
+  e[18] = p.posterizeLevels ?? 0;
+  e[19] = p.threshold === null ? 0 : 1;
+  e[20] = p.threshold ?? 0;
+  e[21] = p.photoFilter.density;
+  e.set(p.photoFilter.color, 22);
+  e[25] = p.photoFilter.preserveLuminosity ? 1 : 0;
+  e.set(p.channelMixer.r, 26);
+  e.set(p.channelMixer.g, 30);
+  e.set(p.channelMixer.b, 34);
+  const lr = p.levelsRgb;
+  e.set([lr.r.inBlack, lr.r.inWhite, lr.r.gamma], 38);
+  e.set([lr.g.inBlack, lr.g.inWhite, lr.g.gamma], 41);
+  e.set([lr.b.inBlack, lr.b.inWhite, lr.b.gamma], 44);
+  return e;
 }
 
 /** The RGB + luma histogram of an image (4 × 256 bins; the panel renders
@@ -153,6 +364,39 @@ export interface AutoEnhanceParams {
   inWhite: number;
   temp: number;
   tint: number;
+}
+
+/** How a selection shape folds into the existing selection (mirrors the
+ *  Rust `image_gpu::CombineMode` wire discriminants 0–3). */
+export type SelectionMode = "replace" | "add" | "subtract" | "intersect";
+
+/** The wire discriminant for a [`SelectionMode`]. */
+export function selectionModeCode(mode: SelectionMode): number {
+  switch (mode) {
+    case "replace":
+      return 0;
+    case "add":
+      return 1;
+    case "subtract":
+      return 2;
+    case "intersect":
+      return 3;
+  }
+}
+
+/** Selection readout (`selection_stats`): the non-zero coverage bounding
+ *  box (image px), the mean coverage fraction (0–1), and the monotone
+ *  revision. `null` from the facade = no explicit selection (everything
+ *  is implicitly selected; adjustments run unmasked). */
+export interface SelectionStats {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Mean coverage over the whole image, 0–1 (an AA/feathered selection
+   *  counts fractionally). */
+  coverage: number;
+  revision: number;
 }
 
 /** The 8 crop grips + the body Move (discriminants mirror the Rust
@@ -183,6 +427,29 @@ export interface DecodedInfo {
  *  forwards to the wasm surface; the facade only renames + shapes. */
 /** The T1 resample kernels the resize door accepts. */
 export type ResampleFilter = "nearest" | "mitchell" | "lanczos3";
+
+/** Which `gen.*` gradient the fill door dispatches (the wire names the
+ *  Rust `GradientKind::from_wire` decodes). */
+export type GradientKind =
+  | "linear"
+  | "radial"
+  | "angular"
+  | "reflected"
+  | "diamond";
+
+export const GRADIENT_KINDS: GradientKind[] = [
+  "linear",
+  "radial",
+  "angular",
+  "reflected",
+  "diamond",
+];
+
+/** A straight RGBA colour in [0,1] — the fill door's stop format. */
+export type Rgba01 = [number, number, number, number];
+
+/** The raster re-encode formats the non-PSD save-back lane offers. */
+export type RasterFormat = "png" | "jpeg";
 
 /** One PSD layer-record row (`psd_layer_list`), record order. */
 export interface PsdLayerInfo {
@@ -234,6 +501,17 @@ export interface ImageEngine {
    *  its handle. The source handle is left intact. Throws on an empty /
    *  out-of-bounds rectangle. */
   crop(handle: number, rect: CropRect): DecodedInfo;
+  /** STRAIGHTEN + CROP commit: rotate by `−degrees` about the rect's
+   *  centre (`geom.rotate_bilinear` — backward-mapped bilinear,
+   *  clamp-to-edge) so the rotated crop FRAME lands upright, then cut
+   *  the rect. Returns a NEW engine-held image; the source stays.
+   *  `degrees === 0` is the pure windowing path (no GPU, no resample);
+   *  any other angle is a resample and needs the WebGPU device. */
+  straightenCrop(
+    handle: number,
+    rect: CropRect,
+    degrees: number,
+  ): Promise<DecodedInfo>;
   /** Hit-test the crop chrome (the nearest grip within `tol`, else Move
    *  inside the body, else -1). Pure geometry from `image_core::crop`. */
   cropHitHandle(rect: CropRect, point: [number, number], tol: number): CropHandle;
@@ -273,6 +551,39 @@ export interface ImageEngine {
   psdRemoveLayer(handle: number, layer: number): void;
   psdSave(handle: number): Uint8Array;
   psdClose(handle: number): void;
+  /** PSD SAVE-BACK: write the ADJUSTED full-resolution RGBA8 into the
+   *  retained parse (the merged composite is always rewritten) and
+   *  answer the HONEST description of what happened to the layer
+   *  structure — "…written into the single content layer (structure
+   *  preserved)" or "…FLATTENED into a new single-layer PSD…". Call
+   *  `psdSave` afterwards for the bytes. 8-bit RGB only; a size or mode
+   *  mismatch throws with the engine's message. */
+  psdApplyAdjusted(
+    psdHandle: number,
+    width: number,
+    height: number,
+    rgba: Uint8Array,
+  ): string;
+  /** Re-encode straight RGBA8 as PNG or JPEG (the NON-PSD save-back
+   *  lane; JPEG rides the fixed v0 quality). */
+  encode(
+    rgba: Uint8Array,
+    width: number,
+    height: number,
+    format: RasterFormat,
+  ): Uint8Array;
+  /** FILL the bound SELECTION (the whole image when none) with a fixed
+   *  two-stop gradient, compositing through the coverage mask on the
+   *  GPU. DESTRUCTIVE: returns a NEW engine-held image (the crop/resize
+   *  commit pattern — the caller swaps and frees the old handle). */
+  fillGradient(
+    handle: number,
+    kind: GradientKind,
+    c0: Rgba01,
+    c1: Rgba01,
+  ): Promise<DecodedInfo>;
+  /** FILL the bound selection with deterministic monochrome noise. */
+  fillNoise(handle: number, amount: number, seed: number): Promise<DecodedInfo>;
   /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
    *  image as tightly packed RGBA8. Edge tiles are clamped to the image
    *  extent; a fully-outside window returns an empty buffer. The honest
@@ -280,6 +591,48 @@ export interface ImageEngine {
    *  Engine B window eval yet; see tile-provider.ts). */
   tile(handle: number, x: number, y: number, w: number, h: number): Uint8Array;
   freeImage(handle: number): void;
+  /** SELECTION doors (spec §6.1). One selection per engine realm, bound
+   *  to one image (`selectionBind`); shapes rasterize engine-side at the
+   *  bound resolution (mask PREP is CPU; the mask is CONSUMED GPU-only —
+   *  every masked adjust dispatch applies `mix(a, result, mask)` at the
+   *  ABI's r16float `@group(2)` binding). Re-binding to a different
+   *  handle/resolution drops the selection; `adjust` on the bound handle
+   *  automatically masks when a non-trivial selection exists. */
+  selectionBind(handle: number): void;
+  /** Marquee rect `[x, x+w) × [y, y+h)` (image px, fractional = AA edge). */
+  selectionSetRect(x: number, y: number, w: number, h: number, mode: SelectionMode): void;
+  /** Marquee ellipse: center + radii (image px), AA edge. */
+  selectionSetEllipse(cx: number, cy: number, rx: number, ry: number, mode: SelectionMode): void;
+  /** Lasso: a closed polygon of `[x, y]` image-px vertices (≥ 3). */
+  selectionSetPolygon(points: Array<[number, number]>, mode: SelectionMode): void;
+  /** Magic wand at an integer image-px seed. `tolerance` is per-channel
+   *  0–255 (Chebyshev over RGBA); `contiguous` = 4-connected flood. */
+  selectionMagicWand(
+    x: number,
+    y: number,
+    tolerance: number,
+    contiguous: boolean,
+    mode: SelectionMode,
+  ): void;
+  /** Gaussian feather of the coverage (σ px; CPU mask prep). Throws when
+   *  no explicit selection exists. */
+  selectionFeather(sigma: number): void;
+  /** Select-all (an explicit full-extent selection). */
+  selectionSelectAll(): void;
+  /** Deselect: back to "no selection" (adjust runs unmasked). */
+  selectionClear(): void;
+  /** Invert ("everything" inverts to the explicit empty selection). */
+  selectionInvert(): void;
+  /** The selection readout, or `null` when no explicit selection exists. */
+  selectionStats(): SelectionStats | null;
+  /** The raw u8 coverage (`width·height`, row-major); empty when none. */
+  selectionCoverageBytes(): Uint8Array;
+  /** Re-point the selection at a NEW handle of the SAME extent, KEEPING
+   *  the coverage (the destructive-fill lane: the generator registers a
+   *  new engine image at identical dimensions, and the selection is
+   *  still meaningful there). False when the extent changed — then it
+   *  behaves like `selectionBind` and the selection drops. */
+  selectionTransfer(handle: number): boolean;
 }
 
 // ---------------------------------------------------- wasm surface shape
@@ -328,6 +681,45 @@ export interface ImageWasmModule {
     hue_degrees: number,
     invert: boolean,
   ): Promise<Uint8Array>;
+  adjust_image_ext(
+    handle: number,
+    exposure_ev: number,
+    brightness: number,
+    contrast: number,
+    saturation: number,
+    temp: number,
+    tint: number,
+    in_black: number,
+    in_white: number,
+    gamma: number,
+    out_black: number,
+    out_white: number,
+    curve_lut: Uint8Array,
+    blur_sigma: number,
+    sharpen_amount: number,
+    hue_degrees: number,
+    invert: boolean,
+    ext: Float32Array,
+  ): Promise<Uint8Array>;
+  fill_gradient(
+    handle: number,
+    kind: string,
+    c0: Float32Array,
+    c1: Float32Array,
+  ): Promise<DecodedHandleWasm>;
+  fill_noise(handle: number, amount: number, seed: number): Promise<DecodedHandleWasm>;
+  encode_image(
+    rgba: Uint8Array,
+    width: number,
+    height: number,
+    format: string,
+  ): Uint8Array;
+  psd_apply_adjusted(
+    psd_handle: number,
+    width: number,
+    height: number,
+    rgba: Uint8Array,
+  ): string;
   image_histogram(handle: number): Uint32Array;
   image_auto_enhance_params(handle: number): Float32Array;
   crop_image(
@@ -337,6 +729,14 @@ export interface ImageWasmModule {
     w: number,
     h: number,
   ): DecodedHandleWasm;
+  straighten_crop_image(
+    handle: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    degrees: number,
+  ): Promise<DecodedHandleWasm>;
   crop_hit_handle(
     x: number,
     y: number,
@@ -383,6 +783,25 @@ export interface ImageWasmModule {
     outH: number,
     filter: string,
   ): Promise<DecodedHandleWasm>;
+  selection_bind(handle: number): void;
+  selection_set_rect(x: number, y: number, w: number, h: number, mode: number): void;
+  selection_set_ellipse(cx: number, cy: number, rx: number, ry: number, mode: number): void;
+  selection_set_polygon(points_flat: Float32Array, mode: number): void;
+  selection_magic_wand(
+    x: number,
+    y: number,
+    tolerance: number,
+    contiguous: boolean,
+    mode: number,
+  ): void;
+  selection_feather(sigma: number): void;
+  selection_select_all(): void;
+  selection_clear(): void;
+  selection_invert(): void;
+  selection_bounds(): Uint32Array;
+  selection_stats(): Float32Array;
+  selection_coverage_bytes(): Uint8Array;
+  selection_transfer(handle: number): boolean;
   psd_open(bytes: Uint8Array): number;
   psd_layer_list(handle: number): string;
   psd_set_layer_opacity(handle: number, layer: number, opacity: number): void;
@@ -430,7 +849,10 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       if (isBaseOnly(p)) {
         return wasm.adjust_image(handle, p.exposureEv, p.brightness, p.contrast, p.saturation);
       }
-      return wasm.adjust_image_full(
+      // One extended door for the whole panel set — the flat ext block
+      // carries the kernel-breadth stages so the boundary does not grow
+      // an argument per adjustment.
+      return wasm.adjust_image_ext(
         handle,
         p.exposureEv,
         p.brightness,
@@ -448,8 +870,30 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.sharpenAmount,
         p.hueDegrees,
         p.invert,
+        packAdjustExt(p),
       );
     },
+    async fillGradient(handle, kind, c0, c1) {
+      const h = await wasm.fill_gradient(
+        handle,
+        kind,
+        Float32Array.from(c0),
+        Float32Array.from(c1),
+      );
+      const info = { handle: h.handle, width: h.width, height: h.height };
+      h.free();
+      return info;
+    },
+    async fillNoise(handle, amount, seed) {
+      const h = await wasm.fill_noise(handle, amount, seed);
+      const info = { handle: h.handle, width: h.width, height: h.height };
+      h.free();
+      return info;
+    },
+    encode: (rgba, width, height, format) =>
+      wasm.encode_image(rgba, width, height, format),
+    psdApplyAdjusted: (psdHandle, width, height, rgba) =>
+      wasm.psd_apply_adjusted(psdHandle, width, height, rgba),
     resize: async (handle, outW, outH, filter) => {
       const h = await wasm.resize_image(handle, outW, outH, filter);
       const info = { handle: h.handle, width: h.width, height: h.height };
@@ -480,6 +924,19 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     crop(handle, rect) {
       const h = wasm.crop_image(handle, rect.x, rect.y, rect.w, rect.h);
+      const info = { handle: h.handle, width: h.width, height: h.height };
+      h.free();
+      return info;
+    },
+    async straightenCrop(handle, rect, degrees) {
+      const h = await wasm.straighten_crop_image(
+        handle,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        degrees,
+      );
       const info = { handle: h.handle, width: h.width, height: h.height };
       h.free();
       return info;
@@ -523,6 +980,33 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     tile: (handle, x, y, w, h) => wasm.image_tile_rgba8(handle, x, y, w, h),
     freeImage: (h) => wasm.free_image(h),
+    selectionBind: (handle) => wasm.selection_bind(handle),
+    selectionSetRect: (x, y, w, h, mode) =>
+      wasm.selection_set_rect(x, y, w, h, selectionModeCode(mode)),
+    selectionSetEllipse: (cx, cy, rx, ry, mode) =>
+      wasm.selection_set_ellipse(cx, cy, rx, ry, selectionModeCode(mode)),
+    selectionSetPolygon(points, mode) {
+      const flat = new Float32Array(points.length * 2);
+      for (let i = 0; i < points.length; i++) {
+        flat[i * 2] = points[i][0];
+        flat[i * 2 + 1] = points[i][1];
+      }
+      wasm.selection_set_polygon(flat, selectionModeCode(mode));
+    },
+    selectionMagicWand: (x, y, tolerance, contiguous, mode) =>
+      wasm.selection_magic_wand(x, y, tolerance, contiguous, selectionModeCode(mode)),
+    selectionFeather: (sigma) => wasm.selection_feather(sigma),
+    selectionSelectAll: () => wasm.selection_select_all(),
+    selectionClear: () => wasm.selection_clear(),
+    selectionInvert: () => wasm.selection_invert(),
+    selectionStats() {
+      // Rust returns [has, x, y, w, h, fraction, revision] (7 f32s).
+      const s = wasm.selection_stats();
+      if (s.length < 7 || s[0] === 0) return null;
+      return { x: s[1], y: s[2], w: s[3], h: s[4], coverage: s[5], revision: s[6] };
+    },
+    selectionCoverageBytes: () => wasm.selection_coverage_bytes(),
+    selectionTransfer: (handle) => wasm.selection_transfer(handle),
   };
 }
 

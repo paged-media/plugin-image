@@ -56,7 +56,7 @@ use image_gpu::GpuContext;
 use crate::cache::OperationCache;
 use crate::node::OpNode;
 use crate::schedule::{materialize_node, materialize_node_async};
-use crate::{NodeId, PipelineError};
+use crate::{NodeId, PipelineError, PipelineSelection};
 
 /// Bytes per pixel of the rgba16float working format (4 × f16).
 const WORKING_BPP: usize = 8;
@@ -69,11 +69,12 @@ pub(crate) fn to_buffer(
     node: NodeId,
     roi: Region,
     ctx: &GpuContext,
+    selection: Option<&PipelineSelection>,
 ) -> Result<TileMap, PipelineError> {
     if roi.is_empty() {
         return Ok(TileMap::new(image_core::PixelFormat::GPU_WORKING));
     }
-    let (map, _hash) = materialize_node(nodes, cache, node, roi, ctx)?;
+    let (map, _hash) = materialize_node(nodes, cache, node, roi, ctx, selection)?;
     Ok(map)
 }
 
@@ -85,11 +86,12 @@ pub(crate) async fn to_buffer_async(
     node: NodeId,
     roi: Region,
     ctx: &GpuContext,
+    selection: Option<&PipelineSelection>,
 ) -> Result<TileMap, PipelineError> {
     if roi.is_empty() {
         return Ok(TileMap::new(image_core::PixelFormat::GPU_WORKING));
     }
-    let (map, _hash) = materialize_node_async(nodes, cache, node, roi, ctx).await?;
+    let (map, _hash) = materialize_node_async(nodes, cache, node, roi, ctx, selection).await?;
     Ok(map)
 }
 
@@ -104,6 +106,7 @@ pub(crate) fn to_encoder(
     ctx: &GpuContext,
     target: &mut dyn ImageTarget,
     fmt: PixelFormat,
+    selection: Option<&PipelineSelection>,
 ) -> Result<EncodedStats, PipelineError> {
     if fmt.depth != SampleDepth::U8 {
         return Err(PipelineError::Graph(format!(
@@ -134,7 +137,7 @@ pub(crate) fn to_encoder(
         let h = (strip_bottom - y as i64) as u32;
         let strip_roi = Region::new(roi.x, y, roi.w, h);
 
-        let (map, _hash) = materialize_node(nodes, cache, node, strip_roi, ctx)?;
+        let (map, _hash) = materialize_node(nodes, cache, node, strip_roi, ctx, selection)?;
         let strip = convert_strip(&map, strip_roi, fmt, out_bpp)?;
 
         // The target's strip coordinates are target-LOCAL (origin 0,0 at
@@ -167,6 +170,7 @@ pub(crate) async fn to_encoder_async(
     ctx: &GpuContext,
     target: &mut dyn ImageTarget,
     fmt: PixelFormat,
+    selection: Option<&PipelineSelection>,
 ) -> Result<EncodedStats, PipelineError> {
     if fmt.depth != SampleDepth::U8 {
         return Err(PipelineError::Graph(format!(
@@ -193,7 +197,8 @@ pub(crate) async fn to_encoder_async(
         let h = (strip_bottom - y as i64) as u32;
         let strip_roi = Region::new(roi.x, y, roi.w, h);
 
-        let (map, _hash) = materialize_node_async(nodes, cache, node, strip_roi, ctx).await?;
+        let (map, _hash) =
+            materialize_node_async(nodes, cache, node, strip_roi, ctx, selection).await?;
         let strip = convert_strip(&map, strip_roi, fmt, out_bpp)?;
 
         let local = Region::new(0, y - roi.y, roi.w, h);

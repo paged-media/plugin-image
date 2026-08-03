@@ -52,8 +52,11 @@
 //! reachable from this crate (cargo-tree guard, spec §4 dep rule 2).
 
 pub mod cmyk;
+pub mod fill;
 pub mod ingest;
 pub mod mip;
+pub mod saveback;
+pub mod selection;
 
 /// The frozen kernel ABI version this artifact was built against.
 pub fn abi_version() -> u32 {
@@ -71,13 +74,17 @@ mod wasm {
     use std::collections::HashMap;
     use std::rc::Rc;
 
-    use image_gpu::GpuContext;
+    use image_gpu::{CombineMode, GpuContext, SelectionCoverage};
     use wasm_bindgen::prelude::*;
 
+    use crate::fill::{fill_rgba8, FillSpec, GradientKind};
     use crate::ingest::{
-        adjust_rgba8, crop_rgba8, decode_rgba8, AdjustParams, DecodedImage, LevelsParams,
+        adjust_rgba8, crop_rgba8, decode_rgba8, straighten_crop_rgba8, AdjustParams, DecodedImage,
+        LevelsParams,
     };
     use crate::mip::MipPyramid;
+    use crate::saveback::{encode_rgba8, psd_write_adjusted, RasterFormat};
+    use crate::selection::SessionSelection;
 
     thread_local! {
         /// The bundle-realm GPU device (I-07: created HERE, where
@@ -92,6 +99,11 @@ mod wasm {
         /// Dropped when the image is freed.
         static PYRAMIDS: RefCell<HashMap<u32, Rc<MipPyramid>>> =
             RefCell::new(HashMap::new());
+        /// The per-session SELECTION (one per wasm realm — the session's
+        /// active source image binds it via `selection_bind`). The adjust
+        /// chain reads it through `SessionSelection::mask_for`.
+        static SELECTION: RefCell<SessionSelection> =
+            RefCell::new(SessionSelection::new());
     }
 
     #[wasm_bindgen(start)]
@@ -226,7 +238,7 @@ mod wasm {
             saturation,
             ..Default::default()
         };
-        run_adjust(&img, params).await
+        run_adjust(handle, &img, params).await
     }
 
     /// The FULL adjustments pass — the levels/curves/white-balance panel's
@@ -259,6 +271,60 @@ mod wasm {
         hue_degrees: f32,
         invert: bool,
     ) -> Result<js_sys::Uint8Array, JsValue> {
+        adjust_image_ext(
+            handle,
+            exposure_ev,
+            brightness,
+            contrast,
+            saturation,
+            temp,
+            tint,
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+            curve_lut,
+            blur_sigma,
+            sharpen_amount,
+            hue_degrees,
+            invert,
+            &[],
+        )
+        .await
+    }
+
+    /// [`adjust_image_full`] PLUS the EXTENDED (kernel-breadth) stages —
+    /// vibrance, color balance, black & white, posterize, threshold,
+    /// photo filter, channel mixer and per-channel levels — carried in
+    /// ONE flat `f32` block so the boundary does not grow an argument
+    /// per stage. `ext` is either EMPTY (every extended stage at
+    /// identity — what `adjust_image_full` passes) or exactly
+    /// `ingest::ADJUST_EXT_LEN` floats in the layout documented on that
+    /// constant. The chain order is documented on `ingest::adjust_rgba8`;
+    /// every stage is mask-aware (the bound selection rides `@group(2)`).
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn adjust_image_ext(
+        handle: u32,
+        exposure_ev: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        temp: f32,
+        tint: f32,
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+        curve_lut: &[u8],
+        blur_sigma: f32,
+        sharpen_amount: f32,
+        hue_degrees: f32,
+        invert: bool,
+        ext: &[f32],
+    ) -> Result<js_sys::Uint8Array, JsValue> {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
@@ -274,7 +340,7 @@ mod wasm {
                 curve_lut.len()
             )));
         };
-        let params = AdjustParams {
+        let mut params = AdjustParams {
             exposure_ev,
             brightness,
             contrast,
@@ -293,13 +359,21 @@ mod wasm {
             sharpen_amount,
             hue_degrees,
             invert,
+            ..Default::default()
         };
-        run_adjust(&img, params).await
+        params
+            .apply_extended(ext)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        run_adjust(handle, &img, params).await
     }
 
     /// Shared adjust runner: identity → the decode verbatim; otherwise the
-    /// GPU chain (requires `init_gpu`) plus any CPU curve LUT.
+    /// GPU chain (requires `init_gpu`) plus any CPU curve LUT. When the
+    /// session SELECTION is bound to `handle` and non-trivial, its
+    /// coverage masks EVERY dispatch (the §6.1 mask ABI) and the curve
+    /// LUT pass — the adjustment lands only inside the selection.
     async fn run_adjust(
+        handle: u32,
         img: &DecodedImage,
         params: AdjustParams,
     ) -> Result<js_sys::Uint8Array, JsValue> {
@@ -312,7 +386,8 @@ mod wasm {
                  GPU-only; no CPU fallback ships)",
             )
         })?;
-        let out = adjust_rgba8(&ctx, img, &params)
+        let selection = SELECTION.with(|s| s.borrow().mask_for(handle));
+        let out = adjust_rgba8(&ctx, img, &params, selection)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(js_sys::Uint8Array::from(&out[..]))
@@ -360,8 +435,8 @@ mod wasm {
     /// register the result as a NEW engine-held image, returning its
     /// handle. The source handle is left intact (the caller frees it). An
     /// out-of-bounds / empty rectangle is a clean error (never a torn
-    /// image). The straighten-angle resample is a separate stage (not in
-    /// this axis-aligned cut — see the crop interaction machine).
+    /// image). This door is the AXIS-ALIGNED cut only — the straighten
+    /// angle rides `straighten_crop_image`, which rotates first.
     #[wasm_bindgen]
     pub fn crop_image(
         handle: u32,
@@ -387,6 +462,46 @@ mod wasm {
             width,
             height,
         })
+    }
+
+    /// STRAIGHTEN + CROP commit: rotate the image by `−degrees` about
+    /// the crop rectangle's centre (`geom.rotate_bilinear`, backward
+    /// mapped, bilinear, clamp-to-edge) so the rotated FRAME the overlay
+    /// previewed lands upright, then cut `(x, y, w, h)` out of the
+    /// result and register it as a NEW engine-held image. The source
+    /// handle is left intact.
+    ///
+    /// `degrees == 0` takes the pure-windowing [`crop_image`] path — no
+    /// GPU, no resample, no interpolation blur for an axis-aligned crop.
+    /// A non-zero angle IS a resample and so is GPU-only (`init_gpu`
+    /// first); it rejects honestly without a device.
+    #[wasm_bindgen]
+    pub async fn straighten_crop_image(
+        handle: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        degrees: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let out = if degrees == 0.0 {
+            crop_rgba8(&img, x, y, w, h).map_err(|e| JsValue::from_str(&e.to_string()))?
+        } else {
+            let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
+                JsValue::from_str(
+                    "the straighten resample is GPU-only — call init_gpu first \
+                     (an axis-aligned crop at 0° needs no device)",
+                )
+            })?;
+            straighten_crop_rgba8(&ctx, &img, x, y, w, h, degrees)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?
+        };
+        let (width, height) = (out.width, out.height);
+        register(width, height, out.rgba.to_vec())
     }
 
     // ── crop interaction GEOMETRY (pure view math; the TS crop machine
@@ -559,14 +674,9 @@ mod wasm {
             _ => {
                 let img = IMAGES
                     .with(|m| m.borrow().get(&handle).cloned())
-                    .ok_or_else(|| {
-                        JsValue::from_str(&format!("unknown image handle {handle}"))
-                    })?;
+                    .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
                 let built = Rc::new(MipPyramid::build(
-                    img.width,
-                    img.height,
-                    &img.rgba,
-                    level_u8,
+                    img.width, img.height, &img.rgba, level_u8,
                 ));
                 PYRAMIDS.with(|p| p.borrow_mut().insert(handle, Rc::clone(&built)));
                 built
@@ -586,6 +696,220 @@ mod wasm {
         PYRAMIDS.with(|p| {
             p.borrow_mut().remove(&handle);
         });
+    }
+
+    // ─────────────────────── SELECTION doors (§6.1) ───────────────────────
+    //
+    // The per-session selection: a u8 coverage field at the bound image's
+    // resolution (image_gpu::SelectionCoverage — all mask PREP, inherently
+    // CPU; consumption is GPU-only via the adjust chain's @group(2) r16float
+    // mask, `out = mix(a, result, mask)` per dispatch). `mode` on the shape
+    // doors is 0 = replace, 1 = add, 2 = subtract, 3 = intersect.
+    // Semantics (selection.rs): no selection = everything (adjust runs
+    // unmasked); subtract/intersect against no selection start from FULL;
+    // `selection_clear` returns to "no selection"; re-binding to a
+    // different handle/resolution drops the coverage.
+
+    fn decode_mode(mode: u32) -> Result<CombineMode, JsValue> {
+        CombineMode::from_u32(mode).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown selection mode {mode} (0 replace | 1 add | 2 subtract | 3 intersect)"
+            ))
+        })
+    }
+
+    fn with_selection<T>(
+        f: impl FnOnce(&mut SessionSelection) -> Result<T, String>,
+    ) -> Result<T, JsValue> {
+        SELECTION
+            .with(|s| f(&mut s.borrow_mut()))
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Bind the session selection to an engine-held image (the selection
+    /// field takes ITS resolution; the magic wand floods ITS pixels; the
+    /// adjust doors mask only when adjusting THIS handle). Re-binding to
+    /// the same handle keeps the selection; a different handle (a crop /
+    /// resize swap) or resolution drops it.
+    #[wasm_bindgen]
+    pub fn selection_bind(handle: u32) -> Result<(), JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        SELECTION.with(|s| s.borrow_mut().bind(handle, img.width, img.height));
+        Ok(())
+    }
+
+    /// Re-point the selection at a NEW image handle that holds the SAME
+    /// extent, KEEPING the coverage — the door a destructive in-place
+    /// edit (the generator FILL) uses so the selection survives its own
+    /// result. Answers `true` when the coverage carried over, `false`
+    /// when the extent changed (then it behaves exactly like
+    /// `selection_bind`: the selection drops).
+    #[wasm_bindgen]
+    pub fn selection_transfer(handle: u32) -> Result<bool, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        Ok(SELECTION.with(|s| s.borrow_mut().transfer(handle, img.width, img.height)))
+    }
+
+    /// Marquee RECT: fold the anti-aliased rectangle `[x, x+w) × [y, y+h)`
+    /// (image px; fractional coords carry the AA edge) into the selection
+    /// under `mode`.
+    #[wasm_bindgen]
+    pub fn selection_set_rect(x: f32, y: f32, w: f32, h: f32, mode: u32) -> Result<(), JsValue> {
+        let mode = decode_mode(mode)?;
+        with_selection(|s| {
+            let b = s.bound().ok_or("no image bound (selection_bind first)")?;
+            let shape = SelectionCoverage::rasterize_rect(b.width, b.height, x, y, w, h);
+            s.apply_shape(shape, mode)
+        })
+    }
+
+    /// Marquee ELLIPSE: center `(cx, cy)`, radii `(rx, ry)` (image px),
+    /// anti-aliased (4×4 supersampled edge), folded under `mode`.
+    #[wasm_bindgen]
+    pub fn selection_set_ellipse(
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        mode: u32,
+    ) -> Result<(), JsValue> {
+        let mode = decode_mode(mode)?;
+        with_selection(|s| {
+            let b = s.bound().ok_or("no image bound (selection_bind first)")?;
+            let shape = SelectionCoverage::rasterize_ellipse(b.width, b.height, cx, cy, rx, ry);
+            s.apply_shape(shape, mode)
+        })
+    }
+
+    /// LASSO polygon: `points_flat` is `[x0, y0, x1, y1, …]` image-px
+    /// vertices of a closed polygon (the closing edge is implicit),
+    /// scanline-rasterized with AA coverage, folded under `mode`. Fewer
+    /// than 3 vertices is a clean error (nothing to select).
+    #[wasm_bindgen]
+    pub fn selection_set_polygon(points_flat: &[f32], mode: u32) -> Result<(), JsValue> {
+        let mode = decode_mode(mode)?;
+        if points_flat.len() < 6 || !points_flat.len().is_multiple_of(2) {
+            return Err(JsValue::from_str(
+                "polygon needs ≥ 3 (x, y) vertex pairs (flat, even length)",
+            ));
+        }
+        let pts: Vec<(f32, f32)> = points_flat.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+        with_selection(|s| {
+            let b = s.bound().ok_or("no image bound (selection_bind first)")?;
+            let shape = SelectionCoverage::rasterize_polygon(b.width, b.height, &pts);
+            s.apply_shape(shape, mode)
+        })
+    }
+
+    /// MAGIC WAND at `(x, y)`: color-distance flood over the BOUND
+    /// image's straight-RGBA8 pixels — `contiguous` = 4-connected BFS
+    /// from the seed; otherwise a global threshold. `tolerance` is the
+    /// per-channel (Chebyshev) distance 0–255. Binary coverage (hard
+    /// edges; `selection_feather` softens), folded under `mode`.
+    #[wasm_bindgen]
+    pub fn selection_magic_wand(
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        contiguous: bool,
+        mode: u32,
+    ) -> Result<(), JsValue> {
+        let mode = decode_mode(mode)?;
+        let bound = SELECTION
+            .with(|s| s.borrow().bound())
+            .ok_or_else(|| JsValue::from_str("no image bound (selection_bind first)"))?;
+        let img = IMAGES
+            .with(|m| m.borrow().get(&bound.handle).cloned())
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("bound image handle {} is gone", bound.handle))
+            })?;
+        if x >= img.width || y >= img.height {
+            return Err(JsValue::from_str(&format!(
+                "wand seed ({x},{y}) outside {}x{}",
+                img.width, img.height
+            )));
+        }
+        let shape = SelectionCoverage::magic_wand(
+            img.width, img.height, &img.rgba, x, y, tolerance, contiguous,
+        );
+        with_selection(|s| s.apply_shape(shape, mode))
+    }
+
+    /// Feather the selection: a Gaussian of `sigma` px on the COVERAGE
+    /// (mask prep — CPU on the u8 mask by design, not image processing;
+    /// the softened mask is still consumed GPU-side). Errors when no
+    /// explicit selection exists.
+    #[wasm_bindgen]
+    pub fn selection_feather(sigma: f32) -> Result<(), JsValue> {
+        with_selection(|s| s.feather(sigma))
+    }
+
+    /// Select ALL explicitly (a full-extent selection in the readouts;
+    /// the adjust chain still takes the trivial-mask fast path).
+    #[wasm_bindgen]
+    pub fn selection_select_all() -> Result<(), JsValue> {
+        with_selection(|s| s.select_all())
+    }
+
+    /// Deselect: back to "no selection" (adjustments run unmasked).
+    #[wasm_bindgen]
+    pub fn selection_clear() {
+        SELECTION.with(|s| s.borrow_mut().clear());
+    }
+
+    /// Invert the selection ("everything" inverts to the explicit EMPTY
+    /// selection — adjust applies nowhere until reselected).
+    #[wasm_bindgen]
+    pub fn selection_invert() -> Result<(), JsValue> {
+        with_selection(|s| s.invert())
+    }
+
+    /// The bounding box of the selection's non-zero coverage as
+    /// `[x, y, w, h]`; an EMPTY array when there is no explicit selection
+    /// OR the selection is empty (distinguish via `selection_stats`).
+    #[wasm_bindgen]
+    pub fn selection_bounds() -> Vec<u32> {
+        SELECTION.with(|s| match s.borrow().coverage().and_then(|c| c.bounds()) {
+            Some(r) => vec![r.x as u32, r.y as u32, r.w, r.h],
+            None => Vec::new(),
+        })
+    }
+
+    /// Selection readout for the panel/tools, as 7 `f32`s:
+    /// `[has_selection (0|1), x, y, w, h, coverage_fraction, revision]`.
+    /// `has_selection == 0` ⇒ no explicit selection (everything, the
+    /// unmasked default) and the box/fraction are 0. An explicit-but-
+    /// empty selection reads `has == 1, w == h == 0, fraction == 0`.
+    #[wasm_bindgen]
+    pub fn selection_stats() -> Vec<f32> {
+        SELECTION.with(|s| {
+            let sel = s.borrow();
+            let rev = sel.revision() as f32;
+            match sel.coverage() {
+                None => vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, rev],
+                Some(c) => {
+                    let (x, y, w, h) = match c.bounds() {
+                        Some(r) => (r.x as f32, r.y as f32, r.w as f32, r.h as f32),
+                        None => (0.0, 0.0, 0.0, 0.0),
+                    };
+                    vec![1.0, x, y, w, h, c.selected_fraction() as f32, rev]
+                }
+            }
+        })
+    }
+
+    /// The raw u8 coverage bytes (`width·height`, row-major) — the
+    /// overlay/debug readout. Empty when no explicit selection exists.
+    #[wasm_bindgen]
+    pub fn selection_coverage_bytes() -> js_sys::Uint8Array {
+        SELECTION.with(|s| match s.borrow().coverage() {
+            Some(c) => js_sys::Uint8Array::from(c.data()),
+            None => js_sys::Uint8Array::new_with_length(0),
+        })
     }
 
     /// RESAMPLE an engine-held image to `out_w`×`out_h` and register the
@@ -671,6 +995,160 @@ mod wasm {
         })
     }
 
+    // ─────────────────────── GENERATE / FILL doors ───────────────────
+    //
+    // The generator family's editor reach (`crate::fill`). Both doors
+    // are DESTRUCTIVE by design: they paint into the working image and
+    // register the result as a NEW engine-held image (the crop/resize
+    // commit pattern — the source handle is left for the caller to
+    // free). The paint is composited through the bound SELECTION
+    // (`mix(original, generated, coverage)` on the GPU); with no
+    // selection the whole image is filled. GPU-only — both passes are
+    // registered WGSL kernels, so this rejects honestly without
+    // `init_gpu`.
+
+    /// Register `pixels` as a new engine-held image, returning its handle.
+    fn register(width: u32, height: u32, pixels: Vec<u8>) -> Result<DecodedHandle, JsValue> {
+        let img = DecodedImage::from_rgba8(width, height, pixels)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let handle = NEXT_HANDLE.with(|n| {
+            let h = n.get();
+            n.set(h + 1);
+            h
+        });
+        IMAGES.with(|m| m.borrow_mut().insert(handle, img));
+        Ok(DecodedHandle {
+            handle,
+            width,
+            height,
+        })
+    }
+
+    /// Shared head of the fill doors: the image, the GPU context, and the
+    /// mask bound to THIS handle.
+    #[allow(clippy::type_complexity)]
+    fn fill_prelude(
+        handle: u32,
+    ) -> Result<
+        (
+            DecodedImage,
+            Rc<GpuContext>,
+            Option<std::sync::Arc<SelectionCoverage>>,
+        ),
+        JsValue,
+    > {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
+            JsValue::from_str(
+                "fill is GPU-only — call init_gpu first (the generator and the \
+                 composite are both WGSL kernels; no CPU fallback ships)",
+            )
+        })?;
+        let sel = SELECTION.with(|s| s.borrow().mask_for(handle));
+        Ok((img, ctx, sel))
+    }
+
+    /// FILL the current selection (the whole image when none) with a
+    /// fixed TWO-STOP gradient. `kind` ∈ `linear | radial | angular |
+    /// reflected | diamond`; `c0`/`c1` are straight RGBA in `[0, 1]`
+    /// (4 floats each). The gradient GEOMETRY is derived from the
+    /// selection's bounding box — there is no on-canvas drag handle in
+    /// v0 (`crate::fill` documents the derivation). Returns the NEW
+    /// engine-held image's handle.
+    #[wasm_bindgen]
+    pub async fn fill_gradient(
+        handle: u32,
+        kind: String,
+        c0: Vec<f32>,
+        c1: Vec<f32>,
+    ) -> Result<DecodedHandle, JsValue> {
+        let kind = GradientKind::from_wire(&kind).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown gradient kind \"{kind}\" (linear | radial | angular | \
+                 reflected | diamond)"
+            ))
+        })?;
+        if c0.len() != 4 || c1.len() != 4 {
+            return Err(JsValue::from_str(
+                "gradient stops must be 4 floats each (straight RGBA in [0,1])",
+            ));
+        }
+        let (img, ctx, sel) = fill_prelude(handle)?;
+        let spec = FillSpec::Gradient {
+            kind,
+            c0: [c0[0], c0[1], c0[2], c0[3]],
+            c1: [c1[0], c1[1], c1[2], c1[3]],
+        };
+        let out = fill_rgba8(&ctx, &img, &spec, sel)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        register(img.width, img.height, out)
+    }
+
+    /// FILL the current selection (the whole image when none) with
+    /// deterministic monochrome noise — `amount` scales the hash
+    /// amplitude, `seed` makes a repeat reproducible. Returns the NEW
+    /// engine-held image's handle.
+    #[wasm_bindgen]
+    pub async fn fill_noise(handle: u32, amount: f32, seed: u32) -> Result<DecodedHandle, JsValue> {
+        let (img, ctx, sel) = fill_prelude(handle)?;
+        let out = fill_rgba8(&ctx, &img, &FillSpec::Noise { amount, seed }, sel)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        register(img.width, img.height, out)
+    }
+
+    // ──────────────────────── SAVE-BACK doors ────────────────────────
+
+    /// Re-encode straight RGBA8 as PNG or JPEG (`format` ∈ `png | jpeg`)
+    /// — the NON-PSD save-back lane. Codec entropy coding is inherently
+    /// CPU work (spec §1); JPEG rides the fixed v0 quality documented on
+    /// `saveback::JPEG_QUALITY_DEFAULT`.
+    #[wasm_bindgen]
+    pub fn encode_image(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        format: &str,
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        let fmt = RasterFormat::from_wire(format)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown encode format \"{format}\"")))?;
+        let bytes = encode_rgba8(rgba, width, height, fmt)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(js_sys::Uint8Array::from(&bytes[..]))
+    }
+
+    /// PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
+    /// retained parse behind `psd_handle` (the merged composite is always
+    /// rewritten; the layer structure is handled per the returned shape)
+    /// and answer the honest description the panel shows —
+    /// `"layer-replaced: …"` when the file's single canvas-sized content
+    /// layer was updated in place via `replace_channel_pixels`, or
+    /// `"flattened: …"` when a multi-layer file was flattened into a NEW
+    /// single-layer PSD. Call `psd_save` afterwards for the bytes.
+    ///
+    /// 8-bit RGB only, and the size must match the parsed header —
+    /// anything else is a clean error, never a wrong-looking file.
+    #[wasm_bindgen]
+    pub fn psd_apply_adjusted(
+        psd_handle: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<String, JsValue> {
+        PSDS.with(|m| {
+            let mut map = m.borrow_mut();
+            let file = map
+                .get_mut(&psd_handle)
+                .ok_or_else(|| JsValue::from_str(&format!("unknown psd handle {psd_handle}")))?;
+            let shape = psd_write_adjusted(file, width, height, rgba)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(shape.describe().to_string())
+        })
+    }
+
     // ─────────────────────────── PSD doors ───────────────────────────
     //
     // The mutatable tier (image-psd edit.rs: opacity / rename / remove +
@@ -692,8 +1170,8 @@ mod wasm {
     /// `psd_close`.
     #[wasm_bindgen]
     pub fn psd_open(bytes: &[u8]) -> Result<u32, JsValue> {
-        let file = image_psd::PsdFile::parse(bytes)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let file =
+            image_psd::PsdFile::parse(bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let handle = NEXT_PSD.with(|n| {
             let h = n.get();
             n.set(h + 1);
@@ -767,7 +1245,9 @@ mod wasm {
             let file = map
                 .get(&handle)
                 .ok_or_else(|| JsValue::from_str(&format!("unknown psd handle {handle}")))?;
-            let bytes = file.write().map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let bytes = file
+                .write()
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
             Ok(js_sys::Uint8Array::from(&bytes[..]))
         })
     }

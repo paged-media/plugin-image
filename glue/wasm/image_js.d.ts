@@ -25,6 +25,19 @@ export function abi_version(): number;
 export function adjust_image(handle: number, exposure_ev: number, brightness: number, contrast: number, saturation: number): Promise<Uint8Array>;
 
 /**
+ * [`adjust_image_full`] PLUS the EXTENDED (kernel-breadth) stages —
+ * vibrance, color balance, black & white, posterize, threshold,
+ * photo filter, channel mixer and per-channel levels — carried in
+ * ONE flat `f32` block so the boundary does not grow an argument
+ * per stage. `ext` is either EMPTY (every extended stage at
+ * identity — what `adjust_image_full` passes) or exactly
+ * `ingest::ADJUST_EXT_LEN` floats in the layout documented on that
+ * constant. The chain order is documented on `ingest::adjust_rgba8`;
+ * every stage is mask-aware (the bound selection rides `@group(2)`).
+ */
+export function adjust_image_ext(handle: number, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean, ext: Float32Array): Promise<Uint8Array>;
+
+/**
  * The FULL adjustments pass — the levels/curves/white-balance panel's
  * committed values. The 9 scalars are exposure/brightness/contrast/
  * saturation (as `adjust_image`), white balance (temp/tint), and the
@@ -67,8 +80,8 @@ export function crop_hit_handle(x: number, y: number, w: number, h: number, px: 
  * register the result as a NEW engine-held image, returning its
  * handle. The source handle is left intact (the caller frees it). An
  * out-of-bounds / empty rectangle is a clean error (never a torn
- * image). The straighten-angle resample is a separate stage (not in
- * this axis-aligned cut — see the crop interaction machine).
+ * image). This door is the AXIS-ALIGNED cut only — the straighten
+ * angle rides `straighten_crop_image`, which rotates first.
  */
 export function crop_image(handle: number, x: number, y: number, w: number, h: number): DecodedHandle;
 
@@ -84,6 +97,33 @@ export function curve_lut(points: Float32Array): Uint8Array;
  * RGBA8 image. Free with `free_image`.
  */
 export function decode_image(bytes: Uint8Array): DecodedHandle;
+
+/**
+ * Re-encode straight RGBA8 as PNG or JPEG (`format` ∈ `png | jpeg`)
+ * — the NON-PSD save-back lane. Codec entropy coding is inherently
+ * CPU work (spec §1); JPEG rides the fixed v0 quality documented on
+ * `saveback::JPEG_QUALITY_DEFAULT`.
+ */
+export function encode_image(rgba: Uint8Array, width: number, height: number, format: string): Uint8Array;
+
+/**
+ * FILL the current selection (the whole image when none) with a
+ * fixed TWO-STOP gradient. `kind` ∈ `linear | radial | angular |
+ * reflected | diamond`; `c0`/`c1` are straight RGBA in `[0, 1]`
+ * (4 floats each). The gradient GEOMETRY is derived from the
+ * selection's bounding box — there is no on-canvas drag handle in
+ * v0 (`crate::fill` documents the derivation). Returns the NEW
+ * engine-held image's handle.
+ */
+export function fill_gradient(handle: number, kind: string, c0: Float32Array, c1: Float32Array): Promise<DecodedHandle>;
+
+/**
+ * FILL the current selection (the whole image when none) with
+ * deterministic monochrome noise — `amount` scales the hash
+ * amplitude, `seed` makes a repeat reproducible. Returns the NEW
+ * engine-held image's handle.
+ */
+export function fill_noise(handle: number, amount: number, seed: number): Promise<DecodedHandle>;
 
 /**
  * Release an engine-held decoded image (and its mip pyramid cache).
@@ -175,6 +215,21 @@ export function init_gpu(): Promise<void>;
 
 export function kernel_count(): number;
 
+/**
+ * PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
+ * retained parse behind `psd_handle` (the merged composite is always
+ * rewritten; the layer structure is handled per the returned shape)
+ * and answer the honest description the panel shows —
+ * `"layer-replaced: …"` when the file's single canvas-sized content
+ * layer was updated in place via `replace_channel_pixels`, or
+ * `"flattened: …"` when a multi-layer file was flattened into a NEW
+ * single-layer PSD. Call `psd_save` afterwards for the bytes.
+ *
+ * 8-bit RGB only, and the size must match the parsed header —
+ * anything else is a clean error, never a wrong-looking file.
+ */
+export function psd_apply_adjusted(psd_handle: number, width: number, height: number, rgba: Uint8Array): string;
+
 export function psd_close(handle: number): void;
 
 /**
@@ -224,6 +279,117 @@ export function psd_set_layer_opacity(handle: number, layer: number, opacity: nu
  */
 export function resize_image(handle: number, out_w: number, out_h: number, filter: string): Promise<DecodedHandle>;
 
+/**
+ * Bind the session selection to an engine-held image (the selection
+ * field takes ITS resolution; the magic wand floods ITS pixels; the
+ * adjust doors mask only when adjusting THIS handle). Re-binding to
+ * the same handle keeps the selection; a different handle (a crop /
+ * resize swap) or resolution drops it.
+ */
+export function selection_bind(handle: number): void;
+
+/**
+ * The bounding box of the selection's non-zero coverage as
+ * `[x, y, w, h]`; an EMPTY array when there is no explicit selection
+ * OR the selection is empty (distinguish via `selection_stats`).
+ */
+export function selection_bounds(): Uint32Array;
+
+/**
+ * Deselect: back to "no selection" (adjustments run unmasked).
+ */
+export function selection_clear(): void;
+
+/**
+ * The raw u8 coverage bytes (`width·height`, row-major) — the
+ * overlay/debug readout. Empty when no explicit selection exists.
+ */
+export function selection_coverage_bytes(): Uint8Array;
+
+/**
+ * Feather the selection: a Gaussian of `sigma` px on the COVERAGE
+ * (mask prep — CPU on the u8 mask by design, not image processing;
+ * the softened mask is still consumed GPU-side). Errors when no
+ * explicit selection exists.
+ */
+export function selection_feather(sigma: number): void;
+
+/**
+ * Invert the selection ("everything" inverts to the explicit EMPTY
+ * selection — adjust applies nowhere until reselected).
+ */
+export function selection_invert(): void;
+
+/**
+ * MAGIC WAND at `(x, y)`: color-distance flood over the BOUND
+ * image's straight-RGBA8 pixels — `contiguous` = 4-connected BFS
+ * from the seed; otherwise a global threshold. `tolerance` is the
+ * per-channel (Chebyshev) distance 0–255. Binary coverage (hard
+ * edges; `selection_feather` softens), folded under `mode`.
+ */
+export function selection_magic_wand(x: number, y: number, tolerance: number, contiguous: boolean, mode: number): void;
+
+/**
+ * Select ALL explicitly (a full-extent selection in the readouts;
+ * the adjust chain still takes the trivial-mask fast path).
+ */
+export function selection_select_all(): void;
+
+/**
+ * Marquee ELLIPSE: center `(cx, cy)`, radii `(rx, ry)` (image px),
+ * anti-aliased (4×4 supersampled edge), folded under `mode`.
+ */
+export function selection_set_ellipse(cx: number, cy: number, rx: number, ry: number, mode: number): void;
+
+/**
+ * LASSO polygon: `points_flat` is `[x0, y0, x1, y1, …]` image-px
+ * vertices of a closed polygon (the closing edge is implicit),
+ * scanline-rasterized with AA coverage, folded under `mode`. Fewer
+ * than 3 vertices is a clean error (nothing to select).
+ */
+export function selection_set_polygon(points_flat: Float32Array, mode: number): void;
+
+/**
+ * Marquee RECT: fold the anti-aliased rectangle `[x, x+w) × [y, y+h)`
+ * (image px; fractional coords carry the AA edge) into the selection
+ * under `mode`.
+ */
+export function selection_set_rect(x: number, y: number, w: number, h: number, mode: number): void;
+
+/**
+ * Selection readout for the panel/tools, as 7 `f32`s:
+ * `[has_selection (0|1), x, y, w, h, coverage_fraction, revision]`.
+ * `has_selection == 0` ⇒ no explicit selection (everything, the
+ * unmasked default) and the box/fraction are 0. An explicit-but-
+ * empty selection reads `has == 1, w == h == 0, fraction == 0`.
+ */
+export function selection_stats(): Float32Array;
+
+/**
+ * Re-point the selection at a NEW image handle that holds the SAME
+ * extent, KEEPING the coverage — the door a destructive in-place
+ * edit (the generator FILL) uses so the selection survives its own
+ * result. Answers `true` when the coverage carried over, `false`
+ * when the extent changed (then it behaves exactly like
+ * `selection_bind`: the selection drops).
+ */
+export function selection_transfer(handle: number): boolean;
+
+/**
+ * STRAIGHTEN + CROP commit: rotate the image by `−degrees` about
+ * the crop rectangle's centre (`geom.rotate_bilinear`, backward
+ * mapped, bilinear, clamp-to-edge) so the rotated FRAME the overlay
+ * previewed lands upright, then cut `(x, y, w, h)` out of the
+ * result and register it as a NEW engine-held image. The source
+ * handle is left intact.
+ *
+ * `degrees == 0` takes the pure-windowing [`crop_image`] path — no
+ * GPU, no resample, no interpolation blur for an axis-aligned crop.
+ * A non-zero angle IS a resample and so is GPU-only (`init_gpu`
+ * first); it rejects honestly without a device.
+ */
+export function straighten_crop_image(handle: number, x: number, y: number, w: number, h: number, degrees: number): Promise<DecodedHandle>;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -237,6 +403,7 @@ export interface InitOutput {
     readonly __wbg_set_decodedhandle_width: (a: number, b: number) => void;
     readonly abi_version: () => number;
     readonly adjust_image: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly adjust_image_ext: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => any;
     readonly adjust_image_full: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => any;
     readonly crop_apply_drag: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
     readonly crop_frame_corners: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -244,6 +411,9 @@ export interface InitOutput {
     readonly crop_image: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly curve_lut: (a: number, b: number) => [number, number];
     readonly decode_image: (a: number, b: number) => [number, number, number];
+    readonly encode_image: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+    readonly fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly fill_noise: (a: number, b: number, c: number) => any;
     readonly free_image: (a: number) => void;
     readonly gpu_ready: () => number;
     readonly image_auto_enhance_params: (a: number) => [number, number, number];
@@ -254,6 +424,7 @@ export interface InitOutput {
     readonly init: () => void;
     readonly init_gpu: () => any;
     readonly kernel_count: () => number;
+    readonly psd_apply_adjusted: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly psd_close: (a: number) => void;
     readonly psd_layer_list: (a: number) => [number, number, number, number];
     readonly psd_open: (a: number, b: number) => [number, number, number];
@@ -262,6 +433,20 @@ export interface InitOutput {
     readonly psd_set_layer_name: (a: number, b: number, c: number, d: number) => [number, number];
     readonly psd_set_layer_opacity: (a: number, b: number, c: number) => [number, number];
     readonly resize_image: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly selection_bind: (a: number) => [number, number];
+    readonly selection_bounds: () => [number, number];
+    readonly selection_clear: () => void;
+    readonly selection_coverage_bytes: () => any;
+    readonly selection_feather: (a: number) => [number, number];
+    readonly selection_invert: () => [number, number];
+    readonly selection_magic_wand: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly selection_select_all: () => [number, number];
+    readonly selection_set_ellipse: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly selection_set_polygon: (a: number, b: number, c: number) => [number, number];
+    readonly selection_set_rect: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly selection_stats: () => [number, number];
+    readonly selection_transfer: (a: number) => [number, number, number];
+    readonly straighten_crop_image: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly qcms_enable_iccv4: () => void;
     readonly qcms_profile_precache_output_transform: (a: number) => void;
     readonly qcms_transform_data_bgra_out_lut: (a: number, b: number, c: number, d: number) => void;

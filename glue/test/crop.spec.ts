@@ -217,4 +217,31 @@ describe("the crop commit (real engine wasm)", () => {
     session.dispose();
     handle.dispose();
   });
+
+  it("a STRAIGHTEN commit needs the GPU and rejects honestly without it", async () => {
+    // Node has no navigator.gpu. A 0° commit is pure CPU windowing and
+    // still succeeds; a non-zero angle IS a resample
+    // (geom.rotate_bilinear) and must fail with the engine's honest
+    // GPU-only message rather than silently dropping the rotation.
+    const fake = makeFakeEditor();
+    fake.placed.set("u9", psdBytes());
+    fake.emitSelection([{ kind: "rectangle", id: "u9" }]);
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+    await session.ingestSelection();
+    expect(session.state().gpu).toBe(false);
+
+    // 0° — the axis-aligned cut still works with no device.
+    expect(await session.commitCrop()).toBe(true);
+
+    session.cropMachine()!.setAngle(12);
+    expect(await session.commitCrop()).toBe(false);
+    expect(session.state().status).toMatch(/Crop failed/);
+    expect(session.state().status).toMatch(/GPU-only|init_gpu/);
+    // The source is untouched by the refusal.
+    expect(session.state().source!.width).toBe(2);
+
+    session.dispose();
+    handle.dispose();
+  });
 });

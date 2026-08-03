@@ -177,6 +177,75 @@ pub fn b_exclusion(cb: f32, cs: f32) -> f32 {
     cb + cs - 2.0 * cb * cs
 }
 
+// ---------------------------------------------------------------------
+// The extended Photoshop set (beyond W3C Level 1) — the publicly
+// documented Photoshop / PDF-extended blend-mode formulas, mirrored
+// exactly by the `separable_lit!` WGSL helpers (fixed branch order).
+// ---------------------------------------------------------------------
+
+/// Photoshop "linear burn": `B = max(Cb + Cs − 1, 0)`.
+pub fn b_linear_burn(cb: f32, cs: f32) -> f32 {
+    (cb + cs - 1.0).max(0.0)
+}
+
+/// Photoshop "linear dodge" (add): `B = min(Cb + Cs, 1)`.
+pub fn b_linear_dodge(cb: f32, cs: f32) -> f32 {
+    (cb + cs).min(1.0)
+}
+
+/// Photoshop "vivid light": burn toward black below Cs = 0.5, dodge
+/// toward white above — `Cs ≤ 0.5 → color_burn(Cb, 2·Cs)`, else
+/// `color_dodge(Cb, 2·Cs − 1)`. Continuous at Cs = 0.5 (both arms
+/// reduce to Cb).
+pub fn b_vivid_light(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        b_color_burn(cb, 2.0 * cs)
+    } else {
+        b_color_dodge(cb, 2.0 * cs - 1.0)
+    }
+}
+
+/// Photoshop "linear light": linear burn below Cs = 0.5, linear dodge
+/// above; both arms collapse to `clamp(Cb + 2·Cs − 1, 0, 1)`.
+pub fn b_linear_light(cb: f32, cs: f32) -> f32 {
+    (cb + 2.0 * cs - 1.0).clamp(0.0, 1.0)
+}
+
+/// Photoshop "pin light": `Cs ≤ 0.5 → min(Cb, 2·Cs)`, else
+/// `max(Cb, 2·Cs − 1)`. Continuous at Cs = 0.5.
+pub fn b_pin_light(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        cb.min(2.0 * cs)
+    } else {
+        cb.max(2.0 * cs - 1.0)
+    }
+}
+
+/// Photoshop "hard mix": every channel snaps to 0 or 1 —
+/// `Cb + Cs < 1 → 0`, else `1`.
+pub fn b_hard_mix(cb: f32, cs: f32) -> f32 {
+    if cb + cs < 1.0 {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// Photoshop "subtract": `B = max(Cb − Cs, 0)`.
+pub fn b_subtract(cb: f32, cs: f32) -> f32 {
+    (cb - cs).max(0.0)
+}
+
+/// Photoshop "divide": `B = min(Cb / Cs, 1)`; `Cs = 0 → 1` (the
+/// limit for any Cb > 0; black-source columns blow to white).
+pub fn b_divide(cb: f32, cs: f32) -> f32 {
+    if cs == 0.0 {
+        1.0
+    } else {
+        (cb / cs).min(1.0)
+    }
+}
+
 /// Lift a per-channel separable blend over the rgb triple.
 fn blend_separable(f: fn(f32, f32) -> f32, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     [f(cb[0], cs[0]), f(cb[1], cs[1]), f(cb[2], cs[2])]
@@ -286,6 +355,28 @@ pub fn b_luminosity(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     set_lum(cb, lum(cs))
 }
 
+/// Photoshop "darker color" (non-separable): keep the WHOLE rgb triple
+/// with the lower luminosity — `Lum(Cs) < Lum(Cb) → Cs`, else `Cb`
+/// (ties keep the backdrop). Same `Lum` weights as §10.3.
+pub fn b_darker_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    if lum(cs) < lum(cb) {
+        cs
+    } else {
+        cb
+    }
+}
+
+/// Photoshop "lighter color" (non-separable): keep the triple with the
+/// higher luminosity — `Lum(Cs) > Lum(Cb) → Cs`, else `Cb` (ties keep
+/// the backdrop).
+pub fn b_lighter_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    if lum(cs) > lum(cb) {
+        cs
+    } else {
+        cb
+    }
+}
+
 // ---------------------------------------------------------------------
 // The blend dispatch — a kernel is identified by id (compose.*) and by
 // the PSD `BlendMode` fourcc (the flatten unit joins on `psd_key`).
@@ -311,6 +402,16 @@ pub enum Blend {
     Saturation,
     Color,
     Luminosity,
+    LinearBurn,
+    LinearDodge,
+    DarkerColor,
+    LighterColor,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Subtract,
+    Divide,
 }
 
 impl Blend {
@@ -333,6 +434,16 @@ impl Blend {
             Blend::Saturation => "compose.saturation",
             Blend::Color => "compose.color",
             Blend::Luminosity => "compose.luminosity",
+            Blend::LinearBurn => "compose.linear_burn",
+            Blend::LinearDodge => "compose.linear_dodge",
+            Blend::DarkerColor => "compose.darker_color",
+            Blend::LighterColor => "compose.lighter_color",
+            Blend::VividLight => "compose.vivid_light",
+            Blend::LinearLight => "compose.linear_light",
+            Blend::PinLight => "compose.pin_light",
+            Blend::HardMix => "compose.hard_mix",
+            Blend::Subtract => "compose.subtract",
+            Blend::Divide => "compose.divide",
         }
     }
 
@@ -360,6 +471,16 @@ impl Blend {
             Blend::Saturation => "sat ",
             Blend::Color => "colr",
             Blend::Luminosity => "lum ",
+            Blend::LinearBurn => "lbrn",
+            Blend::LinearDodge => "lddg",
+            Blend::DarkerColor => "dkCl",
+            Blend::LighterColor => "lgCl",
+            Blend::VividLight => "vLit",
+            Blend::LinearLight => "lLit",
+            Blend::PinLight => "pLit",
+            Blend::HardMix => "hMix",
+            Blend::Subtract => "fsub",
+            Blend::Divide => "fdiv",
         }
     }
 
@@ -385,6 +506,16 @@ impl Blend {
             "sat " => Blend::Saturation,
             "colr" => Blend::Color,
             "lum " => Blend::Luminosity,
+            "lbrn" => Blend::LinearBurn,
+            "lddg" => Blend::LinearDodge,
+            "dkCl" => Blend::DarkerColor,
+            "lgCl" => Blend::LighterColor,
+            "vLit" => Blend::VividLight,
+            "lLit" => Blend::LinearLight,
+            "pLit" => Blend::PinLight,
+            "hMix" => Blend::HardMix,
+            "fsub" => Blend::Subtract,
+            "fdiv" => Blend::Divide,
             _ => return None,
         })
     }
@@ -393,7 +524,12 @@ impl Blend {
     pub fn is_non_separable(self) -> bool {
         matches!(
             self,
-            Blend::Hue | Blend::Saturation | Blend::Color | Blend::Luminosity
+            Blend::Hue
+                | Blend::Saturation
+                | Blend::Color
+                | Blend::Luminosity
+                | Blend::DarkerColor
+                | Blend::LighterColor
         )
     }
 
@@ -416,6 +552,16 @@ impl Blend {
             Blend::Saturation => b_saturation(cb, cs),
             Blend::Color => b_color(cb, cs),
             Blend::Luminosity => b_luminosity(cb, cs),
+            Blend::LinearBurn => blend_separable(b_linear_burn, cb, cs),
+            Blend::LinearDodge => blend_separable(b_linear_dodge, cb, cs),
+            Blend::DarkerColor => b_darker_color(cb, cs),
+            Blend::LighterColor => b_lighter_color(cb, cs),
+            Blend::VividLight => blend_separable(b_vivid_light, cb, cs),
+            Blend::LinearLight => blend_separable(b_linear_light, cb, cs),
+            Blend::PinLight => blend_separable(b_pin_light, cb, cs),
+            Blend::HardMix => blend_separable(b_hard_mix, cb, cs),
+            Blend::Subtract => blend_separable(b_subtract, cb, cs),
+            Blend::Divide => blend_separable(b_divide, cb, cs),
         }
     }
 }

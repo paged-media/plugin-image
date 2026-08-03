@@ -40,13 +40,25 @@
 //! `execute_tile_once` / `parity()` lane.
 //!
 //! Provenance: W3C Compositing and Blending Level 1 (public spec,
-//! <https://www.w3.org/TR/compositing-1/>). The 16 operators map 1:1 to
-//! PSD layer blend-mode keys (see `image_conformance::compose_ref`),
+//! <https://www.w3.org/TR/compositing-1/>). The 16 W3C operators map 1:1
+//! to PSD layer blend-mode keys (see `image_conformance::compose_ref`),
 //! which is why this family is the PSD flatten oracle's spine. The
 //! scalar reference (the parity golden AND the flatten oracle) is the
 //! handwritten `compose_ref` module; the WGSL below mirrors it exactly,
 //! including the fixed source-over summation order (term1+term2+term3)
 //! and the W3C §10.3 non-separable pseudo-code branch order.
+//!
+//! The EXTENDED ten (kernel-breadth batch) are the Photoshop blend modes
+//! beyond W3C Level 1 — linear_burn / linear_dodge / vivid_light /
+//! linear_light / pin_light / hard_mix / subtract / divide (separable)
+//! and darker_color / lighter_color (non-separable, compare `Lum`).
+//! Their `B(Cb, Cs)` definitions follow the publicly documented
+//! Photoshop / PDF-extended blend-mode formulas (Adobe PDF Reference
+//! "blend modes" + the PSD spec blend-mode keys); each is a documented
+//! per-channel formula in `separable_lit!` below, composited through the
+//! IDENTICAL W3C source-over spine as the first 16. They join the PSD
+//! flatten oracle by their PSD fourccs (`lbrn`, `lddg`, `vLit`, `lLit`,
+//! `pLit`, `hMix`, `fsub`, `fdiv`, `dkCl`, `lgCl`).
 //!
 //! Each module is a complete WGSL source built by `separable_wgsl!` /
 //! `nonsep_wgsl!` from a shared preamble (binding interface + unpremul
@@ -152,6 +164,26 @@ fn s_soft_light(cb: f32, cs: f32) -> f32 {
 }
 fn s_difference(cb: f32, cs: f32) -> f32 { return abs(cb - cs); }
 fn s_exclusion(cb: f32, cs: f32) -> f32 { return cb + cs - 2.0 * cb * cs; }
+fn s_linear_burn(cb: f32, cs: f32) -> f32 { return max(cb + cs - 1.0, 0.0); }
+fn s_linear_dodge(cb: f32, cs: f32) -> f32 { return min(cb + cs, 1.0); }
+fn s_vivid_light(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return s_color_burn(cb, 2.0 * cs); }
+    return s_color_dodge(cb, 2.0 * cs - 1.0);
+}
+fn s_linear_light(cb: f32, cs: f32) -> f32 { return clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); }
+fn s_pin_light(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return min(cb, 2.0 * cs); }
+    return max(cb, 2.0 * cs - 1.0);
+}
+fn s_hard_mix(cb: f32, cs: f32) -> f32 {
+    if (cb + cs < 1.0) { return 0.0; }
+    return 1.0;
+}
+fn s_subtract(cb: f32, cs: f32) -> f32 { return max(cb - cs, 0.0); }
+fn s_divide(cb: f32, cs: f32) -> f32 {
+    if (cs == 0.0) { return 1.0; }
+    return min(cb / cs, 1.0);
+}
 "
     };
 }
@@ -302,6 +334,43 @@ const LUMINOSITY_WGSL: &str = nonsep_wgsl!(
     "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> { return set_lum(cb, lum(cs)); }\n"
 );
 
+// ── the extended ten (Photoshop set beyond W3C Level 1) ─────────────
+
+const LINEAR_BURN_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_linear_burn(cb.r, cs.r), s_linear_burn(cb.g, cs.g), s_linear_burn(cb.b, cs.b));\n}\n"
+);
+const LINEAR_DODGE_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_linear_dodge(cb.r, cs.r), s_linear_dodge(cb.g, cs.g), s_linear_dodge(cb.b, cs.b));\n}\n"
+);
+const VIVID_LIGHT_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_vivid_light(cb.r, cs.r), s_vivid_light(cb.g, cs.g), s_vivid_light(cb.b, cs.b));\n}\n"
+);
+const LINEAR_LIGHT_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_linear_light(cb.r, cs.r), s_linear_light(cb.g, cs.g), s_linear_light(cb.b, cs.b));\n}\n"
+);
+const PIN_LIGHT_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_pin_light(cb.r, cs.r), s_pin_light(cb.g, cs.g), s_pin_light(cb.b, cs.b));\n}\n"
+);
+const HARD_MIX_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_hard_mix(cb.r, cs.r), s_hard_mix(cb.g, cs.g), s_hard_mix(cb.b, cs.b));\n}\n"
+);
+const SUBTRACT_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_subtract(cb.r, cs.r), s_subtract(cb.g, cs.g), s_subtract(cb.b, cs.b));\n}\n"
+);
+const DIVIDE_WGSL: &str = separable_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(s_divide(cb.r, cs.r), s_divide(cb.g, cs.g), s_divide(cb.b, cs.b));\n}\n"
+);
+// darker_color / lighter_color select the WHOLE rgb triple by comparing
+// luminosity (`Lum`, the §10.3 weights) — non-separable, but they need
+// only `lum` from the nonsep helper block. Ties keep the BACKDROP (the
+// strict compare fails), mirrored exactly by the scalar reference.
+const DARKER_COLOR_WGSL: &str = nonsep_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    if (lum(cs) < lum(cb)) { return cs; }\n    return cb;\n}\n"
+);
+const LIGHTER_COLOR_WGSL: &str = nonsep_wgsl!(
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    if (lum(cs) > lum(cb)) { return cs; }\n    return cb;\n}\n"
+);
+
 /// Build a compose `KernelDef` with the shared params + binary point
 /// module shape; only `id`, `wgsl`, and `tolerance` vary.
 const fn compose_def(id: &'static str, wgsl: &'static str, eps: u32) -> KernelDef {
@@ -334,6 +403,21 @@ pub static COMPOSE_SATURATION: KernelDef = compose_def("compose.saturation", SAT
 pub static COMPOSE_COLOR: KernelDef = compose_def("compose.color", COLOR_WGSL, 6);
 pub static COMPOSE_LUMINOSITY: KernelDef = compose_def("compose.luminosity", LUMINOSITY_WGSL, 6);
 
+pub static COMPOSE_LINEAR_BURN: KernelDef = compose_def("compose.linear_burn", LINEAR_BURN_WGSL, 4);
+pub static COMPOSE_LINEAR_DODGE: KernelDef =
+    compose_def("compose.linear_dodge", LINEAR_DODGE_WGSL, 4);
+pub static COMPOSE_VIVID_LIGHT: KernelDef = compose_def("compose.vivid_light", VIVID_LIGHT_WGSL, 8);
+pub static COMPOSE_LINEAR_LIGHT: KernelDef =
+    compose_def("compose.linear_light", LINEAR_LIGHT_WGSL, 4);
+pub static COMPOSE_PIN_LIGHT: KernelDef = compose_def("compose.pin_light", PIN_LIGHT_WGSL, 4);
+pub static COMPOSE_HARD_MIX: KernelDef = compose_def("compose.hard_mix", HARD_MIX_WGSL, 4);
+pub static COMPOSE_SUBTRACT: KernelDef = compose_def("compose.subtract", SUBTRACT_WGSL, 2);
+pub static COMPOSE_DIVIDE: KernelDef = compose_def("compose.divide", DIVIDE_WGSL, 6);
+pub static COMPOSE_DARKER_COLOR: KernelDef =
+    compose_def("compose.darker_color", DARKER_COLOR_WGSL, 4);
+pub static COMPOSE_LIGHTER_COLOR: KernelDef =
+    compose_def("compose.lighter_color", LIGHTER_COLOR_WGSL, 4);
+
 pub static FAMILY: &[&KernelDef] = &[
     &COMPOSE_NORMAL,
     &COMPOSE_MULTIPLY,
@@ -351,4 +435,14 @@ pub static FAMILY: &[&KernelDef] = &[
     &COMPOSE_SATURATION,
     &COMPOSE_COLOR,
     &COMPOSE_LUMINOSITY,
+    &COMPOSE_LINEAR_BURN,
+    &COMPOSE_LINEAR_DODGE,
+    &COMPOSE_VIVID_LIGHT,
+    &COMPOSE_LINEAR_LIGHT,
+    &COMPOSE_PIN_LIGHT,
+    &COMPOSE_HARD_MIX,
+    &COMPOSE_SUBTRACT,
+    &COMPOSE_DIVIDE,
+    &COMPOSE_DARKER_COLOR,
+    &COMPOSE_LIGHTER_COLOR,
 ];

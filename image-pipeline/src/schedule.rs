@@ -63,7 +63,7 @@ use image_gpu::{execute_tile_once, execute_tile_once_async, GpuContext, TileInpu
 use crate::cache::{OpKey, OperationCache};
 use crate::node::{ApplyNode, OpNode};
 use crate::region_prop::required_input_roi;
-use crate::{NodeId, PipelineError};
+use crate::{NodeId, PipelineError, PipelineSelection};
 
 /// Bytes per pixel of the rgba16float working format the GPU ABI
 /// consumes (4 channels × 2 bytes).
@@ -83,6 +83,7 @@ pub(crate) fn materialize_node(
     node_id: NodeId,
     roi: Region,
     ctx: &GpuContext,
+    selection: Option<&PipelineSelection>,
 ) -> Result<(TileMap, ContentHash), PipelineError> {
     let node = nodes
         .get(node_id.0)
@@ -98,11 +99,12 @@ pub(crate) fn materialize_node(
         OpNode::Apply(apply) => {
             let in_roi = required_input_roi(apply.def.class, roi);
             let (a_id, b_id) = apply.inputs.as_pair();
-            let (a_map, a_hash) = materialize_node(nodes, cache, a_id, in_roi, ctx)?;
+            let (a_map, a_hash) = materialize_node(nodes, cache, a_id, in_roi, ctx, selection)?;
             match b_id {
                 None => (a_hash, Some((a_map, None))),
                 Some(b) => {
-                    let (b_map, b_hash) = materialize_node(nodes, cache, b, in_roi, ctx)?;
+                    let (b_map, b_hash) =
+                        materialize_node(nodes, cache, b, in_roi, ctx, selection)?;
                     (fold_hashes(a_hash, b_hash), Some((a_map, Some(b_map))))
                 }
             }
@@ -111,7 +113,7 @@ pub(crate) fn materialize_node(
 
     let key = OpKey {
         op_id: node.op_key(),
-        params: params_hash(node),
+        params: params_hash(node, selection),
         input: input_hash,
     };
 
@@ -123,7 +125,7 @@ pub(crate) fn materialize_node(
         OpNode::Source(_) => materialize_source(node, roi)?,
         OpNode::Apply(apply) => {
             let (a_map, b_map) = materialized_input.unwrap();
-            materialize_apply(apply, a_map, b_map, roi, ctx)?
+            materialize_apply(apply, a_map, b_map, roi, ctx, selection)?
         }
     };
     let out_hash = content_hash_of(&map);
@@ -144,6 +146,7 @@ pub(crate) fn materialize_node_async<'a>(
     node_id: NodeId,
     roi: Region,
     ctx: &'a GpuContext,
+    selection: Option<&'a PipelineSelection>,
 ) -> MaterializeFuture<'a> {
     Box::pin(async move {
         let node = nodes
@@ -156,12 +159,12 @@ pub(crate) fn materialize_node_async<'a>(
                 let in_roi = required_input_roi(apply.def.class, roi);
                 let (a_id, b_id) = apply.inputs.as_pair();
                 let (a_map, a_hash) =
-                    materialize_node_async(nodes, cache, a_id, in_roi, ctx).await?;
+                    materialize_node_async(nodes, cache, a_id, in_roi, ctx, selection).await?;
                 match b_id {
                     None => (a_hash, Some((a_map, None))),
                     Some(b) => {
                         let (b_map, b_hash) =
-                            materialize_node_async(nodes, cache, b, in_roi, ctx).await?;
+                            materialize_node_async(nodes, cache, b, in_roi, ctx, selection).await?;
                         (fold_hashes(a_hash, b_hash), Some((a_map, Some(b_map))))
                     }
                 }
@@ -170,7 +173,7 @@ pub(crate) fn materialize_node_async<'a>(
 
         let key = OpKey {
             op_id: node.op_key(),
-            params: params_hash(node),
+            params: params_hash(node, selection),
             input: input_hash,
         };
 
@@ -182,7 +185,7 @@ pub(crate) fn materialize_node_async<'a>(
             OpNode::Source(_) => materialize_source(node, roi)?,
             OpNode::Apply(apply) => {
                 let (a_map, b_map) = materialized_input.unwrap();
-                materialize_apply_async(apply, a_map, b_map, roi, ctx).await?
+                materialize_apply_async(apply, a_map, b_map, roi, ctx, selection).await?
             }
         };
         let out_hash = content_hash_of(&map);
@@ -250,6 +253,7 @@ fn materialize_apply(
     b: Option<TileMap>,
     roi: Region,
     ctx: &GpuContext,
+    selection: Option<&PipelineSelection>,
 ) -> Result<TileMap, PipelineError> {
     let arity = apply.def.inputs;
     let provided = if b.is_some() { 2 } else { 1 };
@@ -301,12 +305,17 @@ fn materialize_apply(
             }
         };
 
+        // The selection mask for THIS tile's work extent (§6.1): the
+        // bound coverage's r16float window, or None = the constant-1
+        // default. The dispatch applies `mix(a, result, mask)` on the
+        // GPU (ABI-level; windowed modules apply it themselves).
+        let mask_bytes = selection.map(|s| s.coverage.mask_window_f16(work));
         let out_bytes = execute_tile_once(
             ctx,
             apply.def,
             &inputs,
             &apply.params,
-            None, // constant-1 mask: the Engine A binding (§6.1)
+            mask_bytes.as_deref(),
             work.w,
             work.h,
         )?;
@@ -323,6 +332,7 @@ async fn materialize_apply_async(
     b: Option<TileMap>,
     roi: Region,
     ctx: &GpuContext,
+    selection: Option<&PipelineSelection>,
 ) -> Result<TileMap, PipelineError> {
     let arity = apply.def.inputs;
     let provided = if b.is_some() { 2 } else { 1 };
@@ -366,12 +376,14 @@ async fn materialize_apply_async(
             }
         };
 
+        // Selection mask window — see materialize_apply (LOCKSTEP).
+        let mask_bytes = selection.map(|s| s.coverage.mask_window_f16(work));
         let out_bytes = execute_tile_once_async(
             ctx,
             apply.def,
             &inputs,
             &apply.params,
-            None, // constant-1 mask: the Engine A binding (§6.1)
+            mask_bytes.as_deref(),
             work.w,
             work.h,
         )
@@ -392,11 +404,17 @@ fn fold_hashes(a: ContentHash, b: ContentHash) -> ContentHash {
 }
 
 /// `ParamsHash` for a node — sources carry no params (zero), apply nodes
-/// the precomputed hash of their param block.
-fn params_hash(node: &OpNode) -> image_core::ParamsHash {
+/// the precomputed hash of their param block. A bound SELECTION folds its
+/// coverage hash into every APPLY node's component (the mask changes the
+/// dispatch output, so it must change the cache key; sources are never
+/// masked and stay selection-independent).
+fn params_hash(node: &OpNode, selection: Option<&PipelineSelection>) -> image_core::ParamsHash {
     match node {
         OpNode::Source(_) => image_core::ParamsHash(0),
-        OpNode::Apply(a) => a.params_hash,
+        OpNode::Apply(a) => match selection {
+            None => a.params_hash,
+            Some(sel) => image_core::ParamsHash(a.params_hash.0 ^ sel.hash),
+        },
     }
 }
 

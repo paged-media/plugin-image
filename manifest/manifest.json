@@ -44,16 +44,29 @@
       "media.paged.image.command.adjustSelected",
       "media.paged.image.command.autoEnhance",
       "media.paged.image.command.claimTiles",
-      "media.paged.image.command.commitCrop"
+      "media.paged.image.command.commitCrop",
+      "media.paged.image.command.fillSelection",
+      "media.paged.image.command.fillNoise",
+      "media.paged.image.command.applyToFile",
+      "media.paged.image.command.selectAll",
+      "media.paged.image.command.deselect",
+      "media.paged.image.command.invertSelection",
+      "media.paged.image.command.featherSelection"
     ],
     "tools": [
-      "media.paged.image.tool.crop"
+      "media.paged.image.tool.crop",
+      "media.paged.image.tool.marqueeRect",
+      "media.paged.image.tool.marqueeEllipse",
+      "media.paged.image.tool.lasso",
+      "media.paged.image.tool.magicWand"
     ],
     "importers": [
       "media.paged.image.importer.raster"
     ],
     "exporters": [
-      "media.paged.image.exporter.psd"
+      "media.paged.image.exporter.psd",
+      "media.paged.image.exporter.png",
+      "media.paged.image.exporter.jpeg"
     ]
   }
 }

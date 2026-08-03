@@ -176,8 +176,7 @@ mod tests {
         // refuses it, so we must fall back rather than error.
         let srgb = working_srgb_profile().expect("synthesise sRGB");
         let cmyk = vec![0u8, 0, 0, 0];
-        let (rgba, managed) =
-            cmyk8_to_rgba8(&cmyk, Some(&srgb.bytes)).expect("must fall back");
+        let (rgba, managed) = cmyk8_to_rgba8(&cmyk, Some(&srgb.bytes)).expect("must fall back");
         assert!(!managed, "an RGB source profile cannot drive the CMYK lane");
         assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
     }

@@ -36,6 +36,15 @@ else
   echo "warning: wasm-opt not found — shipping unoptimized wasm (CI optimizes)" >&2
 fi
 
+# The BUNDLE loads the glue from glue/wasm (its `../wasm/…` relative
+# import); the MANIFEST declares `wasm/image_js_bg.wasm` relative to
+# manifest/, which is what the plugin-cli size gate measures. Both must
+# be the same artifact — mirror it so the two never drift (they did:
+# the gate was measuring a stale copy).
+mkdir -p manifest/wasm
+cp "$OUT"/image_js.js "$OUT"/image_js.d.ts \
+   "$OUT"/image_js_bg.wasm "$OUT"/image_js_bg.wasm.d.ts manifest/wasm/
+
 SIZE=$(wc -c < "$OUT/image_js_bg.wasm" | tr -d ' ')
 echo "image_js_bg.wasm: $SIZE bytes (budget $BUDGET)"
 if [ "$SIZE" -gt "$BUDGET" ]; then

@@ -265,6 +265,16 @@ fn compose_kernel(blend: Blend) -> &'static KernelDef {
         Blend::Saturation => &compose::COMPOSE_SATURATION,
         Blend::Color => &compose::COMPOSE_COLOR,
         Blend::Luminosity => &compose::COMPOSE_LUMINOSITY,
+        Blend::LinearBurn => &compose::COMPOSE_LINEAR_BURN,
+        Blend::LinearDodge => &compose::COMPOSE_LINEAR_DODGE,
+        Blend::DarkerColor => &compose::COMPOSE_DARKER_COLOR,
+        Blend::LighterColor => &compose::COMPOSE_LIGHTER_COLOR,
+        Blend::VividLight => &compose::COMPOSE_VIVID_LIGHT,
+        Blend::LinearLight => &compose::COMPOSE_LINEAR_LIGHT,
+        Blend::PinLight => &compose::COMPOSE_PIN_LIGHT,
+        Blend::HardMix => &compose::COMPOSE_HARD_MIX,
+        Blend::Subtract => &compose::COMPOSE_SUBTRACT,
+        Blend::Divide => &compose::COMPOSE_DIVIDE,
     }
 }
 

@@ -257,7 +257,11 @@ fn image_editor_ingest_jpeg_exif_orientation_6_auto_rotates() {
         (h, w),
         "Orientation=6 must swap dimensions to {h}×{w}"
     );
-    assert_eq!(img.rgba.len(), (w * h * 4) as usize, "pixel count preserved");
+    assert_eq!(
+        img.rgba.len(),
+        (w * h * 4) as usize,
+        "pixel count preserved"
+    );
 }
 
 #[test]
@@ -300,7 +304,7 @@ fn image_editor_ingest_adjust_identity_needs_no_gpu() {
         println!("SKIP: no GPU adapter (identity path covered via parity test)");
         return;
     };
-    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params)).expect("identity adjust");
+    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("identity adjust");
     assert_eq!(&out[..], &img.rgba[..]);
 }
 
@@ -316,7 +320,7 @@ fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
         exposure_ev: 1.0, // exp2(1) = ×2 on rgb, alpha preserved
         ..AdjustParams::default()
     };
-    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params)).expect("adjust");
+    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("adjust");
     assert_eq!(out.len(), img.rgba.len());
     for (i, (&got, &src)) in out.iter().zip(img.rgba.iter()).enumerate() {
         let expect = if i % 4 == 3 {
@@ -356,7 +360,9 @@ fn cmyk_jpeg_bytes(w: u32, h: u32, cmyk_ink: &[u8]) -> Vec<u8> {
 fn image_editor_ingest_cmyk_jpeg_decodes_instead_of_rejecting() {
     // A 2×1 CMYK image: paper white (no ink) and solid black (full K).
     let (w, h) = (2u32, 1u32);
-    let cmyk = vec![0u8, 0, 0, 0, /* white */ 0, 0, 0, 255 /* full K */];
+    let cmyk = vec![
+        0u8, 0, 0, 0, /* white */ 0, 0, 0, 255, /* full K */
+    ];
     let jpeg = cmyk_jpeg_bytes(w, h, &cmyk);
     assert_eq!(&jpeg[0..3], &[0xFF, 0xD8, 0xFF], "JPEG SOI");
 
@@ -379,4 +385,270 @@ fn image_editor_ingest_cmyk_jpeg_decodes_instead_of_rejecting() {
     );
     assert_eq!(white[3], 255, "alpha synthesised opaque");
     assert_eq!(black[3], 255, "alpha synthesised opaque");
+}
+
+// ── the EXTENDED (kernel-breadth) adjust stages + the FILL lane ──────
+//
+// feat: image.editor.adjust / image.editor.generate. Each proves the
+// stage is REACHABLE through the same chain the panel drives (identity
+// short-circuit, GPU dispatch, selection mask), not that the kernel
+// math is right — that is the conformance family's parity job.
+
+/// A 2×1 mid-grey/blue pair with an alpha channel, as an engine image.
+fn ext_image() -> image_js::ingest::DecodedImage {
+    image_js::ingest::DecodedImage::from_rgba8(2, 1, vec![128, 128, 128, 255, 40, 90, 200, 255])
+        .expect("valid rgba8")
+}
+
+#[test]
+fn image_editor_adjust_extended_block_decodes_onto_the_params() {
+    // The flat wire → typed params mapping (no GPU needed).
+    let mut p = AdjustParams::default();
+    assert!(p.is_identity());
+    p.apply_extended(&[]).expect("empty ext is identity");
+    assert!(p.is_identity(), "an EMPTY block leaves every stage neutral");
+
+    let mut ext = vec![0.0f32; image_js::ingest::ADJUST_EXT_LEN];
+    // Neutral defaults for the fields whose identity is not 0.
+    ext[26] = 1.0; // channel mixer r.r
+    ext[31] = 1.0; // g.g
+    ext[36] = 1.0; // b.b
+    for c in 0..3 {
+        ext[38 + c * 3 + 1] = 1.0; // levels_rgb in_white
+        ext[38 + c * 3 + 2] = 1.0; // levels_rgb gamma
+    }
+    let mut q = AdjustParams::default();
+    q.apply_extended(&ext).expect("neutral ext");
+    assert!(q.is_identity(), "the neutral block is still identity");
+
+    // Now flip one field per stage and prove it lands.
+    ext[0] = 0.5; // vibrance
+    ext[1] = 0.1; // color balance shadows cyan-red
+    ext[10] = 1.0; // black & white enabled
+    ext[17] = 1.0; // posterize enabled
+    ext[18] = 4.0; // posterize levels
+    ext[19] = 1.0; // threshold enabled
+    ext[20] = 0.5; // threshold value
+    ext[21] = 0.25; // photo filter density
+    let mut r = AdjustParams::default();
+    r.apply_extended(&ext).expect("populated ext");
+    assert_eq!(r.vibrance, 0.5);
+    assert_eq!(r.color_balance.shadows[0], 0.1);
+    assert!(r.black_white.enabled);
+    assert_eq!(r.posterize, Some(4.0));
+    assert_eq!(r.threshold, Some(0.5));
+    assert_eq!(r.photo_filter.density, 0.25);
+    assert!(!r.is_identity());
+}
+
+#[test]
+fn image_editor_adjust_extended_block_rejects_a_wrong_length() {
+    let mut p = AdjustParams::default();
+    assert!(p.apply_extended(&[1.0, 2.0]).is_err());
+}
+
+#[test]
+fn image_editor_adjust_threshold_runs_through_the_chain_on_gpu() {
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    let img = ext_image();
+    let params = AdjustParams {
+        threshold: Some(0.5),
+        ..AdjustParams::default()
+    };
+    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("threshold");
+    // px0 luma = 0.5 (≥ 0.5) → white; px1 luma ≈ 0.3·.157+0.59·.353+0.11·.784 ≈ 0.34 → black.
+    assert_eq!(&out[0..3], &[255, 255, 255], "px0 above the cut");
+    assert_eq!(&out[4..7], &[0, 0, 0], "px1 below the cut");
+    assert_eq!(out[3], 255, "alpha preserved");
+}
+
+#[test]
+fn image_editor_adjust_black_white_runs_through_the_chain_on_gpu() {
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    let img = ext_image();
+    let params = AdjustParams {
+        black_white: image_js::ingest::BlackWhiteParams {
+            enabled: true,
+            ..Default::default()
+        },
+        ..AdjustParams::default()
+    };
+    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("black&white");
+    for px in out.chunks_exact(4) {
+        assert!(
+            (px[0] as i32 - px[1] as i32).abs() <= 1 && (px[1] as i32 - px[2] as i32).abs() <= 1,
+            "the six-weight mix splats one gray, got {px:?}"
+        );
+    }
+}
+
+#[test]
+fn image_selection_extended_stage_is_masked_like_the_others() {
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    let img = ext_image();
+    // Coverage selects ONLY pixel 0.
+    let cov = Arc::new(
+        image_gpu::SelectionCoverage::from_data(2, 1, vec![255, 0]).expect("2 px coverage"),
+    );
+    let params = AdjustParams {
+        threshold: Some(0.5),
+        ..AdjustParams::default()
+    };
+    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, Some(cov))).expect("masked");
+    assert_eq!(&out[0..3], &[255, 255, 255], "selected pixel thresholded");
+    for (i, (&got, &src)) in out[4..8].iter().zip(img.rgba[4..8].iter()).enumerate() {
+        assert!(
+            (got as i32 - src as i32).abs() <= 2,
+            "byte {i} outside the selection must survive: got {got}, was {src}"
+        );
+    }
+}
+
+#[test]
+fn image_editor_generate_gradient_fills_through_the_selection() {
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    let img = ext_image();
+    let cov = Arc::new(
+        image_gpu::SelectionCoverage::from_data(2, 1, vec![255, 0]).expect("2 px coverage"),
+    );
+    let spec = image_js::fill::FillSpec::Gradient {
+        kind: image_js::fill::GradientKind::Linear,
+        c0: [1.0, 0.0, 0.0, 1.0],
+        c1: [1.0, 0.0, 0.0, 1.0], // both stops red ⇒ a flat fill, easy to assert
+    };
+    let out =
+        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, Some(cov))).expect("fill");
+    assert_eq!(out.len(), img.rgba.len());
+    assert!(
+        out[0] > 250 && out[1] < 5 && out[2] < 5,
+        "the selected pixel took the fill, got {:?}",
+        &out[0..4]
+    );
+    for (i, (&got, &src)) in out[4..8].iter().zip(img.rgba[4..8].iter()).enumerate() {
+        assert!(
+            (got as i32 - src as i32).abs() <= 2,
+            "byte {i} outside the selection must survive: got {got}, was {src}"
+        );
+    }
+}
+
+#[test]
+fn image_editor_generate_noise_fills_the_whole_image_without_a_selection() {
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    // 8×8 so the hash has room to vary.
+    let img =
+        image_js::ingest::DecodedImage::from_rgba8(8, 8, vec![0u8; 8 * 8 * 4]).expect("valid");
+    let spec = image_js::fill::FillSpec::Noise {
+        amount: 1.0,
+        seed: 7,
+    };
+    let out = pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None))
+        .expect("noise fill");
+    let distinct: std::collections::BTreeSet<u8> = out.chunks_exact(4).map(|p| p[0]).collect();
+    assert!(
+        distinct.len() > 4,
+        "deterministic noise must vary across texels, saw {} values",
+        distinct.len()
+    );
+    // Determinism: the same (seed, amount) yields the same field.
+    let again =
+        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None)).expect("repeat");
+    assert_eq!(out, again, "same seed ⇒ same noise");
+}
+
+// ── the STRAIGHTEN commit (geom.rotate_bilinear) ─────────────────────
+//
+// feat: image.editor.crop. The crop tool previewed a rotated frame long
+// before anything could commit it; these pin the commit's two lanes.
+
+#[test]
+fn image_editor_crop_straighten_at_zero_degrees_needs_no_gpu_and_never_resamples() {
+    // A 0° straighten MUST take the pure-windowing path: same bytes as
+    // crop_rgba8, no interpolation, no device. (We can only assert the
+    // byte equality with a device present for the signature, so compare
+    // against the windowing function directly — the door's own
+    // short-circuit is asserted in the wasm layer.)
+    let img = image_js::ingest::DecodedImage::from_rgba8(4, 2, (0..32u8).collect::<Vec<u8>>())
+        .expect("valid");
+    let cut = image_js::ingest::crop_rgba8(&img, 1, 0, 2, 2).expect("crop");
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter (0° path is pure CPU windowing anyway)");
+        return;
+    };
+    let straight = pollster::block_on(image_js::ingest::straighten_crop_rgba8(
+        &ctx, &img, 1, 0, 2, 2, 0.0,
+    ))
+    .expect("0° straighten");
+    assert_eq!(&straight.rgba[..], &cut.rgba[..], "0° is the exact cut");
+}
+
+#[test]
+fn image_editor_crop_straighten_180_degrees_reverses_the_full_frame() {
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    // A 4×2 labelled image; straighten by 180° over the FULL rect is a
+    // corner swap, so the result must be the reversed pixel order. This
+    // pins the ROTATION DIRECTION through the real GPU dispatch.
+    let mut px = vec![0u8; 4 * 2 * 4];
+    for i in 0..8 {
+        px[i * 4] = (i * 30) as u8;
+        px[i * 4 + 1] = 10;
+        px[i * 4 + 2] = 20;
+        px[i * 4 + 3] = 255;
+    }
+    let img = image_js::ingest::DecodedImage::from_rgba8(4, 2, px.clone()).expect("valid");
+    let out = pollster::block_on(image_js::ingest::straighten_crop_rgba8(
+        &ctx, &img, 0, 0, 4, 2, 180.0,
+    ))
+    .expect("180° straighten");
+    assert_eq!((out.width, out.height), (4, 2));
+    for i in 0..8 {
+        let want = px[(7 - i) * 4];
+        let got = out.rgba[i * 4];
+        assert!(
+            (got as i32 - want as i32).abs() <= 3,
+            "pixel {i}: got {got}, expected ~{want} (180° reverses the frame)"
+        );
+    }
+}
+
+#[test]
+fn image_editor_crop_straighten_small_angle_keeps_a_flat_field_flat() {
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    // A uniform field is rotation-invariant: any angle, with clamp-to-edge,
+    // must reproduce the same colour everywhere (this catches a broken
+    // tap/clamp that would pull in transparent-black).
+    let img =
+        image_js::ingest::DecodedImage::from_rgba8(16, 16, vec![77u8; 16 * 16 * 4]).expect("valid");
+    let out = pollster::block_on(image_js::ingest::straighten_crop_rgba8(
+        &ctx, &img, 2, 2, 12, 12, 7.5,
+    ))
+    .expect("7.5° straighten");
+    assert_eq!((out.width, out.height), (12, 12));
+    for (i, &b) in out.rgba.iter().enumerate() {
+        assert!(
+            (b as i32 - 77).abs() <= 2,
+            "byte {i}: got {b}, a flat field must survive rotation"
+        );
+    }
 }

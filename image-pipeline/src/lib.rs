@@ -58,7 +58,7 @@ use std::sync::Arc;
 
 use image_codecs::{ImageSource, ImageTarget};
 use image_core::{ParamsHash, PixelFormat, Region, TileMap};
-use image_gpu::GpuContext;
+use image_gpu::{GpuContext, SelectionCoverage};
 use image_kernels::KernelDef;
 
 use crate::cache::OperationCache;
@@ -78,6 +78,14 @@ pub enum PipelineError {
     Graph(String),
 }
 
+/// The pipeline's bound selection: the full-image coverage plus its
+/// precomputed content hash (folded into every masked apply node's cache
+/// key so a changed selection never serves a stale tile).
+pub(crate) struct PipelineSelection {
+    pub(crate) coverage: Arc<SelectionCoverage>,
+    pub(crate) hash: u64,
+}
+
 /// Engine A — the lazy op-node DAG plus its operation cache (spec §7.1).
 /// Nodes are appended by `source`/`apply` and never executed until a
 /// sink (`to_buffer`) pulls. The cache memoizes per-node materialized
@@ -92,6 +100,9 @@ pub struct Pipeline {
     /// identity is the leaf id, not the pixels). Mutation-driven content
     /// hashing arrives with Engine B.
     next_source_id: u64,
+    /// The bound selection (spec §6.1): `None` = the constant-1 mask
+    /// (Engine A's historic default — everything selected).
+    selection: Option<PipelineSelection>,
 }
 
 impl Pipeline {
@@ -142,6 +153,26 @@ impl Pipeline {
             op_id,
             decode_shrink,
         }))
+    }
+
+    /// Bind a SELECTION to the pipeline (spec §6.1 — the mask ABI's
+    /// first Engine A consumer): a full-image coverage field whose
+    /// per-tile r16float windows are bound at `@group(2)` for EVERY
+    /// apply-node dispatch, so each kernel stage applies
+    /// `out = mix(input, result, mask)` on the GPU. `None` restores the
+    /// constant-1 default (everything selected). The coverage's content
+    /// hash folds into every apply node's cache key — re-pulling under a
+    /// different selection recomputes instead of serving stale tiles.
+    ///
+    /// Windowed module kernels (the conv family) apply the same mask
+    /// themselves per the ABI v1.1 contract; `Resample`-class modules
+    /// write `result` unmasked (masked resample is reserved until the
+    /// selections companion spec — the honest ABI subset).
+    pub fn set_selection(&mut self, coverage: Option<Arc<SelectionCoverage>>) {
+        self.selection = coverage.map(|c| PipelineSelection {
+            hash: c.content_hash(),
+            coverage: c,
+        });
     }
 
     /// Apply a unary kernel to `input`. `params` is the kernel's
@@ -196,7 +227,14 @@ impl Pipeline {
         roi: Region,
         ctx: &GpuContext,
     ) -> Result<TileMap, PipelineError> {
-        sink::to_buffer(&self.nodes, &mut self.cache, node, roi, ctx)
+        sink::to_buffer(
+            &self.nodes,
+            &mut self.cache,
+            node,
+            roi,
+            ctx,
+            self.selection.as_ref(),
+        )
     }
 
     /// Stream `node`'s output over `roi` into an [`ImageTarget`],
@@ -224,7 +262,16 @@ impl Pipeline {
         target: &mut dyn ImageTarget,
         fmt: PixelFormat,
     ) -> Result<EncodedStats, PipelineError> {
-        sink::to_encoder(&self.nodes, &mut self.cache, node, roi, ctx, target, fmt)
+        sink::to_encoder(
+            &self.nodes,
+            &mut self.cache,
+            node,
+            roi,
+            ctx,
+            target,
+            fmt,
+            self.selection.as_ref(),
+        )
     }
 
     /// [`Self::to_buffer`]'s ASYNC twin — the wasm32/WebGPU lane, where a
@@ -238,7 +285,15 @@ impl Pipeline {
         roi: Region,
         ctx: &GpuContext,
     ) -> Result<TileMap, PipelineError> {
-        sink::to_buffer_async(&self.nodes, &mut self.cache, node, roi, ctx).await
+        sink::to_buffer_async(
+            &self.nodes,
+            &mut self.cache,
+            node,
+            roi,
+            ctx,
+            self.selection.as_ref(),
+        )
+        .await
     }
 
     /// [`Self::to_encoder`]'s ASYNC twin (see [`Self::to_buffer_async`]
@@ -252,7 +307,17 @@ impl Pipeline {
         target: &mut dyn ImageTarget,
         fmt: PixelFormat,
     ) -> Result<EncodedStats, PipelineError> {
-        sink::to_encoder_async(&self.nodes, &mut self.cache, node, roi, ctx, target, fmt).await
+        sink::to_encoder_async(
+            &self.nodes,
+            &mut self.cache,
+            node,
+            roi,
+            ctx,
+            target,
+            fmt,
+            self.selection.as_ref(),
+        )
+        .await
     }
 
     /// Cache hits since construction — the test hook proving a re-pull is
