@@ -19,7 +19,6 @@
       "images"
     ],
     "network": false,
-    "clipboard": "full",
     "workers": {
       "max": 4,
       "sharedMemory": true
@@ -38,8 +37,7 @@
   },
   "contributes": {
     "panels": [
-      "media.paged.image.panel.adjustments",
-      "panels/image-adjustments.panel.json"
+      "media.paged.image.panel.adjustments"
     ],
     "commands": [
       "media.paged.image.command.openImage",
