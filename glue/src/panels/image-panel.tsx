@@ -32,7 +32,7 @@ import type { CSSProperties } from "react";
 import manifest from "../../manifest.json";
 
 import type { ImageSession } from "../session";
-import type { AdjustParams, ImageHistogram } from "../engine";
+import type { AdjustParams, ImageHistogram, ResampleFilter } from "../engine";
 import type { AspectPreset } from "../crop-machine";
 
 const row: CSSProperties = {
@@ -263,6 +263,15 @@ export function makeImagePanel(session: ImageSession) {
 
     const s = session.state();
     const p = s.params;
+    const [resizeW, setResizeW] = useState(s.source?.width ?? 0);
+    const [resizeH, setResizeH] = useState(s.source?.height ?? 0);
+    const [resizeFilter, setResizeFilter] = useState<ResampleFilter>("lanczos3");
+    // Track the natural size when the source changes (a new import).
+    useEffect(() => {
+      setResizeW(s.source?.width ?? 0);
+      setResizeH(s.source?.height ?? 0);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.source?.handle]);
     const disabled = s.busy || !s.source;
     const engineLine =
       s.engine === "ready"
@@ -367,6 +376,50 @@ export function makeImagePanel(session: ImageSession) {
           />
           Invert colors
         </label>
+
+        {/* Resize — the T1 resample kernels (GPU-only; the button says so
+            when no device). Swaps the engine source like a crop commit. */}
+        <div style={sectionTitle}>Resize</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, font: "12px var(--font-sans, sans-serif)" }}>
+          <input
+            type="number"
+            min={1}
+            data-image-resize-w
+            value={resizeW}
+            onChange={(e) => setResizeW(Math.max(1, Number(e.target.value) | 0))}
+            style={{ width: 64, font: "11px var(--font-mono, monospace)" }}
+            disabled={disabled}
+          />
+          ×
+          <input
+            type="number"
+            min={1}
+            data-image-resize-h
+            value={resizeH}
+            onChange={(e) => setResizeH(Math.max(1, Number(e.target.value) | 0))}
+            style={{ width: 64, font: "11px var(--font-mono, monospace)" }}
+            disabled={disabled}
+          />
+          <select
+            data-image-resize-filter
+            value={resizeFilter}
+            onChange={(e) => setResizeFilter(e.target.value as ResampleFilter)}
+            disabled={disabled}
+          >
+            <option value="lanczos3">Lanczos 3</option>
+            <option value="mitchell">Mitchell</option>
+            <option value="nearest">Nearest</option>
+          </select>
+          <button
+            type="button"
+            data-image-resize-apply
+            disabled={disabled || !s.gpu}
+            title={s.gpu ? "Resample the source" : "Resample is GPU-only — no WebGPU device"}
+            onClick={() => void session.resizeTo(resizeW, resizeH, resizeFilter)}
+          >
+            Resample
+          </button>
+        </div>
 
         {/* PSD layers — the structural session (mutatable tier): record
             edits accumulate on the retained parse; Export Center's "PSD

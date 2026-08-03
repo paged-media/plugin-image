@@ -181,6 +181,9 @@ export interface DecodedInfo {
 
 /** The stable engine contract the bundle codes against. Every method
  *  forwards to the wasm surface; the facade only renames + shapes. */
+/** The T1 resample kernels the resize door accepts. */
+export type ResampleFilter = "nearest" | "mitchell" | "lanczos3";
+
 /** One PSD layer-record row (`psd_layer_list`), record order. */
 export interface PsdLayerInfo {
   index: number;
@@ -251,6 +254,14 @@ export interface ImageEngine {
   /** Build a 256-byte tone LUT from the curve editor's `(input, output)`
    *  control points in [0,1] (the LUT `adjust` consumes for curves). */
   curveLut(points: Array<[number, number]>): Uint8Array;
+  /** RESAMPLE to a new size through the T1 kernels (GPU-only; requires
+   *  initGpu). Returns a NEW engine-held image; the source stays. */
+  resize(
+    handle: number,
+    outW: number,
+    outH: number,
+    filter: ResampleFilter,
+  ): Promise<DecodedInfo>;
   /** PSD structural session — the mutatable tier's wasm reach ("Paged
    *  never destroys a PSD" was a Rust-test-only property until these).
    *  `psdOpen` retains the PARSED file behind a handle; edits accumulate
@@ -366,6 +377,12 @@ export interface ImageWasmModule {
     h: number,
   ): Uint8Array;
   free_image(handle: number): void;
+  resize_image(
+    handle: number,
+    outW: number,
+    outH: number,
+    filter: string,
+  ): Promise<DecodedHandleWasm>;
   psd_open(bytes: Uint8Array): number;
   psd_layer_list(handle: number): string;
   psd_set_layer_opacity(handle: number, layer: number, opacity: number): void;
@@ -432,6 +449,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.hueDegrees,
         p.invert,
       );
+    },
+    resize: async (handle, outW, outH, filter) => {
+      const h = await wasm.resize_image(handle, outW, outH, filter);
+      const info = { handle: h.handle, width: h.width, height: h.height };
+      h.free();
+      return info;
     },
     psdOpen: (bytes) => wasm.psd_open(bytes),
     psdLayers: (handle) => JSON.parse(wasm.psd_layer_list(handle)) as PsdLayerInfo[],

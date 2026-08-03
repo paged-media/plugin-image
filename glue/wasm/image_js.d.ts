@@ -213,6 +213,17 @@ export function psd_set_layer_name(handle: number, layer: number, name: string):
  */
 export function psd_set_layer_opacity(handle: number, layer: number, opacity: number): void;
 
+/**
+ * RESAMPLE an engine-held image to `out_w`×`out_h` and register the
+ * result as a NEW engine-held image (the source stays intact — the
+ * crop precedent). `filter` ∈ nearest | mitchell | lanczos3 (the T1
+ * resample kernels, GPU-only per spec §6 — requires `init_gpu`;
+ * there is no CPU fallback and this rejects honestly without one).
+ * Rides the async windowed dispatch (a blocking readback cannot
+ * pump the map callback on wasm).
+ */
+export function resize_image(handle: number, out_w: number, out_h: number, filter: string): Promise<DecodedHandle>;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -250,6 +261,7 @@ export interface InitOutput {
     readonly psd_save: (a: number) => [number, number, number];
     readonly psd_set_layer_name: (a: number, b: number, c: number, d: number) => [number, number];
     readonly psd_set_layer_opacity: (a: number, b: number, c: number) => [number, number];
+    readonly resize_image: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly qcms_enable_iccv4: () => void;
     readonly qcms_profile_precache_output_transform: (a: number) => void;
     readonly qcms_transform_data_bgra_out_lut: (a: number, b: number, c: number, d: number) => void;

@@ -39,6 +39,7 @@ import {
   type ImageEngine,
   type ImageHistogram,
   type PsdLayerInfo,
+  type ResampleFilter,
   type LevelsParams,
 } from "./engine";
 import { claimImageTiles } from "./tile-provider";
@@ -103,6 +104,10 @@ export interface ImageSession {
   ingestSelection(): Promise<boolean>;
   /** Ingest opened/dropped file bytes (the K-2 importer path). */
   importBytes(name: string, bytes: Uint8Array): Promise<boolean>;
+  /** RESAMPLE the engine-held source to a new pixel size (GPU-only —
+   *  rejects honestly without a device). Swaps the source like a crop
+   *  commit: document unchanged until Apply re-composites. */
+  resizeTo(w: number, h: number, filter: ResampleFilter): Promise<boolean>;
   /** PSD layer-record edits (only when `state().psd` is set). Each
    *  applies to the retained parse and refreshes the layer list. */
   psdSetLayerOpacity(index: number, opacity: number): boolean;
@@ -572,6 +577,36 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     cropMachine() {
       return cropMachineRef;
+    },
+
+    async resizeTo(w, h, filter) {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing to resize — ingest an image first.");
+        return false;
+      }
+      let resized: { handle: number; width: number; height: number };
+      try {
+        resized = await engine.resize(src.handle, w, h, filter);
+      } catch (err) {
+        setStatus(`Resize failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+      // Swap the engine-held source (the crop-commit pattern): release
+      // the tile claim on the old handle, free it, adopt the new.
+      releaseTiles();
+      engine.freeImage(src.handle);
+      src.handle = resized.handle;
+      src.width = resized.width;
+      src.height = resized.height;
+      refreshSourceReadout();
+      setStatus(
+        `Resampled to ${resized.width}×${resized.height} (${filter}) — ` +
+          "document unchanged; Apply to recomposite.",
+      );
+      emit();
+      return true;
     },
 
     async commitCrop() {

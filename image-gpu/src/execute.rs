@@ -156,6 +156,55 @@ pub fn execute_windowed_once(
     run_common(ctx, &pipeline, &[&in_view], def, params, mask, out_w, out_h)
 }
 
+/// [`execute_windowed_once`]'s ASYNC twin — the identical recorded
+/// dispatch with an awaited readback map, for the wasm32/WebGPU realm
+/// where a blocking `device.poll` cannot pump the map callback (the
+/// `execute_tile_once_async` precedent). The resample doors ride this.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_windowed_once_async(
+    ctx: &GpuContext,
+    def: &'static KernelDef,
+    win_bytes: &[u8],
+    win_w: u32,
+    win_h: u32,
+    params: &[u8],
+    mask: Option<&[u8]>,
+    out_w: u32,
+    out_h: u32,
+) -> Result<Vec<u8>, GpuError> {
+    if def.inputs != 1 {
+        return Err(GpuError::Kernel {
+            kernel: def.id,
+            detail: "windowed execution is unary (T1)".into(),
+        });
+    }
+    if params.len() != def.params.size {
+        return Err(GpuError::Kernel {
+            kernel: def.id,
+            detail: format!(
+                "param block {} bytes, layout says {}",
+                params.len(),
+                def.params.size
+            ),
+        });
+    }
+    let pipeline = KernelPipeline::build(ctx, def);
+    let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+    let in_tex = make_texture(
+        ctx,
+        &format!("{} window", def.id),
+        win_w,
+        win_h,
+        wgpu::TextureFormat::Rgba16Float,
+        in_usage,
+    );
+    upload_f16(ctx, &in_tex, win_w, win_h, win_bytes);
+    let in_view = in_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    record_common(ctx, &pipeline, &[&in_view], def, params, mask, out_w, out_h)?
+        .finish_async(ctx)
+        .await
+}
+
 /// Execute `def` over one `w`×`h` tile. `inputs.len()` must equal
 /// `def.inputs`; `params` must be the param block's bytes
 /// (`Params::as_bytes()`); `mask` is r16float texel bytes or `None`

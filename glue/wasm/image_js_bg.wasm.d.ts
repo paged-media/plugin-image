@@ -34,6 +34,7 @@ export const psd_remove_layer: (a: number, b: number) => [number, number];
 export const psd_save: (a: number) => [number, number, number];
 export const psd_set_layer_name: (a: number, b: number, c: number, d: number) => [number, number];
 export const psd_set_layer_opacity: (a: number, b: number, c: number) => [number, number];
+export const resize_image: (a: number, b: number, c: number, d: number, e: number) => any;
 export const qcms_enable_iccv4: () => void;
 export const qcms_profile_precache_output_transform: (a: number) => void;
 export const qcms_transform_data_bgra_out_lut: (a: number, b: number, c: number, d: number) => void;

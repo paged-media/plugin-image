@@ -588,6 +588,89 @@ mod wasm {
         });
     }
 
+    /// RESAMPLE an engine-held image to `out_w`×`out_h` and register the
+    /// result as a NEW engine-held image (the source stays intact — the
+    /// crop precedent). `filter` ∈ nearest | mitchell | lanczos3 (the T1
+    /// resample kernels, GPU-only per spec §6 — requires `init_gpu`;
+    /// there is no CPU fallback and this rejects honestly without one).
+    /// Rides the async windowed dispatch (a blocking readback cannot
+    /// pump the map callback on wasm).
+    #[wasm_bindgen]
+    pub async fn resize_image(
+        handle: u32,
+        out_w: u32,
+        out_h: u32,
+        filter: &str,
+    ) -> Result<DecodedHandle, JsValue> {
+        use half::f16;
+        use image_kernels::families::resample::{
+            ResampleParams, RESAMPLE_LANCZOS3, RESAMPLE_MITCHELL, RESAMPLE_NEAREST,
+        };
+
+        if out_w == 0 || out_h == 0 {
+            return Err(JsValue::from_str("resize: target size must be non-zero"));
+        }
+        let ctx = GPU
+            .with(|g| g.borrow().clone())
+            .ok_or_else(|| JsValue::from_str("resize is GPU-only — call init_gpu first"))?;
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let def = match filter {
+            "nearest" => &RESAMPLE_NEAREST,
+            "mitchell" => &RESAMPLE_MITCHELL,
+            "lanczos3" => &RESAMPLE_LANCZOS3,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "unknown resample filter \"{other}\" (nearest | mitchell | lanczos3)"
+                )))
+            }
+        };
+        let params = ResampleParams::new(
+            img.width as f32 / out_w as f32,
+            img.height as f32 / out_h as f32,
+            0.0,
+            0.0,
+        );
+        // RGBA8 → rgba16float window (straight /255 — the I-02 working
+        // values, same as the decode bridge).
+        let mut win = Vec::with_capacity(img.rgba.len() * 2);
+        for &b in img.rgba.iter() {
+            win.extend_from_slice(&f16::from_f32(b as f32 / 255.0).to_le_bytes());
+        }
+        let out = image_gpu::execute_windowed_once_async(
+            &ctx,
+            def,
+            &win,
+            img.width,
+            img.height,
+            params.as_bytes(),
+            None,
+            out_w,
+            out_h,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let mut rgba = Vec::with_capacity((out_w as usize) * (out_h as usize) * 4);
+        for pair in out.chunks_exact(2) {
+            let v = f16::from_le_bytes([pair[0], pair[1]]).to_f32();
+            rgba.push((v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+        let resized = DecodedImage::from_rgba8(out_w, out_h, rgba)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let new_handle = NEXT_HANDLE.with(|n| {
+            let h = n.get();
+            n.set(h + 1);
+            h
+        });
+        IMAGES.with(|m| m.borrow_mut().insert(new_handle, resized));
+        Ok(DecodedHandle {
+            handle: new_handle,
+            width: out_w,
+            height: out_h,
+        })
+    }
+
     // ─────────────────────────── PSD doors ───────────────────────────
     //
     // The mutatable tier (image-psd edit.rs: opacity / rename / remove +

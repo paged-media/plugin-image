@@ -509,6 +509,27 @@ export function psd_set_layer_opacity(handle, layer, opacity) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
+
+/**
+ * RESAMPLE an engine-held image to `out_w`×`out_h` and register the
+ * result as a NEW engine-held image (the source stays intact — the
+ * crop precedent). `filter` ∈ nearest | mitchell | lanczos3 (the T1
+ * resample kernels, GPU-only per spec §6 — requires `init_gpu`;
+ * there is no CPU fallback and this rejects honestly without one).
+ * Rides the async windowed dispatch (a blocking readback cannot
+ * pump the map callback on wasm).
+ * @param {number} handle
+ * @param {number} out_w
+ * @param {number} out_h
+ * @param {string} filter
+ * @returns {Promise<DecodedHandle>}
+ */
+export function resize_image(handle, out_w, out_h, filter) {
+    const ptr0 = passStringToWasm0(filter, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.resize_image(handle, out_w, out_h, ptr0, len0);
+    return ret;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -592,6 +613,10 @@ function __wbg_get_imports() {
             const ret = arg0.createView(arg1);
             return ret;
         }, arguments); },
+        __wbg_decodedhandle_new: function(arg0) {
+            const ret = DecodedHandle.__wrap(arg0);
+            return ret;
+        },
         __wbg_description_f6ebcdce701b056b: function(arg0, arg1) {
             const ret = arg1.description;
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1196,12 +1221,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 152, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 165, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 188, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 201, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },
