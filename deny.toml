@@ -31,6 +31,15 @@ allow = [
     "Unicode-DFS-2016",
     "CC0-1.0",
     "BSL-1.0",
+    # IJG (Independent JPEG Group) — permissive, NOT copyleft. Reaches us
+    # through `jpeg-encoder`, whose `src/fdct.rs` is a Rust port of
+    # libjpeg-turbo's forward DCT; hence its `(MIT OR Apache-2.0) AND IJG`
+    # expression. The terms grant use "for any purpose, without fee" with
+    # no source-disclosure or reciprocal condition. The ONE obligation that
+    # binds a binary distribution is attribution — see NOTICE.md, which
+    # carries the required wording. Keep that file in sync if the JPEG
+    # dependency changes.
+    "IJG",
 ]
 exceptions = []
 

@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "build": "tsup",
-    "prepublishOnly": "pnpm run build"
+    "prepublishOnly": "cp ../NOTICE.md ./NOTICE.md && pnpm run build"
   },
   "dependencies": {
     "@paged-media/plugin-api": "0.2.25-canary.0",
@@ -34,7 +34,8 @@
     "dist",
     "wasm",
     "manifest.json",
-    "panels"
+    "panels",
+    "NOTICE.md"
   ],
   "publishConfig": {
     "access": "public",

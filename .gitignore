@@ -18,3 +18,7 @@ dist/
 manifest/wasm/*.wasm
 manifest/wasm/*.js
 manifest/wasm/*.d.ts
+
+# copied from the repo-root NOTICE.md by glue prepublishOnly (IJG attribution
+# must ship in the npm tarball alongside the wasm it applies to)
+glue/NOTICE.md
