@@ -51,6 +51,79 @@ export function adjust_image_ext(handle: number, exposure_ev: number, brightness
 export function adjust_image_full(handle: number, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean): Promise<Uint8Array>;
 
 /**
+ * Every blend mode a stroke can paint through, newline-separated —
+ * derived from the `compose.*` registry so the panel's picker can
+ * never drift from the kernels that actually exist.
+ */
+export function brush_blend_modes(): string;
+
+/**
+ * Is a stroke in progress?
+ */
+export function brush_stroke_active(): boolean;
+
+/**
+ * BEGIN a stroke on the engine-held image `handle`.
+ *
+ * `tool` ∈ `brush | pencil | eraser`; `blend` is a `compose.*`
+ * kernel name with the prefix optional (`"multiply"` or
+ * `"compose.multiply"`); `pressure_target` ∈
+ * `none | size | opacity | both` selects what the pen's pressure
+ * drives (default `both` — size AND opacity, the Photoshop pen
+ * preset). `color` is 4 straight RGBA floats in `[0, 1]`.
+ *
+ * PRESSURE, honestly: `PointerEvent.pressure` is a constant `0.5`
+ * for a mouse and a real reading only for a pen. The CALLER
+ * normalizes — the glue passes `1.0` for a mouse so a mouse stroke
+ * is not permanently half-size — and this door takes whatever it is
+ * given verbatim so a recorded stroke replays identically.
+ *
+ * Parameters are FROZEN for the stroke's duration: a stroke whose
+ * size changed halfway through would not be replayable.
+ * GPU-only — rejects without `init_gpu`.
+ */
+export function brush_stroke_begin(handle: number, tool: string, size: number, hardness: number, opacity: number, flow: number, spacing: number, blend: string, color: Float32Array, pressure_target: string): void;
+
+/**
+ * CANCEL the stroke: throw the painted pixels away. The engine-held
+ * source was never mutated, so this restores it exactly.
+ */
+export function brush_stroke_cancel(): void;
+
+/**
+ * COMMIT the stroke: register the painted pixels as a NEW
+ * engine-held image and return its handle. The source handle is
+ * left for the caller to free (the crop / fill commit pattern).
+ *
+ * The result is the same size, so the caller may carry the
+ * selection over with `selection_transfer`.
+ */
+export function brush_stroke_commit(): DecodedHandle;
+
+/**
+ * EXTEND the stroke with one pointer sample (image px + normalized
+ * pressure) and return the resulting straight RGBA8 for the WHOLE
+ * image — the C-1 Stage-A preview payload.
+ *
+ * Dabs are interpolated from the previous sample at
+ * `spacing · diameter` px of arc length (the residual carries across
+ * samples), so a fast drag paints a continuous stroke rather than
+ * one dot per pointer event. Only the dirty rectangle is
+ * re-composited, always FROM the base pixels, so extending is
+ * idempotent and the incremental result equals a from-scratch
+ * composite of the same samples.
+ */
+export function brush_stroke_extend(x: number, y: number, pressure: number): Promise<Uint8Array>;
+
+/**
+ * The in-flight stroke's readout for the panel:
+ * `[dabs, x, y, w, h]` — the dab count and the stroke's bounding
+ * box in image px. Empty when no stroke is in progress or nothing
+ * has landed on the canvas yet.
+ */
+export function brush_stroke_stats(): Float64Array;
+
+/**
  * Apply a pointer drag from `(sx, sy)` to `(px, py)` (image-px) to the
  * rect `[x, y, w, h]` at `handle` (the [`crop_hit_handle`]
  * discriminant), with the aspect lock + image-extent clamp. Returns
@@ -405,6 +478,13 @@ export interface InitOutput {
     readonly adjust_image: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly adjust_image_ext: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => any;
     readonly adjust_image_full: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => any;
+    readonly brush_blend_modes: () => [number, number];
+    readonly brush_stroke_active: () => number;
+    readonly brush_stroke_begin: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
+    readonly brush_stroke_cancel: () => void;
+    readonly brush_stroke_commit: () => [number, number, number];
+    readonly brush_stroke_extend: (a: number, b: number, c: number) => any;
+    readonly brush_stroke_stats: () => [number, number];
     readonly crop_apply_drag: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
     readonly crop_frame_corners: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly crop_hit_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;

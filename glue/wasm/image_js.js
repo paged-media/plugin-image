@@ -164,6 +164,140 @@ export function adjust_image_full(handle, exposure_ev, brightness, contrast, sat
 }
 
 /**
+ * Every blend mode a stroke can paint through, newline-separated —
+ * derived from the `compose.*` registry so the panel's picker can
+ * never drift from the kernels that actually exist.
+ * @returns {string}
+ */
+export function brush_blend_modes() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.brush_blend_modes();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Is a stroke in progress?
+ * @returns {boolean}
+ */
+export function brush_stroke_active() {
+    const ret = wasm.brush_stroke_active();
+    return ret !== 0;
+}
+
+/**
+ * BEGIN a stroke on the engine-held image `handle`.
+ *
+ * `tool` ∈ `brush | pencil | eraser`; `blend` is a `compose.*`
+ * kernel name with the prefix optional (`"multiply"` or
+ * `"compose.multiply"`); `pressure_target` ∈
+ * `none | size | opacity | both` selects what the pen's pressure
+ * drives (default `both` — size AND opacity, the Photoshop pen
+ * preset). `color` is 4 straight RGBA floats in `[0, 1]`.
+ *
+ * PRESSURE, honestly: `PointerEvent.pressure` is a constant `0.5`
+ * for a mouse and a real reading only for a pen. The CALLER
+ * normalizes — the glue passes `1.0` for a mouse so a mouse stroke
+ * is not permanently half-size — and this door takes whatever it is
+ * given verbatim so a recorded stroke replays identically.
+ *
+ * Parameters are FROZEN for the stroke's duration: a stroke whose
+ * size changed halfway through would not be replayable.
+ * GPU-only — rejects without `init_gpu`.
+ * @param {number} handle
+ * @param {string} tool
+ * @param {number} size
+ * @param {number} hardness
+ * @param {number} opacity
+ * @param {number} flow
+ * @param {number} spacing
+ * @param {string} blend
+ * @param {Float32Array} color
+ * @param {string} pressure_target
+ */
+export function brush_stroke_begin(handle, tool, size, hardness, opacity, flow, spacing, blend, color, pressure_target) {
+    const ptr0 = passStringToWasm0(tool, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(blend, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayF32ToWasm0(color, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passStringToWasm0(pressure_target, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.brush_stroke_begin(handle, ptr0, len0, size, hardness, opacity, flow, spacing, ptr1, len1, ptr2, len2, ptr3, len3);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * CANCEL the stroke: throw the painted pixels away. The engine-held
+ * source was never mutated, so this restores it exactly.
+ */
+export function brush_stroke_cancel() {
+    wasm.brush_stroke_cancel();
+}
+
+/**
+ * COMMIT the stroke: register the painted pixels as a NEW
+ * engine-held image and return its handle. The source handle is
+ * left for the caller to free (the crop / fill commit pattern).
+ *
+ * The result is the same size, so the caller may carry the
+ * selection over with `selection_transfer`.
+ * @returns {DecodedHandle}
+ */
+export function brush_stroke_commit() {
+    const ret = wasm.brush_stroke_commit();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return DecodedHandle.__wrap(ret[0]);
+}
+
+/**
+ * EXTEND the stroke with one pointer sample (image px + normalized
+ * pressure) and return the resulting straight RGBA8 for the WHOLE
+ * image — the C-1 Stage-A preview payload.
+ *
+ * Dabs are interpolated from the previous sample at
+ * `spacing · diameter` px of arc length (the residual carries across
+ * samples), so a fast drag paints a continuous stroke rather than
+ * one dot per pointer event. Only the dirty rectangle is
+ * re-composited, always FROM the base pixels, so extending is
+ * idempotent and the incremental result equals a from-scratch
+ * composite of the same samples.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} pressure
+ * @returns {Promise<Uint8Array>}
+ */
+export function brush_stroke_extend(x, y, pressure) {
+    const ret = wasm.brush_stroke_extend(x, y, pressure);
+    return ret;
+}
+
+/**
+ * The in-flight stroke's readout for the panel:
+ * `[dabs, x, y, w, h]` — the dab count and the stroke's bounding
+ * box in image px. Empty when no stroke is in progress or nothing
+ * has landed on the canvas yet.
+ * @returns {Float64Array}
+ */
+export function brush_stroke_stats() {
+    const ret = wasm.brush_stroke_stats();
+    var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+    return v1;
+}
+
+/**
  * Apply a pointer drag from `(sx, sy)` to `(px, py)` (image-px) to the
  * rect `[x, y, w, h]` at `handle` (the [`crop_hit_handle`]
  * discriminant), with the aspect lock + image-extent clamp. Returns
@@ -1574,12 +1708,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 284, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 285, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 320, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 321, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },
@@ -1596,6 +1730,13 @@ function __wbg_get_imports() {
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000006: function(arg0, arg1) {
+            var v0 = getArrayU8FromWasm0(arg0, arg1).slice();
+            wasm.__wbindgen_free(arg0, arg1 * 1, 1);
+            // Cast intrinsic for `Vector(U8) -> Externref`.
+            const ret = v0;
             return ret;
         },
         __wbindgen_init_externref_table: function() {
@@ -1739,6 +1880,11 @@ function getArrayF32FromWasm0(ptr, len) {
     return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
+function getArrayF64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
 function getArrayU32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
@@ -1763,6 +1909,14 @@ function getFloat32ArrayMemory0() {
         cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
     }
     return cachedFloat32ArrayMemory0;
+}
+
+let cachedFloat64ArrayMemory0 = null;
+function getFloat64ArrayMemory0() {
+    if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
+        cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
+    }
+    return cachedFloat64ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -1919,6 +2073,7 @@ function __wbg_finalize_init(instance, module) {
     wasmModule = module;
     cachedDataViewMemory0 = null;
     cachedFloat32ArrayMemory0 = null;
+    cachedFloat64ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();

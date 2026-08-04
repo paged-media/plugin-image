@@ -65,6 +65,19 @@ pub mod selection;
 // CPU orchestration); consumption stays GPU-only via the ABI mask.
 pub mod coverage;
 
+// The PAINTING half of the mask model (spec §6.1's coverage lane, turned
+// around): the brush tip's analytic dab coverage, the arc-length stroke
+// interpolation, and the per-stroke accumulation buffer whose lowered
+// window IS the ABI mask a dab composites under. Mask PREP, exactly like
+// `coverage` — no image pixel is touched here.
+pub mod dab;
+
+// …and its GPU half: the stroke compositor. Turns a coverage window into
+// pixels through registered kernels ONLY (`gen.solid` + `cast.*` +
+// `compose.*` for paint, `band.set_alpha` for erase) — no new kernel, no
+// CPU blend.
+pub mod stroke;
+
 // T3 breadth op (spec §11): a CPU two-pass chamfer/Euclidean-approx
 // distance transform over a binary mask tile. Sequential/iterative (the
 // GPU jump-flood version is the M3 follow-up — see the module docs), so
@@ -74,6 +87,9 @@ pub mod coverage;
 pub mod distance;
 
 pub use coverage::{CombineMode, SelectionCoverage};
+pub use dab::{
+    plan_segment, BrushTip, Dab, PressureTarget, StrokeAccumulator, StrokeSample, StrokeWalk,
+};
 pub use device::GpuContext;
 pub use dispatch::{BatchTile, DispatchBatch};
 pub use distance::{distance_transform, DistanceParams, MaskChannel};
@@ -89,6 +105,7 @@ pub use reduce::{
 };
 pub use residency::{Acquired, ResidencyManager, Tier, HEAP_TILE_BYTES};
 pub use selection::SelectionMask;
+pub use stroke::{composite_stroke_window, PaintMode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {

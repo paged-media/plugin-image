@@ -57,6 +57,7 @@ pub mod ingest;
 pub mod mip;
 pub mod saveback;
 pub mod selection;
+pub mod stroke;
 
 /// The frozen kernel ABI version this artifact was built against.
 pub fn abi_version() -> u32 {
@@ -85,6 +86,8 @@ mod wasm {
     use crate::mip::MipPyramid;
     use crate::saveback::{encode_rgba8, psd_write_adjusted, RasterFormat};
     use crate::selection::SessionSelection;
+    use crate::stroke::{blend_kernel, blend_names, StrokeParams, StrokeSession, StrokeTool};
+    use image_gpu::dab::{PressureTarget, StrokeSample};
 
     thread_local! {
         /// The bundle-realm GPU device (I-07: created HERE, where
@@ -1098,6 +1101,205 @@ mod wasm {
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         register(img.width, img.height, out)
+    }
+
+    // ───────────────────────── PAINT doors ───────────────────────────
+    //
+    // One in-flight stroke per wasm realm, mirroring the crop tool's
+    // shape: begin → extend* → commit | cancel. The engine holds the
+    // base snapshot and the coverage accumulator; the glue holds only
+    // pointer samples, so a stroke is replayable from a recorded action.
+    //
+    // HONEST SCOPE — no layer graph. A stroke paints into the SINGLE
+    // engine-held image behind `handle`. There is no paint layer and
+    // nothing above the photo; `brush_stroke_commit` registers a NEW
+    // engine-held image (the crop / fill commit pattern) and the caller
+    // swaps handles. The DOCUMENT and the source file are untouched —
+    // re-ingesting the frame is the only restore this plugin owns.
+    //
+    // LATENCY — every `brush_stroke_extend` reads the composited window
+    // back to the CPU and returns the WHOLE image as RGBA8, because the
+    // C-1 Stage-A scene item takes bytes (Stage B, the resident GPU
+    // texture, is deferred by ADR-018 / RFI I-01). The dirty-rectangle
+    // composite keeps the GPU work proportional to the dabs, but the
+    // per-extend byte copy is proportional to the IMAGE. `crate::stroke`
+    // records exactly what Engine B would have to expose to remove it.
+
+    thread_local! {
+        // The single in-flight stroke (one per realm, like the selection).
+        static STROKE: RefCell<Option<StrokeSession>> = const { RefCell::new(None) };
+    }
+
+    /// BEGIN a stroke on the engine-held image `handle`.
+    ///
+    /// `tool` ∈ `brush | pencil | eraser`; `blend` is a `compose.*`
+    /// kernel name with the prefix optional (`"multiply"` or
+    /// `"compose.multiply"`); `pressure_target` ∈
+    /// `none | size | opacity | both` selects what the pen's pressure
+    /// drives (default `both` — size AND opacity, the Photoshop pen
+    /// preset). `color` is 4 straight RGBA floats in `[0, 1]`.
+    ///
+    /// PRESSURE, honestly: `PointerEvent.pressure` is a constant `0.5`
+    /// for a mouse and a real reading only for a pen. The CALLER
+    /// normalizes — the glue passes `1.0` for a mouse so a mouse stroke
+    /// is not permanently half-size — and this door takes whatever it is
+    /// given verbatim so a recorded stroke replays identically.
+    ///
+    /// Parameters are FROZEN for the stroke's duration: a stroke whose
+    /// size changed halfway through would not be replayable.
+    /// GPU-only — rejects without `init_gpu`.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn brush_stroke_begin(
+        handle: u32,
+        tool: &str,
+        size: f32,
+        hardness: f32,
+        opacity: f32,
+        flow: f32,
+        spacing: f32,
+        blend: &str,
+        color: Vec<f32>,
+        pressure_target: &str,
+    ) -> Result<(), JsValue> {
+        let tool = StrokeTool::from_wire(tool).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown paint tool \"{tool}\" (brush | pencil | eraser)"
+            ))
+        })?;
+        let blend_kernel = blend_kernel(blend).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown blend mode \"{blend}\" (a compose.* kernel name)"
+            ))
+        })?;
+        let pressure = PressureTarget::from_wire(pressure_target).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown pressure target \"{pressure_target}\" \
+                 (none | size | opacity | both)"
+            ))
+        })?;
+        if color.len() != 4 {
+            return Err(JsValue::from_str(
+                "brush colour must be 4 floats (straight RGBA in [0,1])",
+            ));
+        }
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        if !gpu_ready() {
+            return Err(JsValue::from_str(
+                "painting is GPU-only — call init_gpu first (the dab composite \
+                 is a registered WGSL kernel dispatch; no CPU blend path ships)",
+            ));
+        }
+        let params = StrokeParams {
+            tool,
+            size,
+            hardness,
+            opacity,
+            flow,
+            spacing,
+            blend: blend_kernel,
+            color: [color[0], color[1], color[2], color[3]],
+            pressure,
+        };
+        // The selection is frozen at begin — a stroke never half-honours
+        // a selection that changed mid-drag.
+        let sel = SELECTION.with(|s| s.borrow().mask_for(handle));
+        let session = StrokeSession::begin(handle, &img, params, sel)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        STROKE.with(|s| *s.borrow_mut() = Some(session));
+        Ok(())
+    }
+
+    /// EXTEND the stroke with one pointer sample (image px + normalized
+    /// pressure) and return the resulting straight RGBA8 for the WHOLE
+    /// image — the C-1 Stage-A preview payload.
+    ///
+    /// Dabs are interpolated from the previous sample at
+    /// `spacing · diameter` px of arc length (the residual carries across
+    /// samples), so a fast drag paints a continuous stroke rather than
+    /// one dot per pointer event. Only the dirty rectangle is
+    /// re-composited, always FROM the base pixels, so extending is
+    /// idempotent and the incremental result equals a from-scratch
+    /// composite of the same samples.
+    #[wasm_bindgen]
+    pub async fn brush_stroke_extend(x: f32, y: f32, pressure: f32) -> Result<Vec<u8>, JsValue> {
+        let ctx = GPU
+            .with(|g| g.borrow().clone())
+            .ok_or_else(|| JsValue::from_str("painting is GPU-only — call init_gpu first"))?;
+        // The session is taken out for the await (no RefCell across a
+        // suspension point) and put back after.
+        let mut session = STROKE
+            .with(|s| s.borrow_mut().take())
+            .ok_or_else(|| JsValue::from_str("no stroke in progress (brush_stroke_begin first)"))?;
+        let result = session
+            .extend(&ctx, StrokeSample::new(x, y, pressure))
+            .await;
+        let pixels = session.pixels().to_vec();
+        STROKE.with(|s| *s.borrow_mut() = Some(session));
+        result.map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(pixels)
+    }
+
+    /// COMMIT the stroke: register the painted pixels as a NEW
+    /// engine-held image and return its handle. The source handle is
+    /// left for the caller to free (the crop / fill commit pattern).
+    ///
+    /// The result is the same size, so the caller may carry the
+    /// selection over with `selection_transfer`.
+    #[wasm_bindgen]
+    pub fn brush_stroke_commit() -> Result<DecodedHandle, JsValue> {
+        let session = STROKE
+            .with(|s| s.borrow_mut().take())
+            .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
+        let (w, h) = (session.width(), session.height());
+        register(w, h, session.commit())
+    }
+
+    /// CANCEL the stroke: throw the painted pixels away. The engine-held
+    /// source was never mutated, so this restores it exactly.
+    #[wasm_bindgen]
+    pub fn brush_stroke_cancel() {
+        STROKE.with(|s| *s.borrow_mut() = None);
+    }
+
+    /// Is a stroke in progress?
+    #[wasm_bindgen]
+    pub fn brush_stroke_active() -> bool {
+        STROKE.with(|s| s.borrow().is_some())
+    }
+
+    /// The in-flight stroke's readout for the panel:
+    /// `[dabs, x, y, w, h]` — the dab count and the stroke's bounding
+    /// box in image px. Empty when no stroke is in progress or nothing
+    /// has landed on the canvas yet.
+    #[wasm_bindgen]
+    pub fn brush_stroke_stats() -> Vec<f64> {
+        STROKE.with(|s| {
+            let b = s.borrow();
+            let Some(session) = b.as_ref() else {
+                return Vec::new();
+            };
+            let Some(r) = session.stroke_bounds() else {
+                return Vec::new();
+            };
+            vec![
+                session.dab_count() as f64,
+                r.x as f64,
+                r.y as f64,
+                r.w as f64,
+                r.h as f64,
+            ]
+        })
+    }
+
+    /// Every blend mode a stroke can paint through, newline-separated —
+    /// derived from the `compose.*` registry so the panel's picker can
+    /// never drift from the kernels that actually exist.
+    #[wasm_bindgen]
+    pub fn brush_blend_modes() -> String {
+        blend_names().join("\n")
     }
 
     // ──────────────────────── SAVE-BACK doors ────────────────────────
