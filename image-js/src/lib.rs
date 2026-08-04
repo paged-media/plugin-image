@@ -47,6 +47,13 @@
 //! payload destined for the HOST scene channel — the narrowed §2.1.3
 //! contract the C-1 spike records.
 //!
+//! THE LAYER GRAPH (`layers_*`) is bound the same way the selection is:
+//! one stack per realm, tied to an engine-held image handle, whose
+//! COMPOSITE is written back into that same handle. So paint, fills and
+//! bakes land in the ACTIVE LAYER (journaled — `layers_undo`), while
+//! every other lane here keeps addressing one handle and never has to
+//! learn what a layer is.
+//!
 //! The release-build guarantee proven by CI: NO reference code
 //! (image-conformance / `image-kernels` feature `reference`) is
 //! reachable from this crate (cargo-tree guard, spec §4 dep rule 2).
@@ -54,6 +61,7 @@
 pub mod cmyk;
 pub mod fill;
 pub mod ingest;
+pub mod layers;
 pub mod mip;
 pub mod saveback;
 pub mod selection;
@@ -74,6 +82,7 @@ mod wasm {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     use image_gpu::{CombineMode, GpuContext, SelectionCoverage};
     use wasm_bindgen::prelude::*;
@@ -81,8 +90,9 @@ mod wasm {
     use crate::fill::{fill_rgba8, FillSpec, GradientKind};
     use crate::ingest::{
         adjust_rgba8, crop_rgba8, decode_rgba8, straighten_crop_rgba8, AdjustParams, DecodedImage,
-        LevelsParams,
+        IngestError, LevelsParams,
     };
+    use crate::layers::LayerStack;
     use crate::mip::MipPyramid;
     use crate::saveback::{encode_rgba8, psd_write_adjusted, RasterFormat};
     use crate::selection::SessionSelection;
@@ -331,6 +341,52 @@ mod wasm {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let params = build_adjust_params(
+            exposure_ev,
+            brightness,
+            contrast,
+            saturation,
+            temp,
+            tint,
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+            curve_lut,
+            blur_sigma,
+            sharpen_amount,
+            hue_degrees,
+            invert,
+            ext,
+        )?;
+        run_adjust(handle, &img, params).await
+    }
+
+    /// Decode the flat adjust wire block into [`AdjustParams`]. Shared by
+    /// `adjust_image_ext` (the re-runnable PREVIEW chain) and
+    /// `layers_bake_adjust` (the DESTRUCTIVE per-layer bake) so the two
+    /// can never interpret the same wire differently.
+    #[allow(clippy::too_many_arguments)]
+    fn build_adjust_params(
+        exposure_ev: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        temp: f32,
+        tint: f32,
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+        curve_lut: &[u8],
+        blur_sigma: f32,
+        sharpen_amount: f32,
+        hue_degrees: f32,
+        invert: bool,
+        ext: &[f32],
+    ) -> Result<AdjustParams, JsValue> {
         let lut = if curve_lut.len() == 256 {
             let mut a = [0u8; 256];
             a.copy_from_slice(curve_lut);
@@ -367,7 +423,7 @@ mod wasm {
         params
             .apply_extended(ext)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        run_adjust(handle, &img, params).await
+        Ok(params)
     }
 
     /// Shared adjust runner: identity → the decode verbatim; otherwise the
@@ -690,7 +746,9 @@ mod wasm {
         Ok(js_sys::Uint8Array::from(&bytes[..]))
     }
 
-    /// Release an engine-held decoded image (and its mip pyramid cache).
+    /// Release an engine-held decoded image (its mip pyramid cache, and
+    /// the layer stack bound to it — a stack whose composite target is
+    /// gone has nowhere to land).
     #[wasm_bindgen]
     pub fn free_image(handle: u32) {
         IMAGES.with(|m| {
@@ -698,6 +756,12 @@ mod wasm {
         });
         PYRAMIDS.with(|p| {
             p.borrow_mut().remove(&handle);
+        });
+        LAYERS.with(|l| {
+            let drop_it = l.borrow().as_ref().map(|d| d.handle) == Some(handle);
+            if drop_it {
+                *l.borrow_mut() = None;
+            }
         });
     }
 
@@ -1027,8 +1091,13 @@ mod wasm {
         })
     }
 
-    /// Shared head of the fill doors: the image, the GPU context, and the
-    /// mask bound to THIS handle.
+    /// Shared head of the fill doors: the BACKDROP the generator paints
+    /// over, the GPU context, and the mask bound to THIS handle.
+    ///
+    /// With a layer stack bound, the backdrop is the ACTIVE LAYER — a
+    /// gradient laid on an empty layer above the photo covers nothing
+    /// below it, which is the whole point of the stack. Without one it is
+    /// the engine-held image (the pre-layer behaviour).
     #[allow(clippy::type_complexity)]
     fn fill_prelude(
         handle: u32,
@@ -1036,7 +1105,8 @@ mod wasm {
         (
             DecodedImage,
             Rc<GpuContext>,
-            Option<std::sync::Arc<SelectionCoverage>>,
+            Option<Arc<SelectionCoverage>>,
+            bool,
         ),
         JsValue,
     > {
@@ -1050,7 +1120,66 @@ mod wasm {
             )
         })?;
         let sel = SELECTION.with(|s| s.borrow().mask_for(handle));
-        Ok((img, ctx, sel))
+        let layered = LAYERS.with(|l| {
+            let b = l.borrow();
+            match b.as_ref() {
+                Some(d) if d.handle == handle => {
+                    d.stack.active_is_editable()?;
+                    Ok(Some(DecodedImage {
+                        width: d.stack.width(),
+                        height: d.stack.height(),
+                        rgba: Arc::clone(&d.stack.active().rgba),
+                    }))
+                }
+                _ => Ok(None),
+            }
+        });
+        match layered.map_err(ingest_err)? {
+            Some(layer) => Ok((layer, ctx, sel, true)),
+            None => Ok((img, ctx, sel, false)),
+        }
+    }
+
+    /// Land a fill result: into the ACTIVE LAYER (journaled, then
+    /// re-composited into the same handle) when a stack is bound, else
+    /// as a NEW engine-held image (the pre-layer destructive commit).
+    async fn land_fill(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+        layered: bool,
+    ) -> Result<DecodedHandle, JsValue> {
+        if !layered {
+            return register(width, height, pixels);
+        }
+        // The damage is the SELECTION's box when there is one (the fill
+        // cannot land outside it), else the whole canvas.
+        let damage = SELECTION
+            .with(|s| s.borrow().coverage().and_then(|c| c.bounds()))
+            .unwrap_or(image_core::Region::new(0, 0, width, height));
+        let ctx = GPU.with(|g| g.borrow().clone());
+        let pixels: Arc<[u8]> = Arc::from(pixels.into_boxed_slice());
+        with_stack_async(|mut doc| async move {
+            let result = async {
+                doc.stack
+                    .edit_active("Fill", damage, pixels)
+                    .map_err(ingest_err)?;
+                let rgba = doc
+                    .stack
+                    .composite(ctx.as_deref(), None)
+                    .await
+                    .map_err(ingest_err)?;
+                set_image_pixels(doc.handle, rgba)?;
+                Ok(DecodedHandle {
+                    handle: doc.handle,
+                    width,
+                    height,
+                })
+            }
+            .await;
+            (doc, result)
+        })
+        .await
     }
 
     /// FILL the current selection (the whole image when none) with a
@@ -1078,7 +1207,7 @@ mod wasm {
                 "gradient stops must be 4 floats each (straight RGBA in [0,1])",
             ));
         }
-        let (img, ctx, sel) = fill_prelude(handle)?;
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
         let spec = FillSpec::Gradient {
             kind,
             c0: [c0[0], c0[1], c0[2], c0[3]],
@@ -1087,7 +1216,7 @@ mod wasm {
         let out = fill_rgba8(&ctx, &img, &spec, sel)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        register(img.width, img.height, out)
+        land_fill(img.width, img.height, out, layered).await
     }
 
     /// FILL the current selection (the whole image when none) with
@@ -1096,11 +1225,458 @@ mod wasm {
     /// engine-held image's handle.
     #[wasm_bindgen]
     pub async fn fill_noise(handle: u32, amount: f32, seed: u32) -> Result<DecodedHandle, JsValue> {
-        let (img, ctx, sel) = fill_prelude(handle)?;
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
         let out = fill_rgba8(&ctx, &img, &FillSpec::Noise { amount, seed }, sel)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        register(img.width, img.height, out)
+        land_fill(img.width, img.height, out, layered).await
+    }
+
+    // ─────────────────────── LAYER doors (§6.2) ──────────────────────
+    //
+    // THE LAYER GRAPH. One stack per wasm realm, BOUND to an engine-held
+    // image handle exactly like the selection is — `layers_open` seeds it
+    // with that image's pixels as a single "Background" layer (an `Arc`
+    // clone, so opening is O(1) and costs no extra memory).
+    //
+    // The bound image is the stack's COMPOSITE: `layers_composite` folds
+    // the stack and writes the result back into the SAME handle, so every
+    // downstream lane (the adjust chain, tiles, histogram, save-back,
+    // export) keeps working against one handle and never has to learn
+    // what a layer is. Pixel edits — paint, fill, bake — go into the
+    // ACTIVE layer and are journaled tile-granularly (`layers_undo`).
+    //
+    // HONEST SCOPE, in the code as well as in the panel:
+    //   * Layers are canvas-extent PIXEL layers. No groups, no clipping,
+    //     no adjustment layers, no per-layer masks.
+    //   * The journal is a PIXEL log: add / remove / reorder / rename /
+    //     opacity / blend / visibility are NOT undoable.
+    //   * A crop, resize or straighten changes the EXTENT, so it
+    //     registers a new handle and the stack is re-opened over the
+    //     result — i.e. those commits FLATTEN the stack.
+
+    struct LayerDoc {
+        /// The engine-held image this stack composites into.
+        handle: u32,
+        stack: LayerStack,
+    }
+
+    thread_local! {
+        static LAYERS: RefCell<Option<LayerDoc>> = const { RefCell::new(None) };
+    }
+
+    /// Replace an engine-held image's pixels in place (same handle, same
+    /// extent) and drop its mip pyramid, which the new pixels invalidate.
+    fn set_image_pixels(handle: u32, rgba: Arc<[u8]>) -> Result<(), JsValue> {
+        IMAGES.with(|m| {
+            let mut map = m.borrow_mut();
+            let img = map
+                .get_mut(&handle)
+                .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+            if rgba.len() != img.rgba.len() {
+                return Err(JsValue::from_str(
+                    "internal: composite extent does not match the bound image",
+                ));
+            }
+            img.rgba = rgba;
+            Ok(())
+        })?;
+        PYRAMIDS.with(|p| {
+            p.borrow_mut().remove(&handle);
+        });
+        Ok(())
+    }
+
+    /// Take the bound stack out of the `RefCell` (no borrow across an
+    /// `await`), run `f`, put it back — restored even when `f` fails.
+    async fn with_stack_async<T, F, Fut>(f: F) -> Result<T, JsValue>
+    where
+        F: FnOnce(LayerDoc) -> Fut,
+        Fut: std::future::Future<Output = (LayerDoc, Result<T, JsValue>)>,
+    {
+        let doc = LAYERS
+            .with(|l| l.borrow_mut().take())
+            .ok_or_else(|| JsValue::from_str("no layer stack open (layers_open first)"))?;
+        let (doc, out) = f(doc).await;
+        LAYERS.with(|l| *l.borrow_mut() = Some(doc));
+        out
+    }
+
+    /// Synchronous access to the bound stack.
+    fn with_stack<T>(f: impl FnOnce(&mut LayerDoc) -> Result<T, JsValue>) -> Result<T, JsValue> {
+        LAYERS.with(|l| {
+            let mut b = l.borrow_mut();
+            let doc = b
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("no layer stack open (layers_open first)"))?;
+            f(doc)
+        })
+    }
+
+    fn ingest_err(e: IngestError) -> JsValue {
+        JsValue::from_str(&e.to_string())
+    }
+
+    /// OPEN a layer stack over an engine-held image: one full-canvas
+    /// "Background" layer sharing that image's pixels. Re-opening on the
+    /// SAME handle is a no-op (the stack survives); opening on a
+    /// different handle replaces it, which is what a crop / resize /
+    /// straighten commit does (it flattens).
+    #[wasm_bindgen]
+    pub fn layers_open(handle: u32) -> Result<(), JsValue> {
+        if LAYERS.with(|l| l.borrow().as_ref().map(|d| d.handle)) == Some(handle) {
+            return Ok(());
+        }
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let stack = LayerStack::from_image(img.width, img.height, Arc::clone(&img.rgba))
+            .map_err(ingest_err)?;
+        LAYERS.with(|l| *l.borrow_mut() = Some(LayerDoc { handle, stack }));
+        Ok(())
+    }
+
+    /// OPEN a layer stack from a retained PSD parse instead of from the
+    /// flattened composite — the PSD's own layer tree, bottom-first, with
+    /// its names, blend modes, opacities and visibility. Returns the
+    /// layer count.
+    ///
+    /// This DECLINES (with the engine's stated reason) for every PSD
+    /// whose structure the layer model does not reproduce — groups,
+    /// clipping layers, layer masks, non-8-bit-RGB, or an over-budget
+    /// canvas — because swapping Photoshop's own composite for a
+    /// different-looking one of ours would be worse than flattening. On a
+    /// refusal the caller keeps `layers_open` (the flatten) and shows the
+    /// reason.
+    ///
+    /// `image_handle` must be the composite already ingested from the
+    /// same file (same extent); `psd_handle` is a `psd_open` handle.
+    #[wasm_bindgen]
+    pub fn layers_open_from_psd(image_handle: u32, psd_handle: u32) -> Result<usize, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&image_handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {image_handle}")))?;
+        let import = PSDS.with(|m| {
+            let map = m.borrow();
+            let file = map
+                .get(&psd_handle)
+                .ok_or_else(|| JsValue::from_str(&format!("unknown psd handle {psd_handle}")))?;
+            file.layer_plates_rgba8()
+                .map_err(|e| JsValue::from_str(&e.to_string()))
+        })?;
+        if import.width != img.width || import.height != img.height {
+            return Err(JsValue::from_str(&format!(
+                "PSD layer import is {}×{} but the ingested composite is {}×{}",
+                import.width, import.height, img.width, img.height
+            )));
+        }
+        let stack = LayerStack::from_psd_plates(&import).map_err(ingest_err)?;
+        let n = stack.len();
+        LAYERS.with(|l| {
+            *l.borrow_mut() = Some(LayerDoc {
+                handle: image_handle,
+                stack,
+            })
+        });
+        Ok(n)
+    }
+
+    /// Drop the bound stack (and its undo history).
+    #[wasm_bindgen]
+    pub fn layers_close() {
+        LAYERS.with(|l| *l.borrow_mut() = None);
+    }
+
+    /// The handle the stack is bound to, or `-1` when none is open.
+    #[wasm_bindgen]
+    pub fn layers_bound() -> i32 {
+        LAYERS.with(|l| l.borrow().as_ref().map_or(-1, |d| d.handle as i32))
+    }
+
+    /// The stack as JSON, BOTTOM-first:
+    /// `{"active":i,"layers":[{index,id,name,visible,locked,opacity,blend}]}`.
+    /// `opacity` is 0–1; `blend` is the `compose.*` wire name.
+    #[wasm_bindgen]
+    pub fn layers_list() -> String {
+        LAYERS.with(|l| {
+            let b = l.borrow();
+            let Some(doc) = b.as_ref() else {
+                return "{\"active\":-1,\"layers\":[]}".to_string();
+            };
+            let rows: Vec<String> = doc
+                .stack
+                .layers()
+                .iter()
+                .enumerate()
+                .map(|(index, layer)| {
+                    format!(
+                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\"}}",
+                        layer.id,
+                        json_escape(&layer.name),
+                        layer.visible,
+                        layer.locked,
+                        layer.opacity,
+                        layer.blend_name(),
+                    )
+                })
+                .collect();
+            format!(
+                "{{\"active\":{},\"layers\":[{}]}}",
+                doc.stack.active_index(),
+                rows.join(",")
+            )
+        })
+    }
+
+    /// The undo/redo readout as JSON — including the BOUND and how much
+    /// of it is used, so "history is a window" is stated rather than
+    /// discovered. `null` when no stack is open.
+    #[wasm_bindgen]
+    pub fn layers_history() -> String {
+        LAYERS.with(|l| {
+            let b = l.borrow();
+            let Some(doc) = b.as_ref() else {
+                return "null".to_string();
+            };
+            let h = doc.stack.history();
+            format!(
+                "{{\"canUndo\":{},\"canRedo\":{},\"depth\":{},\"redoDepth\":{},\"bytes\":{},\"maxBytes\":{},\"maxEntries\":{},\"dropped\":{},\"generation\":{},\"undoLabel\":{},\"redoLabel\":{}}}",
+                h.can_undo,
+                h.can_redo,
+                h.depth,
+                h.redo_depth,
+                h.bytes,
+                h.max_bytes,
+                h.max_entries,
+                h.dropped,
+                h.generation,
+                doc.stack
+                    .undo_label()
+                    .map_or_else(|| "null".to_string(), json_escape),
+                doc.stack
+                    .redo_label()
+                    .map_or_else(|| "null".to_string(), json_escape),
+            )
+        })
+    }
+
+    /// Add an empty transparent layer above the active one (it becomes
+    /// active). Returns its index.
+    #[wasm_bindgen]
+    pub fn layers_add(name: &str) -> Result<usize, JsValue> {
+        with_stack(|d| Ok(d.stack.add(name)))
+    }
+
+    /// Duplicate `index` above itself (the copy becomes active).
+    #[wasm_bindgen]
+    pub fn layers_duplicate(index: usize) -> Result<usize, JsValue> {
+        with_stack(|d| {
+            d.stack
+                .duplicate(index)
+                .ok_or_else(|| JsValue::from_str(&format!("no layer {index}")))
+        })
+    }
+
+    /// Remove `index`. Removing the ONLY layer is refused (a document
+    /// keeps at least one). NOT journaled — see the section docs.
+    #[wasm_bindgen]
+    pub fn layers_remove(index: usize) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.remove(index).map_err(ingest_err))
+    }
+
+    /// Move a layer in stack order (0 = bottom).
+    #[wasm_bindgen]
+    pub fn layers_reorder(from: usize, to: usize) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.reorder(from, to).map_err(ingest_err))
+    }
+
+    #[wasm_bindgen]
+    pub fn layers_set_active(index: usize) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_active(index).map_err(ingest_err))
+    }
+
+    #[wasm_bindgen]
+    pub fn layers_set_visible(index: usize, visible: bool) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_visible(index, visible).map_err(ingest_err))
+    }
+
+    /// Lock a layer's PIXELS: paint / fill / bake refuse on it. Its
+    /// properties stay editable — that is what the lock means.
+    #[wasm_bindgen]
+    pub fn layers_set_locked(index: usize, locked: bool) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_locked(index, locked).map_err(ingest_err))
+    }
+
+    /// Set a layer's opacity (0–1, clamped).
+    #[wasm_bindgen]
+    pub fn layers_set_opacity(index: usize, opacity: f32) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_opacity(index, opacity).map_err(ingest_err))
+    }
+
+    #[wasm_bindgen]
+    pub fn layers_set_name(index: usize, name: &str) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_name(index, name).map_err(ingest_err))
+    }
+
+    /// Set a layer's blend by `compose.*` wire name (prefix optional).
+    /// An unregistered name is a clean error, never a silent normal.
+    #[wasm_bindgen]
+    pub fn layers_set_blend(index: usize, blend: &str) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_blend(index, blend).map_err(ingest_err))
+    }
+
+    /// COMPOSITE the stack bottom-up and write the result back into the
+    /// bound engine-held image, returning the straight RGBA8 (the C-1
+    /// Stage-A payload). GPU-only whenever there is anything to blend; a
+    /// single plain visible layer short-circuits to its own pixels with
+    /// no dispatch at all, so a one-layer document needs no device.
+    #[wasm_bindgen]
+    pub async fn layers_composite() -> Result<js_sys::Uint8Array, JsValue> {
+        let ctx = GPU.with(|g| g.borrow().clone());
+        with_stack_async(|doc| async move {
+            let result = match doc.stack.composite(ctx.as_deref(), None).await {
+                Ok(rgba) => set_image_pixels(doc.handle, Arc::clone(&rgba))
+                    .map(|()| js_sys::Uint8Array::from(&rgba[..])),
+                Err(e) => Err(ingest_err(e)),
+            };
+            (doc, result)
+        })
+        .await
+    }
+
+    /// BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
+    /// per-layer adjustment (the panel's chain is otherwise a re-runnable
+    /// PREVIEW of the composite and mutates nothing). Journaled over the
+    /// whole canvas, so it is undoable; refuses on a locked layer and at
+    /// identity. Arguments mirror `adjust_image_ext` minus the handle.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn layers_bake_adjust(
+        exposure_ev: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        temp: f32,
+        tint: f32,
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+        curve_lut: &[u8],
+        blur_sigma: f32,
+        sharpen_amount: f32,
+        hue_degrees: f32,
+        invert: bool,
+        ext: &[f32],
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        let params = build_adjust_params(
+            exposure_ev,
+            brightness,
+            contrast,
+            saturation,
+            temp,
+            tint,
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+            curve_lut,
+            blur_sigma,
+            sharpen_amount,
+            hue_degrees,
+            invert,
+            ext,
+        )?;
+        let ctx = GPU.with(|g| g.borrow().clone());
+        let sel = LAYERS.with(|l| {
+            l.borrow()
+                .as_ref()
+                .and_then(|d| SELECTION.with(|s| s.borrow().mask_for(d.handle)))
+        });
+        with_stack_async(|mut doc| async move {
+            let result = bake_into_active(&mut doc, ctx.as_deref(), params, sel).await;
+            (doc, result)
+        })
+        .await
+    }
+
+    /// The bake's body (split out so the stack is owned, not borrowed,
+    /// across the awaits).
+    async fn bake_into_active(
+        doc: &mut LayerDoc,
+        ctx: Option<&GpuContext>,
+        params: AdjustParams,
+        selection: Option<Arc<SelectionCoverage>>,
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        doc.stack.active_is_editable().map_err(ingest_err)?;
+        if params.is_identity() {
+            return Err(JsValue::from_str(
+                "nothing to bake — the adjustment chain is at identity",
+            ));
+        }
+        let ctx = ctx.ok_or_else(|| {
+            JsValue::from_str("baking an adjustment is GPU-only — call init_gpu first")
+        })?;
+        let (w, h) = (doc.stack.width(), doc.stack.height());
+        let src = DecodedImage {
+            width: w,
+            height: h,
+            rgba: Arc::clone(&doc.stack.active().rgba),
+        };
+        let out = adjust_rgba8(ctx, &src, &params, selection)
+            .await
+            .map_err(ingest_err)?;
+        doc.stack
+            .edit_active(
+                "Bake adjustments",
+                image_core::Region::new(0, 0, w, h),
+                Arc::from(out.into_boxed_slice()),
+            )
+            .map_err(ingest_err)?;
+        let rgba = doc
+            .stack
+            .composite(Some(ctx), None)
+            .await
+            .map_err(ingest_err)?;
+        set_image_pixels(doc.handle, Arc::clone(&rgba))?;
+        Ok(js_sys::Uint8Array::from(&rgba[..]))
+    }
+
+    /// UNDO the newest journaled pixel edit (paint / fill / bake),
+    /// re-composite, and answer the reverted edit's label — an EMPTY
+    /// string when there is nothing to undo. Layer STRUCTURE changes are
+    /// not journaled (see the section docs).
+    #[wasm_bindgen]
+    pub async fn layers_undo() -> Result<String, JsValue> {
+        history_step(true).await
+    }
+
+    /// REDO the newest undone pixel edit.
+    #[wasm_bindgen]
+    pub async fn layers_redo() -> Result<String, JsValue> {
+        history_step(false).await
+    }
+
+    async fn history_step(undo: bool) -> Result<String, JsValue> {
+        let ctx = GPU.with(|g| g.borrow().clone());
+        with_stack_async(|mut doc| async move {
+            let label = if undo {
+                doc.stack.undo()
+            } else {
+                doc.stack.redo()
+            };
+            let Some(label) = label else {
+                return (doc, Ok(String::new()));
+            };
+            let result = match doc.stack.composite(ctx.as_deref(), None).await {
+                Ok(rgba) => set_image_pixels(doc.handle, rgba).map(|()| label),
+                Err(e) => Err(ingest_err(e)),
+            };
+            (doc, result)
+        })
+        .await
     }
 
     // ───────────────────────── PAINT doors ───────────────────────────
@@ -1206,8 +1782,27 @@ mod wasm {
         // The selection is frozen at begin — a stroke never half-honours
         // a selection that changed mid-drag.
         let sel = SELECTION.with(|s| s.borrow().mask_for(handle));
-        let session = StrokeSession::begin(handle, &img, params, sel)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        // THE LAYER GRAPH: when a stack is bound to this handle the
+        // stroke opens on its ACTIVE LAYER, so paint lands there and the
+        // layers below and above are untouched. Without a stack it opens
+        // on the engine-held image (the pre-layer behaviour, kept so the
+        // doors stay usable on their own).
+        let base = LAYERS.with(|l| {
+            let b = l.borrow();
+            match b.as_ref() {
+                Some(d) if d.handle == handle => {
+                    d.stack.active_is_editable()?;
+                    Ok(Some(Arc::clone(&d.stack.active().rgba)))
+                }
+                _ => Ok(None),
+            }
+        });
+        let base: Option<Arc<[u8]>> = base.map_err(ingest_err)?;
+        let session = match base {
+            Some(px) => StrokeSession::begin_on(handle, img.width, img.height, px, params, sel),
+            None => StrokeSession::begin(handle, &img, params, sel),
+        }
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
         STROKE.with(|s| *s.borrow_mut() = Some(session));
         Ok(())
     }
@@ -1236,25 +1831,103 @@ mod wasm {
         let result = session
             .extend(&ctx, StrokeSample::new(x, y, pressure))
             .await;
-        let pixels = session.pixels().to_vec();
+        let handle = session.handle();
+        let painted: Arc<[u8]> = Arc::from(session.pixels().to_vec().into_boxed_slice());
         STROKE.with(|s| *s.borrow_mut() = Some(session));
         result.map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(pixels)
+        // The preview is the WHOLE stack with the in-flight stroke
+        // standing in for the active layer — otherwise painting on a
+        // layer above the photo would preview as that layer alone. The
+        // stack is NOT mutated; nothing is committed until release.
+        // A one-layer document takes the trivial fold, which returns the
+        // painted pixels themselves — the pre-layer latency, unchanged.
+        let preview = preview_through_stack(handle, painted).await?;
+        Ok(preview.to_vec())
     }
 
-    /// COMMIT the stroke: register the painted pixels as a NEW
-    /// engine-held image and return its handle. The source handle is
-    /// left for the caller to free (the crop / fill commit pattern).
+    /// Fold the bound stack with `painted` overriding the active layer.
+    /// No stack (or one bound to another handle) ⇒ the painted pixels.
+    async fn preview_through_stack(handle: u32, painted: Arc<[u8]>) -> Result<Arc<[u8]>, JsValue> {
+        let bound = LAYERS.with(|l| l.borrow().as_ref().map(|d| d.handle)) == Some(handle);
+        if !bound {
+            return Ok(painted);
+        }
+        let ctx = GPU.with(|g| g.borrow().clone());
+        with_stack_async(|doc| async move {
+            let out = doc
+                .stack
+                .composite(ctx.as_deref(), Some(&painted))
+                .await
+                .map_err(ingest_err);
+            (doc, out)
+        })
+        .await
+    }
+
+    /// COMMIT the stroke.
     ///
-    /// The result is the same size, so the caller may carry the
-    /// selection over with `selection_transfer`.
+    /// * **With a layer stack bound** (the normal case): the painted
+    ///   pixels are written into the ACTIVE LAYER, the tiles the stroke's
+    ///   bounding box covers are journaled first (so the stroke is
+    ///   undoable, tile-granularly, within the journal's stated bound),
+    ///   and the stack is re-composited into the SAME engine-held image.
+    ///   The returned handle is therefore the handle you started with —
+    ///   the caller must NOT free it.
+    /// * **Without one**: the pre-layer behaviour — the painted pixels
+    ///   are registered as a NEW engine-held image and the caller swaps
+    ///   handles and frees the old one.
+    ///
+    /// Either way the result is the same size, so the caller may carry
+    /// the selection over with `selection_transfer`.
     #[wasm_bindgen]
-    pub fn brush_stroke_commit() -> Result<DecodedHandle, JsValue> {
+    pub async fn brush_stroke_commit() -> Result<DecodedHandle, JsValue> {
         let session = STROKE
             .with(|s| s.borrow_mut().take())
             .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
         let (w, h) = (session.width(), session.height());
-        register(w, h, session.commit())
+        let handle = session.handle();
+        let bounds = session.stroke_bounds();
+        let painted = session.commit();
+
+        let bound = LAYERS.with(|l| l.borrow().as_ref().map(|d| d.handle)) == Some(handle);
+        if !bound {
+            return register(w, h, painted);
+        }
+        // Nothing landed on the canvas: no journal entry, no composite,
+        // no change (an empty entry would spend an undo step on nothing).
+        let Some(damage) = bounds else {
+            return Ok(DecodedHandle {
+                handle,
+                width: w,
+                height: h,
+            });
+        };
+        let ctx = GPU.with(|g| g.borrow().clone());
+        let pixels: Arc<[u8]> = Arc::from(painted.into_boxed_slice());
+        with_stack_async(|mut doc| async move {
+            let result = commit_stroke_into_active(&mut doc, ctx.as_deref(), damage, pixels).await;
+            (doc, result)
+        })
+        .await
+    }
+
+    async fn commit_stroke_into_active(
+        doc: &mut LayerDoc,
+        ctx: Option<&GpuContext>,
+        damage: image_core::Region,
+        pixels: Arc<[u8]>,
+    ) -> Result<DecodedHandle, JsValue> {
+        let (w, h) = (doc.stack.width(), doc.stack.height());
+        doc.stack
+            .edit_active("Paint", damage, pixels)
+            .map_err(ingest_err)?;
+        let rgba = doc.stack.composite(ctx, None).await.map_err(ingest_err)?;
+        set_image_pixels(doc.handle, rgba)?;
+        Ok(DecodedHandle {
+            handle: doc.handle,
+            width: w,
+            height: h,
+        })
     }
 
     /// CANCEL the stroke: throw the painted pixels away. The engine-held

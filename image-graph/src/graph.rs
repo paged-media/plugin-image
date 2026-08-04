@@ -36,10 +36,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use image_core::{ParamsHash, TileCoord, TILE};
+use image_core::{ParamsHash, Region, TileCoord, TILE};
 use image_kernels::KernelDef;
 
 use crate::cache::NodeCache;
+use crate::journal::{RecordOutcome, TileJournal, TileSource, TileStore};
 
 pub type NodeId = usize;
 
@@ -60,6 +61,12 @@ pub enum GraphError {
 pub struct SourceData {
     /// (level, coord) → tile bytes + generation.
     tiles: HashMap<TileCoord, (Arc<[u8]>, u64)>,
+    /// The generation a journal RESTORE stamps on the tile it puts back.
+    /// A restore must look like a NEW write to every downstream cache
+    /// (the pixels changed), so it takes a fresh generation rather than
+    /// the one it had before — otherwise undo would serve stale
+    /// derived tiles whose provenance still "matched" (§8.2).
+    next_generation: u64,
 }
 
 impl SourceData {
@@ -68,11 +75,37 @@ impl SourceData {
     }
 
     pub fn set_tile(&mut self, coord: TileCoord, bytes: impl Into<Arc<[u8]>>, generation: u64) {
+        self.next_generation = self.next_generation.max(generation + 1);
         self.tiles.insert(coord, (bytes.into(), generation));
     }
 
     pub fn tile(&self, coord: TileCoord) -> Option<(&Arc<[u8]>, u64)> {
         self.tiles.get(&coord).map(|(b, g)| (b, *g))
+    }
+}
+
+/// The §8.5 `WriteBuffer` COW seam: a source node's sparse tile map IS
+/// a journalable store — snapshotting a tile is an `Arc` clone.
+impl TileSource for SourceData {
+    fn read_tile(&self, coord: TileCoord) -> Option<Arc<[u8]>> {
+        self.tiles.get(&coord).map(|(b, _)| Arc::clone(b))
+    }
+}
+
+impl TileStore for SourceData {
+    fn write_tile(&mut self, coord: TileCoord, bytes: Option<Arc<[u8]>>) {
+        match bytes {
+            Some(b) => {
+                let g = self.next_generation;
+                self.next_generation += 1;
+                self.tiles.insert(coord, (b, g));
+            }
+            // The tile was a HOLE before the edit; restoring the hole is
+            // what makes undo exact on a sparse canvas.
+            None => {
+                self.tiles.remove(&coord);
+            }
+        }
     }
 }
 
@@ -182,6 +215,55 @@ impl BufferGraph {
         }
     }
 
+    /// The JOURNALED `WriteBuffer` Operation (§8.5): snapshot the tiles
+    /// covering `damage` into `journal` (COW — an `Arc` clone per tile),
+    /// then hand the source's tile map to `write` so it can put the new
+    /// pixels down. The snapshot happens FIRST and unconditionally, so a
+    /// write that touches fewer tiles than it claimed still undoes
+    /// exactly; a write that touches MORE is a caller bug the journal
+    /// cannot see, which is why `damage` is the caller's honest damage
+    /// region and not a guess.
+    ///
+    /// Answers `None` when `node` is not a source; otherwise the
+    /// journal's verdict (including [`RecordOutcome::TooLarge`], where
+    /// the write still happens but the history is gone — see the journal
+    /// module docs).
+    pub fn write_source_journaled(
+        &mut self,
+        node: NodeId,
+        journal: &mut TileJournal,
+        label: impl Into<String>,
+        damage: Region,
+        write: impl FnOnce(&mut SourceData),
+    ) -> Option<RecordOutcome> {
+        let Some(Node::Source { data }) = self.nodes.get_mut(node) else {
+            return None;
+        };
+        // The node id IS the scope: one journal can serve several
+        // sources, and undo must restore into the one that was written.
+        let outcome = journal.record(label, node as u64, &*data, damage);
+        write(data);
+        Some(outcome)
+    }
+
+    /// Undo the newest journaled write on `node`, restoring its tiles
+    /// (and bumping their generations, so every downstream cache sees
+    /// the change). Returns the reverted edit's label.
+    pub fn undo_source(&mut self, node: NodeId, journal: &mut TileJournal) -> Option<String> {
+        match self.nodes.get_mut(node) {
+            Some(Node::Source { data }) => journal.undo(data),
+            _ => None,
+        }
+    }
+
+    /// Replay the newest undone write on `node`.
+    pub fn redo_source(&mut self, node: NodeId, journal: &mut TileJournal) -> Option<String> {
+        match self.nodes.get_mut(node) {
+            Some(Node::Source { data }) => journal.redo(data),
+            _ => None,
+        }
+    }
+
     /// Read a single SOURCE tile `(level, coord)` without a GPU context —
     /// the passthrough mip-window path (a source read does no kernel
     /// dispatch, so it needs no device). Returns the tile's rgba16float
@@ -220,5 +302,107 @@ impl BufferGraph {
         let id = self.nodes.len();
         self.nodes.push(n);
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image_core::TILE;
+
+    const TILE_BYTES: usize = (TILE * TILE * 8) as usize; // rgba16float
+
+    fn tile(fill: u8) -> Vec<u8> {
+        vec![fill; TILE_BYTES]
+    }
+
+    #[test]
+    fn image_editor_undo_a_journaled_source_write_restores_the_tile_and_bumps_its_generation() {
+        let mut g = BufferGraph::new();
+        let mut data = SourceData::new();
+        let coord = TileCoord {
+            level: 0,
+            x: 0,
+            y: 0,
+        };
+        data.set_tile(coord, tile(1), 7);
+        let src = g.add_source(data);
+
+        let mut journal = TileJournal::new();
+        let out = g.write_source_journaled(
+            src,
+            &mut journal,
+            "paint",
+            Region::new(0, 0, TILE, TILE),
+            |d| d.set_tile(coord, tile(2), 8),
+        );
+        assert!(out.expect("a source node").is_recorded());
+        assert_eq!(g.read_source_tile(src, coord).unwrap()[0], 2);
+
+        assert_eq!(g.undo_source(src, &mut journal).as_deref(), Some("paint"));
+        let restored = g.read_source_tile(src, coord).unwrap();
+        assert_eq!(restored[0], 1, "the pre-edit tile is back");
+        // …and it reads as a NEW generation, so no downstream cache can
+        // serve a tile derived from the version we just reverted.
+        let (_, gen) = match &g.nodes[src] {
+            Node::Source { data } => data.tile(coord).expect("tile"),
+            _ => unreachable!(),
+        };
+        assert!(
+            gen > 8,
+            "a restore is a write: generation {gen} must be new"
+        );
+
+        assert_eq!(g.redo_source(src, &mut journal).as_deref(), Some("paint"));
+        assert_eq!(g.read_source_tile(src, coord).unwrap()[0], 2);
+    }
+
+    #[test]
+    fn image_editor_undo_a_journaled_write_into_a_hole_restores_the_hole() {
+        // A sparse canvas: the tile did not exist before the write, so
+        // undo must REMOVE it again (not leave transparent-black bytes
+        // that would defeat the sparse-canvas rule).
+        let mut g = BufferGraph::new();
+        let src = g.add_source(SourceData::new());
+        let coord = TileCoord {
+            level: 0,
+            x: 3,
+            y: 2,
+        };
+        let mut journal = TileJournal::new();
+        let damage = Region::new(3 * TILE as i32, 2 * TILE as i32, TILE, TILE);
+        let out = g
+            .write_source_journaled(src, &mut journal, "paint", damage, |d| {
+                d.set_tile(coord, tile(9), 1)
+            })
+            .expect("a source node");
+        assert!(out.is_recorded(), "a hole is still a state worth recording");
+
+        g.undo_source(src, &mut journal);
+        let held = match &g.nodes[src] {
+            Node::Source { data } => data.tile(coord).is_some(),
+            _ => unreachable!(),
+        };
+        assert!(!held, "the hole is a hole again");
+        // The passthrough read still answers transparent black (§5.3).
+        assert_eq!(g.read_source_tile(src, coord).unwrap().len(), TILE_BYTES);
+    }
+
+    #[test]
+    fn image_editor_undo_journaling_an_op_node_is_refused() {
+        let mut g = BufferGraph::new();
+        let src = g.add_source(SourceData::new());
+        let op = g.add_op(
+            &image_kernels::families::linear::MATH_INVERT,
+            image_kernels::families::linear::MathInvertParams::new()
+                .as_bytes()
+                .to_vec(),
+            vec![src],
+        );
+        let mut journal = TileJournal::new();
+        assert!(g
+            .write_source_journaled(op, &mut journal, "x", Region::new(0, 0, 1, 1), |_| {})
+            .is_none());
+        assert!(g.undo_source(op, &mut journal).is_none());
     }
 }

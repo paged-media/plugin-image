@@ -34,6 +34,7 @@ import type { BundleHost, Disposable } from "@paged-media/plugin-api";
 import {
   bootEngine,
   DEFAULT_BRUSH_PARAMS,
+  EMPTY_LAYER_STACK,
   freshIdentityParams,
   isIdentity,
   type AdjustParams,
@@ -42,6 +43,8 @@ import {
   type GradientKind,
   type ImageEngine,
   type ImageHistogram,
+  type LayerHistory,
+  type LayerStackInfo,
   type PsdLayerInfo,
   type RasterFormat,
   type ResampleFilter,
@@ -150,6 +153,18 @@ export interface ImageSessionState {
   /** The in-flight stroke's dab count + bounds, or null before the
    *  first dab lands on the canvas. */
   strokeStats: BrushStats | null;
+  /** THE LAYER GRAPH — the engine's layer stack for the ingested image,
+   *  BOTTOM-first (the panel renders it reversed, as a layers palette
+   *  reads). Opened automatically on ingest, so painting always lands in
+   *  a layer rather than in the one flat image. */
+  layers: LayerStackInfo;
+  /** The undo readout — depth, redo depth, and the BOUND the journal
+   *  holds to. Null until a stack is open. */
+  history: LayerHistory | null;
+  /** How the stack was opened, in the panel's words: the PSD's own N
+   *  layers, or the honest reason the layered import was DECLINED and
+   *  the flattened composite kept. Null for non-PSD sources. */
+  layersNote: string | null;
 }
 
 export interface ImageSession {
@@ -259,6 +274,31 @@ export interface ImageSession {
   /** ABANDON the stroke — the engine-held source was never mutated, so
    *  this restores it exactly (and re-composites the frame). */
   brushCancel(): void;
+  // ── THE LAYER GRAPH ───────────────────────────────────────────────
+  /** Add an empty transparent layer above the active one (it becomes
+   *  active) and re-composite. */
+  addLayer(name?: string): Promise<boolean>;
+  duplicateLayer(index: number): Promise<boolean>;
+  /** Remove a layer. Refused for the last one; NOT undoable (the
+   *  journal is a pixel log — stated in the panel). */
+  removeLayer(index: number): Promise<boolean>;
+  /** Move a layer in stack order (0 = bottom). */
+  reorderLayer(from: number, to: number): Promise<boolean>;
+  /** Choose the layer that paint / fill / bake land in. */
+  setActiveLayer(index: number): boolean;
+  setLayerVisible(index: number, visible: boolean): Promise<boolean>;
+  setLayerOpacity(index: number, opacity: number): Promise<boolean>;
+  setLayerBlend(index: number, blend: string): Promise<boolean>;
+  setLayerLocked(index: number, locked: boolean): boolean;
+  setLayerName(index: number, name: string): boolean;
+  /** BAKE the panel's adjustment chain destructively into the ACTIVE
+   *  layer (journaled, so undoable). The chain is otherwise a
+   *  re-runnable preview that never mutates a pixel. */
+  bakeAdjustToLayer(): Promise<boolean>;
+  /** Undo / redo the newest journaled PIXEL edit (paint, fill, bake).
+   *  Layer STRUCTURE changes are not journaled. */
+  undo(): Promise<boolean>;
+  redo(): Promise<boolean>;
   /** Commit the crop: cut the machine's rect out of the source image, swap
    *  the engine-held source to the cropped result, recompute the
    *  histogram, and re-composite in-frame. Returns false when there is
@@ -295,7 +335,7 @@ export function createImageSession(host: BundleHost): ImageSession {
   let bootPromise: Promise<ImageEngine | null> | null = null;
   let sceneSurface: ReturnType<typeof host.contribute.sceneLayer> | null = null;
   // C-6 — the active tile-resource claim (null when nothing is claimed).
-  let tileClaim: { elementId: string; dispose(): void } | null = null;
+  let tileClaim: { elementId: string; dispose(): void; bump(): void } | null = null;
   // K-3 — the decode worker pool (null when the host wires no workers /
   // grants none → the session decodes on the main thread instead).
   let decodePool: DecodePool | null = null;
@@ -332,6 +372,9 @@ export function createImageSession(host: BundleHost): ImageSession {
     blendModes: [],
     strokeActive: false,
     strokeStats: null,
+    layers: EMPTY_LAYER_STACK,
+    history: null,
+    layersNote: null,
   };
   /** The retained PSD parse handle (wasm-side), when state.psd is set. */
   let psdHandle: number | null = null;
@@ -441,6 +484,131 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
   };
 
+  /** The pixels behind the live handle changed IN PLACE (a layer edit
+   *  re-composites into the same handle), so the renderer's cached tiles
+   *  are stale — bump the claim's revision to make it re-pull. */
+  const bumpTiles = () => {
+    tileClaim?.bump();
+  };
+
+  /** Re-read the engine's layer stack + undo readout into state. */
+  const refreshLayers = () => {
+    if (!engine || !state.source) {
+      state.layers = EMPTY_LAYER_STACK;
+      state.history = null;
+      return;
+    }
+    try {
+      state.layers = engine.layers();
+      state.history = engine.layersHistory();
+    } catch (err) {
+      host.log.debug("layer readout failed", err);
+      state.layers = EMPTY_LAYER_STACK;
+      state.history = null;
+    }
+  };
+
+  /** Fold the stack into the bound engine-held image, re-read the
+   *  readouts, and put the adjusted composite back in-frame. Every layer
+   *  mutation ends here so the canvas and the panel can never disagree.
+   *  A one-layer stack short-circuits engine-side (no GPU, no dispatch). */
+  const recomposite = async (): Promise<boolean> => {
+    if (!engine || !state.source) return false;
+    try {
+      await engine.layersComposite();
+    } catch (err) {
+      // The stack DID change even though the fold could not run (no
+      // device); show the truth rather than a stale palette.
+      refreshLayers();
+      setStatus(`Composite failed: ${err instanceof Error ? err.message : err}`);
+      emit();
+      return false;
+    }
+    bumpTiles();
+    refreshLayers();
+    refreshHistogram();
+    if (state.source.elementId) await api.apply();
+    else emit();
+    return true;
+  };
+
+  /** Adopt a commit's result. When the engine handed back the SAME
+   *  handle it edited in place (the layer lane) — the pixels changed but
+   *  the handle did not, so freeing it would destroy the live document
+   *  and the tile claim only needs a revision bump. A DIFFERENT handle
+   *  is the pre-layer destructive commit: release the claim, free the
+   *  old pixels, adopt the new. */
+  const swapSource = (
+    src: SourceImage,
+    next: { handle: number; width: number; height: number },
+  ) => {
+    if (next.handle === src.handle) {
+      bumpTiles();
+    } else {
+      releaseTiles();
+      engine?.freeImage(src.handle);
+      src.handle = next.handle;
+    }
+    src.width = next.width;
+    src.height = next.height;
+  };
+
+  /** The layer-mutation sandwich: run `mutate` engine-side, then
+   *  re-composite. A refusal (locked layer, last layer, unknown blend)
+   *  becomes the panel's status verbatim — the engine owns the reason. */
+  const layerOp = async (what: string, mutate: () => void): Promise<boolean> => {
+    if (!engine || !state.source) {
+      setStatus("Nothing ingested — ingest a placed image first.");
+      return false;
+    }
+    try {
+      mutate();
+    } catch (err) {
+      setStatus(`${what} failed: ${err instanceof Error ? err.message : err}`);
+      refreshLayers();
+      emit();
+      return false;
+    }
+    return recomposite();
+  };
+
+  /** Undo/redo one journaled PIXEL edit. An empty label means the
+   *  journal had nothing — said plainly rather than as a silent no-op,
+   *  since a bounded journal CAN run out earlier than the user expects. */
+  const historyStep = async (undo: boolean): Promise<boolean> => {
+    if (!engine || !state.source) {
+      setStatus("Nothing ingested — ingest a placed image first.");
+      return false;
+    }
+    // An in-flight stroke holds a base snapshot of the active layer;
+    // undoing under it would commit into pixels that no longer exist.
+    discardStroke();
+    let label: string;
+    try {
+      label = undo ? await engine.layersUndo() : await engine.layersRedo();
+    } catch (err) {
+      setStatus(
+        `${undo ? "Undo" : "Redo"} failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return false;
+    }
+    if (!label) {
+      const h = state.history;
+      setStatus(
+        `Nothing to ${undo ? "undo" : "redo"}.` +
+          (undo && h?.dropped
+            ? ` ${h.dropped} older edit${h.dropped === 1 ? " is" : "s are"} past the ` +
+              "undo budget and permanent."
+            : ""),
+      );
+      emit();
+      return false;
+    }
+    const ok = await recomposite();
+    if (ok) setStatus(`${undo ? "Undid" : "Redid"} “${label}”.`);
+    return ok;
+  };
+
   /** Drop an in-flight stroke engine-side (the base pixels were never
    *  mutated, so this is a true restore). Shared by the explicit cancel
    *  and by every path that pulls the source out from under a stroke. */
@@ -466,6 +634,12 @@ export function createImageSession(host: BundleHost): ImageSession {
     // A claim points at THIS source's handle — release it before the
     // pixels go (the renderer drops to the whole-image fallback lane).
     releaseTiles();
+    // The stack composites INTO the source handle, so it goes with it
+    // (the engine drops it on free_image too — this keeps the mirror).
+    if (engine) engine.layersClose();
+    state.layers = EMPTY_LAYER_STACK;
+    state.history = null;
+    state.layersNote = null;
     if (state.source && engine) engine.freeImage(state.source.handle);
     state.source = null;
     state.histogram = null;
@@ -520,6 +694,29 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
   };
 
+  /** Open the layer stack from the retained PSD parse — the file's own
+   *  layer tree instead of its merged composite.
+   *
+   *  The engine DECLINES for every PSD whose structure the layer model
+   *  does not reproduce (groups, clipping, masks, non-8-bit-RGB, over
+   *  budget). That refusal is not a failure: it is the correct answer,
+   *  because a layered open replaces Photoshop's OWN composite with
+   *  ours. Either way `state.layersNote` says what happened, so the
+   *  flatten is never silent. */
+  const openLayersFromPsd = async (): Promise<void> => {
+    state.layersNote = null;
+    if (!engine || !state.source || psdHandle === null) return;
+    try {
+      const n = engine.layersOpenFromPsd(state.source.handle, psdHandle);
+      // Our composite of the layer tree, not the file's merged one.
+      await engine.layersComposite();
+      state.layersNote = `Opened the PSD's own ${n} layer${n === 1 ? "" : "s"}.`;
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      state.layersNote = `Layered PSD import declined — ${why}`;
+    }
+  };
+
   const refreshPsdLayers = (): void => {
     if (psdHandle === null || !engine || !state.psd) return;
     try {
@@ -534,7 +731,7 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  commit (both change the source pixels). The histogram is the panel's
    *  levels/curves readout. A histogram-read failure is non-fatal (the
    *  panel just shows no histogram). */
-  const refreshSourceReadout = () => {
+  const refreshHistogram = () => {
     if (!engine || !state.source) return;
     try {
       state.histogram = engine.histogram(state.source.handle);
@@ -542,6 +739,22 @@ export function createImageSession(host: BundleHost): ImageSession {
       host.log.debug("histogram read failed", err);
       state.histogram = null;
     }
+  };
+
+  const refreshSourceReadout = () => {
+    if (!engine || !state.source) return;
+    refreshHistogram();
+    // THE LAYER GRAPH — bind a stack to the LIVE handle so painting
+    // always lands in a layer. Re-opening on the same handle keeps the
+    // stack (and its undo history); a crop / resize / straighten
+    // registers a DIFFERENT handle, so those commits re-open over the
+    // result — i.e. they FLATTEN, which the panel says.
+    try {
+      engine.layersOpen(state.source.handle);
+    } catch (err) {
+      host.log.debug("layer stack open failed", err);
+    }
+    refreshLayers();
     cropMachineRef = createCropMachine(engine, state.source.width, state.source.height);
     // Bind the engine selection to the LIVE handle (a crop/resize swap
     // is a different handle, so the old selection drops engine-side —
@@ -650,10 +863,19 @@ export function createImageSession(host: BundleHost): ImageSession {
       // import AND the C-5 selection lane) — it is what the PSD
       // save-back writes into.
       openPsdSession(name, bytes);
-      // Compute the levels/curves histogram + build the crop machine.
+      // A PSD carries a LAYER TREE; open the stack from it rather than
+      // from the flattened composite when — and only when — the layer
+      // model reproduces it faithfully. The engine refuses (with its
+      // reason) otherwise and we keep the flatten, saying so.
+      await openLayersFromPsd();
+      // Compute the levels/curves histogram, bind the stack + selection,
+      // and build the crop machine.
       refreshSourceReadout();
       const lane = decodePool ? " (off-thread)" : "";
-      setStatus(`${name} — ${info.width}×${info.height} decoded${lane}.`);
+      setStatus(
+        `${name} — ${info.width}×${info.height} decoded${lane}.` +
+          (state.layersNote ? ` ${state.layersNote}` : ""),
+      );
       return true;
     } catch (err) {
       // The engine's honest unsupported/decode message (16-bit, CMYK, …).
@@ -927,28 +1149,33 @@ export function createImageSession(host: BundleHost): ImageSession {
         emit();
         return false;
       }
-      // Swap the engine-held source (the crop-commit pattern): the fill
-      // is DESTRUCTIVE into the working image by design (see fill.rs).
-      releaseTiles();
-      engine.freeImage(src.handle);
-      src.handle = filled.handle;
-      src.width = filled.width;
-      src.height = filled.height;
+      // With a layer stack bound the fill went INTO the active layer
+      // (journaled) and re-composited into the SAME handle; without one
+      // it is the pre-layer destructive commit (see fill.rs).
+      const layerName = state.layers.layers[state.layers.active]?.name ?? null;
+      const layered = filled.handle === src.handle;
+      swapSource(src, filled);
       state.saveBack = null;
-      // The fill is same-size, so the SELECTION is still meaningful on
-      // the result — carry it over instead of making the user reselect
-      // (a crop/resize swap still drops it; the extents differ there).
-      try {
-        engine.selectionTransfer(filled.handle);
-      } catch (err) {
-        host.log.debug("selection transfer failed", err);
+      if (!layered) {
+        // The fill is same-size, so the SELECTION is still meaningful on
+        // the result — carry it over instead of making the user
+        // reselect (a crop/resize swap still drops it).
+        try {
+          engine.selectionTransfer(filled.handle);
+        } catch (err) {
+          host.log.debug("selection transfer failed", err);
+        }
       }
       refreshSourceReadout();
       const where = state.selection ? "the selection" : "the whole image";
       setStatus(
         `Filled ${where} with ${
           req.kind === "gradient" ? `a ${req.gradient} gradient` : "noise"
-        } (engine source only — document unchanged; Apply to recomposite).`,
+        }` +
+          (layered && layerName
+            ? ` on layer “${layerName}” — undoable.`
+            : " (destructive, no layer stack bound).") +
+          " Document unchanged; Apply to recomposite.",
       );
       state.busy = false;
       emit();
@@ -1187,9 +1414,10 @@ export function createImageSession(host: BundleHost): ImageSession {
       const src = state.source;
       if (!src || !engine || !state.strokeActive) return false;
       const dabs = state.strokeStats?.dabs ?? 0;
+      const layerName = state.layers.layers[state.layers.active]?.name ?? null;
       let painted: { handle: number; width: number; height: number };
       try {
-        painted = engine.brushCommit();
+        painted = await engine.brushCommit();
       } catch (err) {
         setStatus(`Paint commit failed: ${err instanceof Error ? err.message : err}`);
         discardStroke();
@@ -1201,31 +1429,167 @@ export function createImageSession(host: BundleHost): ImageSession {
       strokeTarget = null;
       strokeBox = null;
       brushMachineRef?.cancel();
-      // Swap the engine-held source (the crop / fill commit pattern):
-      // DESTRUCTIVE into the working pixels, document untouched.
-      releaseTiles();
-      engine.freeImage(src.handle);
-      src.handle = painted.handle;
-      src.width = painted.width;
-      src.height = painted.height;
+      // With a layer stack bound the engine wrote the stroke INTO the
+      // active layer (journaled) and re-composited into the SAME handle
+      // — so there is nothing to swap and the old handle must NOT be
+      // freed. Without one it is the pre-layer destructive commit.
+      const layered = painted.handle === src.handle;
+      swapSource(src, painted);
       state.saveBack = null;
-      // Same size, so the SELECTION is still meaningful on the result —
-      // carry it over instead of making the user reselect (the fill
-      // lane's rule; a crop/resize swap still drops it).
-      try {
-        engine.selectionTransfer(painted.handle);
-      } catch (err) {
-        host.log.debug("selection transfer failed", err);
+      if (!layered) {
+        // Same size, so the SELECTION is still meaningful on the result.
+        try {
+          engine.selectionTransfer(painted.handle);
+        } catch (err) {
+          host.log.debug("selection transfer failed", err);
+        }
       }
       refreshSourceReadout();
       // Put the ADJUSTED composite back over the raw stroke preview.
       if (src.elementId) await api.apply();
+      const where = layerName ? `layer “${layerName}”` : "the engine image";
       setStatus(
-        `Painted ${dabs} dab${dabs === 1 ? "" : "s"} into the engine image ` +
-          "(destructive — there is no layer graph; the document and the " +
-          "source file are unchanged, re-ingest to restore).",
+        `Painted ${dabs} dab${dabs === 1 ? "" : "s"} into ${where}` +
+          (layered
+            ? " — undoable (the stroke's tiles are journaled). The document " +
+              "and the source file are unchanged."
+            : " (destructive, no layer stack bound — re-ingest to restore).") +
+          (state.history?.dropped
+            ? ` History window: ${state.history.depth} step${
+                state.history.depth === 1 ? "" : "s"
+              }, ${state.history.dropped} older edit${
+                state.history.dropped === 1 ? "" : "s"
+              } past the undo budget and now permanent.`
+            : ""),
       );
       return true;
+    },
+
+    // ── THE LAYER GRAPH ─────────────────────────────────────────────
+
+    async addLayer(name = "") {
+      const ok = await layerOp("Add layer", () => engine!.layerAdd(name));
+      if (ok) {
+        const l = state.layers.layers[state.layers.active];
+        setStatus(
+          `Added layer “${l?.name ?? name}” — paint, fills and bakes land ` +
+            "there until you pick another.",
+        );
+      }
+      return ok;
+    },
+
+    duplicateLayer(index) {
+      return layerOp("Duplicate layer", () => engine!.layerDuplicate(index));
+    },
+
+    async removeLayer(index) {
+      const name = state.layers.layers[index]?.name ?? `layer ${index}`;
+      const ok = await layerOp("Remove layer", () => engine!.layerRemove(index));
+      if (ok) {
+        setStatus(
+          `Removed “${name}”. Layer structure is not journaled, and a removed ` +
+            "layer's history could never be replayed — so the undo history was " +
+            "CLEARED. Nothing before this point can be undone.",
+        );
+      }
+      return ok;
+    },
+
+    reorderLayer(from, to) {
+      return layerOp("Reorder layers", () => engine!.layerReorder(from, to));
+    },
+
+    setActiveLayer(index) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerSetActive(index);
+      } catch (err) {
+        setStatus(`Select layer failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      refreshLayers();
+      emit();
+      return true;
+    },
+
+    setLayerVisible(index, visible) {
+      return layerOp("Layer visibility", () => engine!.layerSetVisible(index, visible));
+    },
+
+    setLayerOpacity(index, opacity) {
+      return layerOp("Layer opacity", () => engine!.layerSetOpacity(index, opacity));
+    },
+
+    setLayerBlend(index, blend) {
+      return layerOp("Layer blend", () => engine!.layerSetBlend(index, blend));
+    },
+
+    setLayerLocked(index, locked) {
+      // A lock changes no pixel, so it does not re-composite.
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerSetLocked(index, locked);
+      } catch (err) {
+        setStatus(`Layer lock failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      refreshLayers();
+      emit();
+      return true;
+    },
+
+    setLayerName(index, name) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerSetName(index, name);
+      } catch (err) {
+        setStatus(`Rename failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      refreshLayers();
+      emit();
+      return true;
+    },
+
+    async bakeAdjustToLayer() {
+      if (!engine || !state.source) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      state.busy = true;
+      emit();
+      try {
+        await engine.layersBakeAdjust(state.params);
+      } catch (err) {
+        // Identity, a locked layer, or no device — the engine's reason.
+        setStatus(`Bake failed: ${err instanceof Error ? err.message : err}`);
+        state.busy = false;
+        emit();
+        return false;
+      }
+      const name = state.layers.layers[state.layers.active]?.name ?? "the active layer";
+      state.busy = false;
+      // The chain is now IN the pixels, so the panel returns to identity
+      // — leaving the sliders up would apply it a second time on Apply.
+      state.params = freshIdentityParams();
+      state.saveBack = null;
+      const ok = await recomposite();
+      if (ok) {
+        setStatus(
+          `Baked the adjustments into layer “${name}” (undoable) and reset ` +
+            "the panel to identity — the chain now lives in those pixels.",
+        );
+      }
+      return ok;
+    },
+
+    undo() {
+      return historyStep(true);
+    },
+
+    redo() {
+      return historyStep(false);
     },
 
     brushCancel() {
@@ -1358,7 +1722,11 @@ export function createImageSession(host: BundleHost): ImageSession {
         engine,
         () => (state.source ? state.source.handle : null),
       );
-      tileClaim = { elementId: target, dispose: () => claim.dispose() };
+      tileClaim = {
+      elementId: target,
+      dispose: () => claim.dispose(),
+      bump: () => claim.bump(),
+    };
       setStatus(
         `Claimed tile resource for the frame (level-0 lane; ${src.width}×${src.height}). ` +
           "The renderer pulls tiles at its current scale.",

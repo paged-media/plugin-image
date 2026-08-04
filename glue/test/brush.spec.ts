@@ -237,7 +237,9 @@ describe("the engine facade's brush doors", () => {
         calls.push({ fn: "extend", args });
         return new Uint8Array([1, 2, 3, 4]);
       },
-      brush_stroke_commit: () => ({ handle: 9, width: 4, height: 2, free() {} }),
+      // Async since the layer lane: the commit writes into the active
+      // layer and re-composites the stack before it answers.
+      brush_stroke_commit: async () => ({ handle: 9, width: 4, height: 2, free() {} }),
       brush_stroke_cancel: () => {
         calls.push({ fn: "cancel", args: [] });
       },
@@ -284,10 +286,10 @@ describe("the engine facade's brush doors", () => {
     expect(Array.from(color as Float32Array)).toEqual([1, 0, 0.5, 1]);
   });
 
-  it("commit hands back the new engine handle and frees the wrapper", async () => {
+  it("commit hands back the engine handle and frees the wrapper", async () => {
     const { engine } = fakeWasm();
     expect(await engine.brushExtend(1, 2, 0.5)).toEqual(new Uint8Array([1, 2, 3, 4]));
-    expect(engine.brushCommit()).toEqual({ handle: 9, width: 4, height: 2 });
+    expect(await engine.brushCommit()).toEqual({ handle: 9, width: 4, height: 2 });
     expect(engine.brushActive()).toBe(true);
   });
 
@@ -606,29 +608,43 @@ describe("the panel's Brush section", () => {
     expect(render()).toContain(BRUSH_SCOPE_NOTE);
   });
 
-  it("the scope note states every consequence of having no layer graph", () => {
-    // No layer graph — the fact everything else follows from.
-    expect(BRUSH_SCOPE_NOTE).toContain("There is no layer graph here");
-    expect(BRUSH_SCOPE_NOTE).toContain("SINGLE engine-held image");
-    expect(BRUSH_SCOPE_NOTE).toContain("not a paint layer above the photo");
-    // The commit is destructive into the engine pixels.
-    expect(BRUSH_SCOPE_NOTE).toContain("destructive");
+  it("the scope note states what the layer graph did and did NOT change", () => {
+    // What changed: a stroke lands in the ACTIVE LAYER and is undoable.
+    expect(BRUSH_SCOPE_NOTE).toContain("A stroke paints the ACTIVE LAYER");
+    expect(BRUSH_SCOPE_NOTE).toContain("not the flattened image");
+    expect(BRUSH_SCOPE_NOTE).toContain("UNDOABLE");
+    expect(BRUSH_SCOPE_NOTE).toContain("tiles it touched are journaled");
+    // …but the undo is BOUNDED, and the bound is a number, not a mood.
+    expect(BRUSH_SCOPE_NOTE).toContain("BOUNDED");
+    expect(BRUSH_SCOPE_NOTE).toContain("32 steps or 256 MB");
+    expect(BRUSH_SCOPE_NOTE).toContain("become permanent");
+    // What did NOT change: paint still covers what is under it in ITS
+    // layer, and layer structure is not journaled at all.
+    expect(BRUSH_SCOPE_NOTE).toContain("destructive INTO its own layer");
     expect(BRUSH_SCOPE_NOTE).toContain("what it covered is gone");
-    // …but NOT into the document or the file.
+    expect(BRUSH_SCOPE_NOTE).toContain("STRUCTURE");
+    expect(BRUSH_SCOPE_NOTE).toContain("is not journaled");
+    // …and the document is still never touched.
     expect(BRUSH_SCOPE_NOTE).toContain(
       "The document and the source file are never touched",
     );
-    // …and the only restore this plugin owns is a re-ingest.
-    expect(BRUSH_SCOPE_NOTE).toContain("no undo for a stroke");
-    expect(BRUSH_SCOPE_NOTE).toContain(
-      "re-ingesting the file is the only restore it has",
-    );
     // The in-flight escape hatch is real and is named.
     expect(BRUSH_SCOPE_NOTE).toContain("can be abandoned");
-    // The live preview's honest seam.
+    // The live preview's honest seam — now the whole stack, not one buffer.
+    expect(BRUSH_SCOPE_NOTE).toContain("the whole stack");
     expect(BRUSH_SCOPE_NOTE).toContain("the adjustment chain re-runs on release");
-    // Words that would make it a nicer lie.
-    expect(BRUSH_SCOPE_NOTE).not.toContain("undoable");
+    // Words that would make it a nicer lie: undo is bounded and layer
+    // pixels are still overwritten, so neither of these may appear.
     expect(BRUSH_SCOPE_NOTE).not.toContain("non-destructive");
+    expect(BRUSH_SCOPE_NOTE).not.toContain("unlimited");
+  });
+
+  it("the note no longer claims the thing the layer graph disproved", () => {
+    // The caveat this work exists to retire. If someone reverts the
+    // layer graph without reverting the note, this fails.
+    expect(BRUSH_SCOPE_NOTE).not.toContain("There is no layer graph");
+    expect(BRUSH_SCOPE_NOTE).not.toContain("SINGLE engine-held image");
+    expect(BRUSH_SCOPE_NOTE).not.toContain("no undo for a stroke");
+    expect(BRUSH_SCOPE_NOTE).not.toContain("only restore it has");
   });
 });

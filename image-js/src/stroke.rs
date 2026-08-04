@@ -33,24 +33,25 @@
 //! The PAINT SESSION — one in-flight brush stroke, behind the wasm
 //! `brush_stroke_*` doors.
 //!
-//! # Honest scope: there is no layer graph
+//! # Scope: a stroke lands in the ACTIVE LAYER
 //!
-//! paged.image holds ONE image per handle. A stroke therefore paints
-//! into that single engine-held image — not into a paint layer, not into
-//! a layer above the photo. There is nothing to hide behind the word
-//! "layer" here and the UI says so in as many words. The consequences
-//! are real and are not papered over:
+//! A stroke paints ONE buffer, and which buffer that is comes from the
+//! caller: [`StrokeSession::begin_on`] takes the pixels directly, so the
+//! wasm doors hand it the ACTIVE LAYER of the bound [`crate::layers`]
+//! stack. The layers below and above are untouched, the composite is
+//! re-folded from the stack on commit, and the edit is journaled — so a
+//! committed stroke is undoable, tile-granularly, within the journal's
+//! stated bound.
 //!
-//! * A committed stroke is DESTRUCTIVE into the engine's working pixels
-//!   (the crop / resize / fill commit pattern: it registers a NEW
-//!   engine-held image and the caller swaps handles). The DOCUMENT and
-//!   the source file are still untouched — re-ingesting the frame
-//!   restores the original pixels, and that is the only "undo" this
-//!   plugin owns.
-//! * The `image-graph` (Engine B) COW/undo journaling that would make a
-//!   stroke a first-class undoable operation is a recorded deferral in
-//!   that crate; see the note on [`StrokeSession`] for exactly what was
-//!   wanted from it and what exists today.
+//! What remains true and is not papered over:
+//!
+//! * The stroke is still destructive INTO ITS OWN LAYER: painting on the
+//!   background layer covers what was there. Painting on an empty layer
+//!   above it does not, which is the point of having a stack.
+//! * The DOCUMENT and the source file are never touched (the in-frame
+//!   result is a preview layer), and undo is bounded — see
+//!   `image_graph::journal` for the depth/byte budget and exactly what
+//!   happens at it.
 //!
 //! # The gesture / commit split
 //!
@@ -257,7 +258,7 @@ pub const MAX_SPACING_FRACTION: f32 = 4.0;
 
 /// One in-flight stroke.
 ///
-/// # What was wanted from `image-graph`, and what exists
+/// # What came from `image-graph`, and what is still open
 ///
 /// Engine B has exactly the right SHAPE for this: a `gesture` (ephemeral
 /// param override) / `set_params` (committed) split, per-node sparse
@@ -265,27 +266,22 @@ pub const MAX_SPACING_FRACTION: f32 = 4.0;
 /// propagation. A stroke in progress is the textbook gesture and a
 /// released stroke the textbook commit.
 ///
-/// What it does not have is the thing a stroke actually needs: paint is
-/// not a PARAMETER change, it is a WRITE, and `BufferGraph`'s write path
-/// (`write_source_tile`) has no undo journal — the COW `Arc<Tile>`
-/// snapshot log is a documented deferral in `image-graph/src/lib.rs`.
-/// Routing a stroke through Engine B today would therefore buy tile
-/// caching while still leaving this session to own the base snapshot and
-/// the dirty-rectangle bookkeeping — the two things it exists for. So it
-/// does NOT ride Engine B; it keeps a flat base snapshot and its own
-/// dirty rect, and what it needs from Engine B is recorded here rather
-/// than half-built:
+/// Paint is not a PARAMETER change though, it is a WRITE — so the piece
+/// that was actually needed was the COW undo journal, and that now
+/// EXISTS (`image_graph::journal`). The stroke's COMMIT rides it: the
+/// caller records the stroke's damage tiles into the bound layer stack's
+/// journal, which snapshots `Arc` handles rather than pixels. What is
+/// still open, and is recorded here rather than half-built:
 ///
-/// 1. **`WriteBuffer` COW journaling** — so `begin`'s snapshot becomes a
-///    generation marker instead of a full-image `Vec<u8>` clone.
-/// 2. **A tiled accumulation buffer** — so the coverage field is sparse
-///    over the stroke's tiles instead of dense over the image.
-/// 3. **A resident output texture** — so `extend` does not read a window
+/// 1. **A tiled accumulation buffer** — so the coverage field is sparse
+///    over the stroke's tiles instead of dense over the image, and so
+///    `begin`'s working buffer need not be a full-image clone.
+/// 2. **A resident output texture** — so `extend` does not read a window
 ///    back to the CPU at all (the same Stage-B dependency the composite
 ///    round-trip has; see the door docs in `lib.rs`).
 ///
-/// None of the three is required for correctness, and all three are
-/// invisible to this type's callers.
+/// Neither is required for correctness, and both are invisible to this
+/// type's callers.
 pub struct StrokeSession {
     /// The engine handle the stroke started from.
     handle: u32,
@@ -315,18 +311,51 @@ impl StrokeSession {
         params: StrokeParams,
         selection: Option<Arc<SelectionCoverage>>,
     ) -> Result<StrokeSession, IngestError> {
-        if image.width == 0 || image.height == 0 {
+        StrokeSession::begin_on(
+            handle,
+            image.width,
+            image.height,
+            Arc::clone(&image.rgba),
+            params,
+            selection,
+        )
+    }
+
+    /// Open a stroke on RAW PIXELS — the LAYER lane. `base` is
+    /// canvas-extent straight RGBA8 and is the buffer the stroke paints;
+    /// the wasm doors pass the bound stack's ACTIVE LAYER, so a stroke
+    /// lands there and not in the flattened image.
+    ///
+    /// `handle` still identifies the engine-held IMAGE the stroke belongs
+    /// to (the selection is gated on it, and the commit re-composites
+    /// it) — the layer is which buffer, the handle is which document.
+    pub fn begin_on(
+        handle: u32,
+        width: u32,
+        height: u32,
+        base: Arc<[u8]>,
+        params: StrokeParams,
+        selection: Option<Arc<SelectionCoverage>>,
+    ) -> Result<StrokeSession, IngestError> {
+        if width == 0 || height == 0 {
             return Err(IngestError::Unsupported(
                 "cannot paint on an empty image".into(),
             ));
         }
+        let want = (width as usize) * (height as usize) * 4;
+        if base.len() != want {
+            return Err(IngestError::Decode(format!(
+                "paint base is {} bytes for {width}×{height} (expected {want})",
+                base.len()
+            )));
+        }
         Ok(StrokeSession {
             handle,
-            width: image.width,
-            height: image.height,
-            base: Arc::clone(&image.rgba),
-            working: image.rgba.to_vec(),
-            accumulator: StrokeAccumulator::new(image.width, image.height),
+            width,
+            height,
+            working: base.to_vec(),
+            base,
+            accumulator: StrokeAccumulator::new(width, height),
             params: params.sanitized(),
             selection,
             last: None,
@@ -483,8 +512,9 @@ impl StrokeSession {
         }
     }
 
-    /// Finish: hand back the painted pixels. The caller registers them as
-    /// a new engine-held image (the destructive-commit pattern).
+    /// Finish: hand back the painted pixels. The caller writes them into
+    /// the ACTIVE LAYER — journaling the tiles [`Self::stroke_bounds`]
+    /// covers — and re-composites the stack.
     pub fn commit(self) -> Vec<u8> {
         self.working
     }
@@ -650,6 +680,34 @@ mod tests {
         if let Ok(e) = empty {
             assert!(StrokeSession::begin(1, &e, params(StrokeTool::Brush), None).is_err());
         }
+    }
+
+    #[test]
+    fn image_editor_paint_begin_on_takes_layer_pixels_and_checks_their_extent() {
+        // The LAYER lane: a stroke opens on raw pixels, not on the
+        // engine-held image, so it can paint the active layer.
+        let pixels: std::sync::Arc<[u8]> =
+            std::sync::Arc::from(vec![7u8; 16 * 16 * 4].into_boxed_slice());
+        let s = StrokeSession::begin_on(
+            3,
+            16,
+            16,
+            std::sync::Arc::clone(&pixels),
+            params(StrokeTool::Brush),
+            None,
+        )
+        .expect("well-sized");
+        assert_eq!(s.pixels(), &pixels[..]);
+        // A mis-sized buffer is a clean error, never a torn stroke.
+        assert!(StrokeSession::begin_on(
+            3,
+            16,
+            16,
+            std::sync::Arc::from(vec![0u8; 4].into_boxed_slice()),
+            params(StrokeTool::Brush),
+            None
+        )
+        .is_err());
     }
 
     #[test]

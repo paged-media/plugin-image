@@ -93,7 +93,12 @@ export {
   type BrushSample,
 } from "./brush-machine";
 export { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
-export { BRUSH_SCOPE_NOTE, BrushSection } from "./panels/image-panel";
+export {
+  BRUSH_SCOPE_NOTE,
+  BrushSection,
+  LAYERS_SCOPE_NOTE,
+  LayersSection,
+} from "./panels/image-panel";
 export {
   fitInto,
   imageToPage,
@@ -103,6 +108,10 @@ export {
 } from "./frame-fit";
 export {
   selectionModeCode,
+  EMPTY_LAYER_STACK,
+  type LayerHistory,
+  type LayerInfo,
+  type LayerStackInfo,
   type SelectionMode,
   type SelectionStats,
 } from "./engine";

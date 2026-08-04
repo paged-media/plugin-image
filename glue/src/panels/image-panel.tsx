@@ -38,6 +38,8 @@ import type {
   BrushStats,
   GradientKind,
   ImageHistogram,
+  LayerHistory,
+  LayerInfo,
   LevelsChannel,
   PressureTarget,
   ResampleFilter,
@@ -396,16 +398,43 @@ const BRUSH_COLORS: Array<{ name: string; rgba: Rgba01 }> = [
  * panel's `APPEARANCE_BAKE_NOTE` convention).
  */
 export const BRUSH_SCOPE_NOTE =
-  "There is no layer graph here. A stroke paints the SINGLE engine-held " +
-  "image — not a paint layer above the photo — so a committed stroke is " +
-  "destructive into those pixels, the same way a crop or a fill is: the " +
-  "painted result becomes the working image and what it covered is gone. " +
-  "The document and the source file are never touched (the in-frame result " +
-  "stays a preview layer), which is also why this plugin owns no undo for " +
-  "a stroke: re-ingesting the file is the only restore it has. A stroke " +
+  "A stroke paints the ACTIVE LAYER, not the flattened image — add a layer " +
+  "and what is underneath survives. A committed stroke is UNDOABLE: the " +
+  "tiles it touched are journaled and Undo restores them byte for byte. " +
+  "That history is BOUNDED — 32 steps or 256 MB, whichever runs out first; " +
+  "past the bound the oldest edits are dropped and become permanent, and " +
+  "the panel says how many. Painting is still destructive INTO its own " +
+  "layer: paint on the background and what it covered is gone. Layer " +
+  "STRUCTURE — add, remove, reorder, opacity, blend — is not journaled, so " +
+  "a removed layer does not come back. The document and the source file " +
+  "are never touched (the in-frame result stays a preview layer). A stroke " +
   "still in flight can be abandoned — the base pixels are held until you " +
-  "release. While you drag, the frame shows the painted pixels themselves; " +
-  "the adjustment chain re-runs on release.";
+  "release. While you drag, the frame shows the whole stack with the " +
+  "stroke composited into it; the adjustment chain re-runs on release.";
+
+/**
+ * THE SCOPE OF THE LAYER GRAPH itself — what a layer here is and, more
+ * to the point, what it is not. Exported and spec-pinned for the same
+ * reason as [`BRUSH_SCOPE_NOTE`].
+ */
+export const LAYERS_SCOPE_NOTE =
+  "Layers are canvas-extent PIXEL layers composited bottom-up through the " +
+  "engine's own compose.* kernels — the same 26 blend modes the brush " +
+  "paints through, so nothing here is a second implementation. There are " +
+  "no groups, no clipping masks, no per-layer masks and no adjustment " +
+  "layers: an adjustment is either the panel's re-runnable preview over " +
+  "the whole composite, or a one-way bake into the active layer. Undo " +
+  "covers PIXEL edits only — paint, fills and bakes; adding, removing, " +
+  "reordering and re-blending are not journaled, and removing a layer " +
+  "clears the history outright (its entries could never be replayed). A " +
+  "crop, resize or straighten changes the canvas extent and therefore " +
+  "FLATTENS the stack, and the undo history goes with it. Export and " +
+  "save-back write the FLATTENED composite, not the layers — this stack " +
+  "lives in the session, and a PSD saved back is still one layer or a " +
+  "flatten, exactly as it was before. A PSD opens as its own layers only " +
+  "when this model reproduces it exactly — flat, unclipped, unmasked, " +
+  "8-bit RGB; anything else keeps Photoshop's merged composite as a " +
+  "single layer and says why.";
 
 /** The paint parameters section — a PURE component (props in, elements
  *  out, no hooks) so a spec can render it without a DOM and assert what
@@ -572,6 +601,251 @@ export function BrushSection({
         door); the blend list is the engine&apos;s own `compose.*` kernel
         registry. Parameters are frozen into each stroke at pointer-down —
         a stroke whose size changed halfway through would not replay.
+      </div>
+    </>
+  );
+}
+
+/** Bytes → a compact "12.3 MB" for the history readout. */
+function mb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The LAYERS palette + the undo readout — a PURE component (props in,
+ *  elements out, no hooks) so a spec can render it without a DOM and
+ *  assert what it says. Rows read TOP-DOWN (a layers palette's
+ *  convention); the engine's own order is bottom-first. */
+export function LayersSection({
+  layers,
+  active,
+  history,
+  blendModes,
+  layersNote,
+  gpu,
+  disabled,
+  onSelect,
+  onAdd,
+  onDuplicate,
+  onRemove,
+  onMove,
+  onVisible,
+  onOpacity,
+  onBlend,
+  onLock,
+  onBake,
+  onUndo,
+  onRedo,
+}: {
+  /** BOTTOM-first, as the engine holds them. */
+  layers: readonly LayerInfo[];
+  active: number;
+  history: LayerHistory | null;
+  blendModes: readonly string[];
+  /** How the stack was opened (the PSD lane's honest one-liner). */
+  layersNote: string | null;
+  gpu: boolean;
+  disabled: boolean;
+  onSelect: (index: number) => void;
+  onAdd: () => void;
+  onDuplicate: (index: number) => void;
+  onRemove: (index: number) => void;
+  onMove: (from: number, to: number) => void;
+  onVisible: (index: number, visible: boolean) => void;
+  onOpacity: (index: number, opacity: number) => void;
+  onBlend: (index: number, blend: string) => void;
+  onLock: (index: number, locked: boolean) => void;
+  onBake: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+}) {
+  // Top-down for reading; the engine's indices are preserved on each row.
+  const rows = [...layers].reverse();
+  const multi = layers.length > 1;
+  return (
+    <>
+      <div style={sectionTitle} data-image-layers-title>
+        Layers{layers.length > 0 ? ` (${layers.length})` : ""}
+      </div>
+      {layers.length === 0 ? (
+        <div style={note}>Ingest an image to open its layer stack.</div>
+      ) : null}
+      {rows.map((l) => (
+        <div
+          key={l.id}
+          data-image-layer-row={l.index}
+          style={{
+            ...row,
+            background:
+              l.index === active ? "var(--pg-accent-soft, rgba(127,127,255,0.12))" : undefined,
+          }}
+        >
+          <span style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+            <input
+              type="checkbox"
+              title="Visible"
+              data-image-layer-visible={l.index}
+              checked={l.visible}
+              disabled={disabled}
+              onChange={(e) => onVisible(l.index, e.target.checked)}
+            />
+            <button
+              type="button"
+              data-image-layer-select={l.index}
+              disabled={disabled}
+              onClick={() => onSelect(l.index)}
+              style={{
+                font: "12px var(--font-sans, sans-serif)",
+                fontWeight: l.index === active ? 600 : 400,
+                background: "none",
+                border: "none",
+                padding: 0,
+                cursor: "pointer",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {l.name}
+              {l.index === active ? " ●" : ""}
+            </button>
+          </span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <select
+              data-image-layer-blend={l.index}
+              value={l.blend}
+              disabled={disabled || blendModes.length === 0}
+              title="Blend mode"
+              onChange={(e) => onBlend(l.index, e.target.value)}
+              style={{ font: "11px var(--font-sans, sans-serif)", maxWidth: 96 }}
+            >
+              {(blendModes.length > 0 ? blendModes : [l.blend]).map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              title="Opacity"
+              data-image-layer-opacity={l.index}
+              value={l.opacity}
+              disabled={disabled}
+              onChange={(e) => onOpacity(l.index, Number(e.target.value))}
+              style={{ width: 56 }}
+            />
+            <input
+              type="checkbox"
+              title="Lock pixels (paint, fills and bakes refuse; properties still move)"
+              data-image-layer-lock={l.index}
+              checked={l.locked}
+              disabled={disabled}
+              onChange={(e) => onLock(l.index, e.target.checked)}
+            />
+            <button
+              type="button"
+              title="Move up"
+              data-image-layer-up={l.index}
+              disabled={disabled || l.index === layers.length - 1}
+              onClick={() => onMove(l.index, l.index + 1)}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              title="Move down"
+              data-image-layer-down={l.index}
+              disabled={disabled || l.index === 0}
+              onClick={() => onMove(l.index, l.index - 1)}
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              title="Duplicate"
+              data-image-layer-duplicate={l.index}
+              disabled={disabled}
+              onClick={() => onDuplicate(l.index)}
+            >
+              ⧉
+            </button>
+            <button
+              type="button"
+              title={
+                multi
+                  ? "Remove (NOT undoable — layer structure is not journaled)"
+                  : "A document keeps at least one layer"
+              }
+              data-image-layer-remove={l.index}
+              disabled={disabled || !multi}
+              onClick={() => onRemove(l.index)}
+            >
+              ✕
+            </button>
+          </span>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 6, marginTop: "var(--space-1, 4px)" }}>
+        <button type="button" data-image-layer-add disabled={disabled} onClick={onAdd}>
+          Add layer
+        </button>
+        <button
+          type="button"
+          data-image-layer-bake
+          disabled={disabled || !gpu}
+          title="Bake the adjustment chain destructively into the active layer (undoable)"
+          onClick={onBake}
+        >
+          Bake adjustments into layer
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginTop: "var(--space-1, 4px)" }}>
+        <button
+          type="button"
+          data-image-undo
+          disabled={disabled || !history?.canUndo}
+          onClick={onUndo}
+        >
+          Undo{history?.undoLabel ? ` ${history.undoLabel}` : ""}
+        </button>
+        <button
+          type="button"
+          data-image-redo
+          disabled={disabled || !history?.canRedo}
+          onClick={onRedo}
+        >
+          Redo{history?.redoLabel ? ` ${history.redoLabel}` : ""}
+        </button>
+      </div>
+      {history ? (
+        <div style={note} data-image-history-readout>
+          History: {history.depth} undo / {history.redoDepth} redo, {mb(history.bytes)} of{" "}
+          {mb(history.maxBytes)} and {history.maxEntries} steps.
+          {history.dropped > 0
+            ? ` ${history.dropped} older edit${
+                history.dropped === 1 ? "" : "s"
+              } fell past that bound and ${
+                history.dropped === 1 ? "is" : "are"
+              } now permanent.`
+            : " Nothing has fallen past the bound yet."}
+        </div>
+      ) : null}
+      {layersNote ? (
+        <div style={note} data-image-layers-source-note>
+          {layersNote}
+        </div>
+      ) : null}
+      {!gpu && layers.length > 1 ? (
+        <div style={note}>
+          Compositing more than one layer is GPU-only — every blend is a
+          registered WGSL kernel dispatch and no CPU blend path ships. Without
+          a WebGPU device only a single visible layer at full opacity in
+          normal mode can be shown (that fold is the identity).
+        </div>
+      ) : null}
+      <div style={note} data-image-layers-note>
+        {LAYERS_SCOPE_NOTE}
       </div>
     </>
   );
@@ -1089,6 +1363,31 @@ export function makeImagePanel(session: ImageSession) {
           />
           Invert colors
         </label>
+
+        {/* LAYERS — the layer graph itself: order, visibility, opacity,
+            blend and the active-layer choice paint/fill/bake land in,
+            plus the journal's undo/redo and its stated bound. */}
+        <LayersSection
+          layers={s.layers.layers}
+          active={s.layers.active}
+          history={s.history}
+          blendModes={s.blendModes}
+          layersNote={s.layersNote}
+          gpu={s.gpu}
+          disabled={disabled}
+          onSelect={(i) => session.setActiveLayer(i)}
+          onAdd={() => void session.addLayer()}
+          onDuplicate={(i) => void session.duplicateLayer(i)}
+          onRemove={(i) => void session.removeLayer(i)}
+          onMove={(from, to) => void session.reorderLayer(from, to)}
+          onVisible={(i, v) => void session.setLayerVisible(i, v)}
+          onOpacity={(i, v) => void session.setLayerOpacity(i, v)}
+          onBlend={(i, b) => void session.setLayerBlend(i, b)}
+          onLock={(i, v) => session.setLayerLocked(i, v)}
+          onBake={() => void session.bakeAdjustToLayer()}
+          onUndo={() => void session.undo()}
+          onRedo={() => void session.redo()}
+        />
 
         {/* BRUSH — the paint tools' frozen-at-pointer-down parameters
             (paged.image's RASTER brush/pencil/eraser, distinct from

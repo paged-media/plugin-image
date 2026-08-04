@@ -522,6 +522,51 @@ export interface BrushStats {
   h: number;
 }
 
+// ────────────────────────────── LAYERS ───────────────────────────────
+
+/** One row of the engine's layer stack (`layers_list`). BOTTOM-first:
+ *  `index` 0 is the bottom-most layer, exactly as the engine composites
+ *  and as PSD stores them (the panel renders the list reversed, because
+ *  a layers palette reads top-down). */
+export interface LayerInfo {
+  index: number;
+  /** Stable across reorders — the key the UI lists rows by. */
+  id: number;
+  name: string;
+  visible: boolean;
+  /** Pixel lock: paint / fill / bake refuse; properties still move. */
+  locked: boolean;
+  /** 0–1. */
+  opacity: number;
+  /** A `compose.*` wire name (the prefix dropped). */
+  blend: string;
+}
+
+export interface LayerStackInfo {
+  /** Index of the layer edits land in; -1 when no stack is open. */
+  active: number;
+  layers: LayerInfo[];
+}
+
+/** The undo readout (`layers_history`). The BOUND is part of it on
+ *  purpose: a journal that silently forgets is worse than one that says
+ *  how much it holds. `dropped` counts entries the bound evicted. */
+export interface LayerHistory {
+  canUndo: boolean;
+  canRedo: boolean;
+  depth: number;
+  redoDepth: number;
+  bytes: number;
+  maxBytes: number;
+  maxEntries: number;
+  dropped: number;
+  generation: number;
+  undoLabel: string | null;
+  redoLabel: string | null;
+}
+
+export const EMPTY_LAYER_STACK: LayerStackInfo = { active: -1, layers: [] };
+
 /** One PSD layer-record row (`psd_layer_list`), record order. */
 export interface PsdLayerInfo {
   index: number;
@@ -715,7 +760,12 @@ export interface ImageEngine {
    *  GPU-only: `brushBegin` rejects without a device. */
   brushBegin(handle: number, tool: StrokeTool, params: BrushParams): void;
   brushExtend(x: number, y: number, pressure: number): Promise<Uint8Array>;
-  brushCommit(): DecodedInfo;
+  /** CLOSE the stroke. With a layer stack bound the painted pixels go
+   *  into the ACTIVE LAYER (journaled — undoable), the stack is
+   *  re-composited, and the returned handle is the SAME one you started
+   *  with (do NOT free it). Without a stack it registers a new
+   *  engine-held image, as it did before layers existed. */
+  brushCommit(): Promise<DecodedInfo>;
   brushCancel(): void;
   brushActive(): boolean;
   /** The in-flight stroke's readout, or null before the first dab lands. */
@@ -724,6 +774,58 @@ export interface ImageEngine {
    *  `compose.*` registry — so the panel's picker cannot drift from the
    *  kernels that actually exist. */
   brushBlendModes(): string[];
+
+  /** LAYER doors. One stack per engine realm, BOUND to an image handle
+   *  (the selection's pattern). `layersOpen` seeds it with that image's
+   *  pixels as a single "Background" layer — O(1), the pixels are
+   *  shared. The bound image IS the stack's composite: `layersComposite`
+   *  folds the stack and writes the result back into the SAME handle, so
+   *  the adjust chain, tiles, histogram and save-back keep working
+   *  against one handle and never learn what a layer is. */
+  layersOpen(handle: number): void;
+  /** Open the stack from a retained PSD parse — the file's own layer
+   *  tree instead of its flattened composite. Returns the layer count;
+   *  THROWS with the engine's stated reason for every PSD the layer
+   *  model does not reproduce (groups, clipping, masks, non-8-bit-RGB,
+   *  over budget), and the caller then keeps the flatten. */
+  layersOpenFromPsd(imageHandle: number, psdHandle: number): number;
+  layersClose(): void;
+  /** The bound handle, or -1. */
+  layersBound(): number;
+  /** The stack, BOTTOM-first. Empty (`active: -1`) when none is open. */
+  layers(): LayerStackInfo;
+  /** The undo readout, or null when no stack is open. */
+  layersHistory(): LayerHistory | null;
+  /** Add an empty transparent layer above the active one (it becomes
+   *  active); returns its index. */
+  layerAdd(name: string): number;
+  layerDuplicate(index: number): number;
+  /** Remove a layer. THROWS on the last one (a document keeps at least
+   *  one) — and it is NOT journaled, so the pixels are gone. */
+  layerRemove(index: number): void;
+  layerReorder(from: number, to: number): void;
+  layerSetActive(index: number): void;
+  layerSetVisible(index: number, visible: boolean): void;
+  layerSetLocked(index: number, locked: boolean): void;
+  layerSetOpacity(index: number, opacity: number): void;
+  layerSetName(index: number, name: string): void;
+  /** Set the blend by `compose.*` wire name; an unregistered name
+   *  THROWS rather than silently becoming normal. */
+  layerSetBlend(index: number, blend: string): void;
+  /** Fold the stack and write the result into the bound image; returns
+   *  the straight RGBA8. GPU-only whenever there is anything to blend; a
+   *  single plain visible layer needs no device at all. */
+  layersComposite(): Promise<Uint8Array>;
+  /** BAKE the adjustment chain destructively into the ACTIVE layer
+   *  (journaled, so undoable). The panel's chain is otherwise a
+   *  re-runnable preview that mutates nothing. Throws at identity, on a
+   *  locked layer, and without a GPU. */
+  layersBakeAdjust(params: AdjustParams): Promise<Uint8Array>;
+  /** Undo/redo the newest journaled PIXEL edit (paint / fill / bake) and
+   *  re-composite. Resolves to the edit's label, or "" when there is
+   *  nothing to do. Layer STRUCTURE changes are not journaled. */
+  layersUndo(): Promise<string>;
+  layersRedo(): Promise<string>;
 }
 
 // ---------------------------------------------------- wasm surface shape
@@ -906,7 +1008,7 @@ export interface ImageWasmModule {
     pressure_target: string,
   ): void;
   brush_stroke_extend(x: number, y: number, pressure: number): Promise<Uint8Array>;
-  brush_stroke_commit(): DecodedHandleWasm;
+  brush_stroke_commit(): Promise<DecodedHandleWasm>;
   brush_stroke_cancel(): void;
   brush_stroke_active(): boolean;
   brush_stroke_stats(): Float64Array;
@@ -918,6 +1020,44 @@ export interface ImageWasmModule {
   psd_remove_layer(handle: number, layer: number): void;
   psd_save(handle: number): Uint8Array;
   psd_close(handle: number): void;
+  layers_open(handle: number): void;
+  layers_open_from_psd(image_handle: number, psd_handle: number): number;
+  layers_close(): void;
+  layers_bound(): number;
+  layers_list(): string;
+  layers_history(): string;
+  layers_add(name: string): number;
+  layers_duplicate(index: number): number;
+  layers_remove(index: number): void;
+  layers_reorder(from: number, to: number): void;
+  layers_set_active(index: number): void;
+  layers_set_visible(index: number, visible: boolean): void;
+  layers_set_locked(index: number, locked: boolean): void;
+  layers_set_opacity(index: number, opacity: number): void;
+  layers_set_name(index: number, name: string): void;
+  layers_set_blend(index: number, blend: string): void;
+  layers_composite(): Promise<Uint8Array>;
+  layers_bake_adjust(
+    exposure_ev: number,
+    brightness: number,
+    contrast: number,
+    saturation: number,
+    temp: number,
+    tint: number,
+    in_black: number,
+    in_white: number,
+    gamma: number,
+    out_black: number,
+    out_white: number,
+    curve_lut: Uint8Array,
+    blur_sigma: number,
+    sharpen_amount: number,
+    hue_degrees: number,
+    invert: boolean,
+    ext: Float32Array,
+  ): Promise<Uint8Array>;
+  layers_undo(): Promise<string>;
+  layers_redo(): Promise<string>;
 }
 
 // ----------------------------------------------------------- the facade
@@ -1130,8 +1270,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.pressureTarget,
       ),
     brushExtend: (x, y, pressure) => wasm.brush_stroke_extend(x, y, pressure),
-    brushCommit() {
-      const h = wasm.brush_stroke_commit();
+    async brushCommit() {
+      const h = await wasm.brush_stroke_commit();
       const info = { handle: h.handle, width: h.width, height: h.height };
       h.free();
       return info;
@@ -1150,6 +1290,54 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         .brush_blend_modes()
         .split("\n")
         .filter((n) => n.length > 0),
+    layersOpen: (handle) => wasm.layers_open(handle),
+    layersOpenFromPsd: (imageHandle, psdHandle) =>
+      wasm.layers_open_from_psd(imageHandle, psdHandle),
+    layersClose: () => wasm.layers_close(),
+    layersBound: () => wasm.layers_bound(),
+    layers() {
+      const parsed = JSON.parse(wasm.layers_list()) as LayerStackInfo;
+      return parsed.layers.length > 0 ? parsed : EMPTY_LAYER_STACK;
+    },
+    layersHistory() {
+      // The engine answers the JSON literal `null` when no stack is open.
+      return JSON.parse(wasm.layers_history()) as LayerHistory | null;
+    },
+    layerAdd: (name) => wasm.layers_add(name),
+    layerDuplicate: (index) => wasm.layers_duplicate(index),
+    layerRemove: (index) => wasm.layers_remove(index),
+    layerReorder: (from, to) => wasm.layers_reorder(from, to),
+    layerSetActive: (index) => wasm.layers_set_active(index),
+    layerSetVisible: (index, visible) => wasm.layers_set_visible(index, visible),
+    layerSetLocked: (index, locked) => wasm.layers_set_locked(index, locked),
+    layerSetOpacity: (index, opacity) => wasm.layers_set_opacity(index, opacity),
+    layerSetName: (index, name) => wasm.layers_set_name(index, name),
+    layerSetBlend: (index, blend) => wasm.layers_set_blend(index, blend),
+    layersComposite: () => wasm.layers_composite(),
+    layersBakeAdjust: (p) =>
+      // The SAME wire the preview chain uses (`adjust_image_ext` minus
+      // the handle) — one decode of the block, one meaning.
+      wasm.layers_bake_adjust(
+        p.exposureEv,
+        p.brightness,
+        p.contrast,
+        p.saturation,
+        p.temp,
+        p.tint,
+        p.levels.inBlack,
+        p.levels.inWhite,
+        p.levels.gamma,
+        p.levels.outBlack,
+        p.levels.outWhite,
+        p.curveLut ?? new Uint8Array(0),
+        p.blurSigma,
+        p.sharpenAmount,
+        p.hueDegrees,
+        p.invert,
+        packAdjustExt(p),
+      ),
+    layersUndo: () => wasm.layers_undo(),
+    layersRedo: () => wasm.layers_redo(),
   };
 }
 

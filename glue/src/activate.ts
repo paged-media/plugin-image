@@ -197,10 +197,11 @@ export function activate(host: BundleHost): BundleHandle {
   // gesture → machine → engine doors → overlay affordance). They paint
   // RASTER pixels into the ingested image, which is what distinguishes
   // them from paged.draw's VECTOR Paintbrush / Blob Brush / Eraser on
-  // the same rail — hence the "(raster)" in every title. Their scope is
-  // stated in as many words in the panel's Brush section (BRUSH_SCOPE_NOTE):
-  // there is no layer graph here, so a committed stroke is DESTRUCTIVE
-  // into the single engine-held image.
+  // the same rail — hence the "(raster)" in every title. They paint the
+  // ACTIVE LAYER of the session's layer stack, and a committed stroke is
+  // journaled (undoable, within the stated bound). The exact scope is
+  // spelled out in the panel's Brush + Layers sections
+  // (BRUSH_SCOPE_NOTE / LAYERS_SCOPE_NOTE), not only here.
   //
   // SHORTCUTS (INV-REG-1, globally unique tool shortcuts): "q" is the
   // last free single letter, and shift+f / shift+e are free in the shift
@@ -269,6 +270,49 @@ export function activate(host: BundleHost): BundleHandle {
     handler: () => {
       host.shell.openPanel(PANEL_ID);
       void session.fillSelection({ kind: "noise", amount: 0.5 });
+    },
+  });
+
+  // ── LAYER GRAPH commands (§6.2 — the layer stack's palette reach) ──
+  //
+  // The panel's Layers section carries the full palette (order,
+  // visibility, opacity, blend, lock, the active-layer choice); these
+  // are the command-palette reach for the four that deserve a shortcut
+  // surface. Undo/redo act on the plugin's OWN pixel journal — paint,
+  // fills and bakes on the ingested image — not on the host document's
+  // history, which the editor owns and which this plugin never mutates.
+  host.contribute.command({
+    id: "media.paged.image.command.addLayer",
+    title: "Add image layer",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.addLayer();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.bakeAdjustToLayer",
+    title: "Bake adjustments into the active layer",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.bakeAdjustToLayer();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.undo",
+    title: "Undo image edit",
+    category: "Image",
+    handler: () => {
+      void session.undo();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.redo",
+    title: "Redo image edit",
+    category: "Image",
+    handler: () => {
+      void session.redo();
     },
   });
 

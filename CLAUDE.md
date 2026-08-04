@@ -118,11 +118,14 @@ image-kernels/       KernelDef + WGSL ABI + kernel_family! (T0 families)
 image-gpu/           wgpu device, tile pool, residency, dispatch, WGSL assembly
 image-pipeline/      Engine A: lazy DAG, demand-driven ROI, op cache, sinks
 image-graph/         Engine B: tiled buffer graph — store, eval, tile cache,
-                     set_params/gesture split (COW undo journaling deferred)
+                     set_params/gesture split, COW undo journal (journal.rs:
+                     bounded, tile-granular, scoped per buffer)
 image-cms/           CmsEngine trait; qcms display backend (D-11: hybrid)
 image-codecs/        ImageSource/ImageTarget/ByteSource + adapters
 image-psd/           PSD/PSB model + parser + preservation writer
-image-js/            wasm-bindgen surface (the bundle's compute artifact)
+image-js/            wasm-bindgen surface (the bundle's compute artifact) +
+                     the LAYER GRAPH (layers.rs: the pixel-layer stack, its
+                     compose.* fold, and the journal-backed undo)
 image-conformance/   TEST-ONLY: scalar refs, parity harness, PSD fixture
                      builder, property tests, benches — never shipped
 references/          READ-ONLY clean-room mounts (gitignored; see §3.1)

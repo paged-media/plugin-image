@@ -245,20 +245,26 @@ export function brush_stroke_cancel() {
 }
 
 /**
- * COMMIT the stroke: register the painted pixels as a NEW
- * engine-held image and return its handle. The source handle is
- * left for the caller to free (the crop / fill commit pattern).
+ * COMMIT the stroke.
  *
- * The result is the same size, so the caller may carry the
- * selection over with `selection_transfer`.
- * @returns {DecodedHandle}
+ * * **With a layer stack bound** (the normal case): the painted
+ *   pixels are written into the ACTIVE LAYER, the tiles the stroke's
+ *   bounding box covers are journaled first (so the stroke is
+ *   undoable, tile-granularly, within the journal's stated bound),
+ *   and the stack is re-composited into the SAME engine-held image.
+ *   The returned handle is therefore the handle you started with —
+ *   the caller must NOT free it.
+ * * **Without one**: the pre-layer behaviour — the painted pixels
+ *   are registered as a NEW engine-held image and the caller swaps
+ *   handles and frees the old one.
+ *
+ * Either way the result is the same size, so the caller may carry
+ * the selection over with `selection_transfer`.
+ * @returns {Promise<DecodedHandle>}
  */
 export function brush_stroke_commit() {
     const ret = wasm.brush_stroke_commit();
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return DecodedHandle.__wrap(ret[0]);
+    return ret;
 }
 
 /**
@@ -481,7 +487,9 @@ export function fill_noise(handle, amount, seed) {
 }
 
 /**
- * Release an engine-held decoded image (and its mip pyramid cache).
+ * Release an engine-held decoded image (its mip pyramid cache, and
+ * the layer stack bound to it — a stack whose composite target is
+ * gone has nowhere to land).
  * @param {number} handle
  */
 export function free_image(handle) {
@@ -639,6 +647,298 @@ export function init_gpu() {
 export function kernel_count() {
     const ret = wasm.kernel_count();
     return ret >>> 0;
+}
+
+/**
+ * Add an empty transparent layer above the active one (it becomes
+ * active). Returns its index.
+ * @param {string} name
+ * @returns {number}
+ */
+export function layers_add(name) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_add(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] >>> 0;
+}
+
+/**
+ * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
+ * per-layer adjustment (the panel's chain is otherwise a re-runnable
+ * PREVIEW of the composite and mutates nothing). Journaled over the
+ * whole canvas, so it is undoable; refuses on a locked layer and at
+ * identity. Arguments mirror `adjust_image_ext` minus the handle.
+ * @param {number} exposure_ev
+ * @param {number} brightness
+ * @param {number} contrast
+ * @param {number} saturation
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} in_black
+ * @param {number} in_white
+ * @param {number} gamma
+ * @param {number} out_black
+ * @param {number} out_white
+ * @param {Uint8Array} curve_lut
+ * @param {number} blur_sigma
+ * @param {number} sharpen_amount
+ * @param {number} hue_degrees
+ * @param {boolean} invert
+ * @param {Float32Array} ext
+ * @returns {Promise<Uint8Array>}
+ */
+export function layers_bake_adjust(exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, curve_lut, blur_sigma, sharpen_amount, hue_degrees, invert, ext) {
+    const ptr0 = passArray8ToWasm0(curve_lut, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(ext, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_bake_adjust(exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, ptr0, len0, blur_sigma, sharpen_amount, hue_degrees, invert, ptr1, len1);
+    return ret;
+}
+
+/**
+ * The handle the stack is bound to, or `-1` when none is open.
+ * @returns {number}
+ */
+export function layers_bound() {
+    const ret = wasm.layers_bound();
+    return ret;
+}
+
+/**
+ * Drop the bound stack (and its undo history).
+ */
+export function layers_close() {
+    wasm.layers_close();
+}
+
+/**
+ * COMPOSITE the stack bottom-up and write the result back into the
+ * bound engine-held image, returning the straight RGBA8 (the C-1
+ * Stage-A payload). GPU-only whenever there is anything to blend; a
+ * single plain visible layer short-circuits to its own pixels with
+ * no dispatch at all, so a one-layer document needs no device.
+ * @returns {Promise<Uint8Array>}
+ */
+export function layers_composite() {
+    const ret = wasm.layers_composite();
+    return ret;
+}
+
+/**
+ * Duplicate `index` above itself (the copy becomes active).
+ * @param {number} index
+ * @returns {number}
+ */
+export function layers_duplicate(index) {
+    const ret = wasm.layers_duplicate(index);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] >>> 0;
+}
+
+/**
+ * The undo/redo readout as JSON — including the BOUND and how much
+ * of it is used, so "history is a window" is stated rather than
+ * discovered. `null` when no stack is open.
+ * @returns {string}
+ */
+export function layers_history() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.layers_history();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * The stack as JSON, BOTTOM-first:
+ * `{"active":i,"layers":[{index,id,name,visible,locked,opacity,blend}]}`.
+ * `opacity` is 0–1; `blend` is the `compose.*` wire name.
+ * @returns {string}
+ */
+export function layers_list() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.layers_list();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * OPEN a layer stack over an engine-held image: one full-canvas
+ * "Background" layer sharing that image's pixels. Re-opening on the
+ * SAME handle is a no-op (the stack survives); opening on a
+ * different handle replaces it, which is what a crop / resize /
+ * straighten commit does (it flattens).
+ * @param {number} handle
+ */
+export function layers_open(handle) {
+    const ret = wasm.layers_open(handle);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * OPEN a layer stack from a retained PSD parse instead of from the
+ * flattened composite — the PSD's own layer tree, bottom-first, with
+ * its names, blend modes, opacities and visibility. Returns the
+ * layer count.
+ *
+ * This DECLINES (with the engine's stated reason) for every PSD
+ * whose structure the layer model does not reproduce — groups,
+ * clipping layers, layer masks, non-8-bit-RGB, or an over-budget
+ * canvas — because swapping Photoshop's own composite for a
+ * different-looking one of ours would be worse than flattening. On a
+ * refusal the caller keeps `layers_open` (the flatten) and shows the
+ * reason.
+ *
+ * `image_handle` must be the composite already ingested from the
+ * same file (same extent); `psd_handle` is a `psd_open` handle.
+ * @param {number} image_handle
+ * @param {number} psd_handle
+ * @returns {number}
+ */
+export function layers_open_from_psd(image_handle, psd_handle) {
+    const ret = wasm.layers_open_from_psd(image_handle, psd_handle);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] >>> 0;
+}
+
+/**
+ * REDO the newest undone pixel edit.
+ * @returns {Promise<string>}
+ */
+export function layers_redo() {
+    const ret = wasm.layers_redo();
+    return ret;
+}
+
+/**
+ * Remove `index`. Removing the ONLY layer is refused (a document
+ * keeps at least one). NOT journaled — see the section docs.
+ * @param {number} index
+ */
+export function layers_remove(index) {
+    const ret = wasm.layers_remove(index);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Move a layer in stack order (0 = bottom).
+ * @param {number} from
+ * @param {number} to
+ */
+export function layers_reorder(from, to) {
+    const ret = wasm.layers_reorder(from, to);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {number} index
+ */
+export function layers_set_active(index) {
+    const ret = wasm.layers_set_active(index);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Set a layer's blend by `compose.*` wire name (prefix optional).
+ * An unregistered name is a clean error, never a silent normal.
+ * @param {number} index
+ * @param {string} blend
+ */
+export function layers_set_blend(index, blend) {
+    const ptr0 = passStringToWasm0(blend, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_set_blend(index, ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Lock a layer's PIXELS: paint / fill / bake refuse on it. Its
+ * properties stay editable — that is what the lock means.
+ * @param {number} index
+ * @param {boolean} locked
+ */
+export function layers_set_locked(index, locked) {
+    const ret = wasm.layers_set_locked(index, locked);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {number} index
+ * @param {string} name
+ */
+export function layers_set_name(index, name) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_set_name(index, ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Set a layer's opacity (0–1, clamped).
+ * @param {number} index
+ * @param {number} opacity
+ */
+export function layers_set_opacity(index, opacity) {
+    const ret = wasm.layers_set_opacity(index, opacity);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {number} index
+ * @param {boolean} visible
+ */
+export function layers_set_visible(index, visible) {
+    const ret = wasm.layers_set_visible(index, visible);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * UNDO the newest journaled pixel edit (paint / fill / bake),
+ * re-composite, and answer the reverted edit's label — an EMPTY
+ * string when there is nothing to undo. Layer STRUCTURE changes are
+ * not journaled (see the section docs).
+ * @returns {Promise<string>}
+ */
+export function layers_undo() {
+    const ret = wasm.layers_undo();
+    return ret;
 }
 
 /**
@@ -1708,12 +2008,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 285, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 319, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 321, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 354, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

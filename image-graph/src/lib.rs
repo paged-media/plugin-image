@@ -59,24 +59,37 @@
 //!   damage sequence equals `evaluate_from_scratch` — the non-negotiable
 //!   Engine-B gate (its failure mode is stale tiles, not wrong math).
 //!
+//! - `WriteBuffer` COW undo journaling (§8.5) — [`journal`]. A write is
+//!   not a recomputable parameter change, so it is journaled instead:
+//!   [`TileJournal`] snapshots the DAMAGED tiles (`Arc` clones, not
+//!   copies) before the write and restores them by generation, under a
+//!   stated depth + byte bound. [`BufferGraph::write_source_journaled`]
+//!   is the graph-side lane; [`journal::FlatImage`] is the same journal
+//!   over a packed interleaved buffer, which is what the wasm surface's
+//!   layer pixels are.
+//!
 //! ## Deferred (documented)
 //!
-//! - `WriteBuffer` undo journaling (COW `Arc<Tile>` snapshots, §8.5) —
-//!   the types exist (`PersistentBuffer`'s COW `TileMap`); the op-log
-//!   integration rides the SDK mutation surface.
 //! - The viewport sink's presentation is degraded until the GPU-surface
 //!   RFC (BREAKAGE I-01); M2 returns tiles as heap bytes.
 //! - Batched multi-tile dispatch per node (image-gpu `DispatchBatch`
 //!   exists) — M2 evaluates tile-by-tile for clarity; batching is a
 //!   perf follow-up, not a correctness one.
+//! - The journal is a PIXEL log: it restores tile bytes, not graph
+//!   TOPOLOGY (adding/removing/reordering nodes is not journaled).
 
 mod cache;
 mod eval;
 mod graph;
+pub mod journal;
 
 pub use cache::{CachedTile, NodeCache};
 pub use eval::EvaluatedTile;
 pub use graph::{BufferGraph, GraphError, NodeId, SourceData};
+pub use journal::{
+    FlatImage, JournalBudget, RecordOutcome, TileJournal, TileSource, TileStore, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_ENTRIES,
+};
 
 use image_core::Region;
 

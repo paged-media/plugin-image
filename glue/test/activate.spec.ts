@@ -53,6 +53,12 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.commitCrop",
       "media.paged.image.command.fillSelection",
       "media.paged.image.command.fillNoise",
+      // The LAYER GRAPH's command-palette reach (the panel carries the
+      // full palette).
+      "media.paged.image.command.addLayer",
+      "media.paged.image.command.bakeAdjustToLayer",
+      "media.paged.image.command.undo",
+      "media.paged.image.command.redo",
       "media.paged.image.command.applyToFile",
       "media.paged.image.command.selectAll",
       "media.paged.image.command.deselect",

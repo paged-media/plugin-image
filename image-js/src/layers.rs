@@ -1,0 +1,1337 @@
+/*
+ * This file is part of paged (https://paged.media).
+ *
+ * paged is free software: you may redistribute it and/or modify it under the
+ * terms of the GNU Affero General Public License, version 3, as published by
+ * the Free Software Foundation, OR under the Paged Media Enterprise License
+ * (PMEL), a commercial license available from And The Next GmbH. Full
+ * copyright and license information is available in LICENSE.md, distributed
+ * with this source code.
+ *
+ * paged is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the licenses for details.
+ *
+ *  @copyright  Copyright (c) And The Next GmbH
+ *  @license    AGPL-3.0-only OR Paged Media Enterprise License (PMEL)
+ */
+
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *
+ * This file is part of paged (https://paged.media) and is additionally
+ * available under the Paged Media Enterprise License (PMEL). Full
+ * copyright and license information is available in LICENSE.md which is
+ * distributed with this source code.
+ *
+ *  @copyright  Copyright (c) And The Next GmbH
+ *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
+ */
+
+//! THE LAYER GRAPH — an ordered stack of pixel layers composited
+//! bottom-up through the `compose.*` kernels, plus the COW undo journal
+//! that makes an edit to one of them reversible.
+//!
+//! This is what turns paged.image from an adjustment pipeline into an
+//! editor: a stroke lands in the ACTIVE LAYER instead of overwriting the
+//! one image the plugin used to hold, and it can be taken back.
+//!
+//! # The model
+//!
+//! A [`LayerStack`] is `width × height` fixed (the canvas) and holds
+//! [`Layer`]s bottom-first — index 0 is the bottom, `len() - 1` the top,
+//! the same order PSD stores them in. Every layer is CANVAS-EXTENT
+//! straight RGBA8. That is a deliberate simplification over per-layer
+//! bounds: it makes the composite a pure fold with no offset arithmetic
+//! and lets the brush paint anywhere without growing anything, at the
+//! cost of 4 bytes per pixel per layer. The cost is paid honestly — the
+//! PSD import budget (`image_psd::layer_pixels`) is bounded because of it.
+//!
+//! Each layer carries `name`, `visible`, `locked`, `opacity` (0–1) and a
+//! `blend` — one of the 26 registered `compose.*` kernels, resolved
+//! through [`crate::stroke::blend_kernel`] so the set can never drift
+//! from the kernels that exist.
+//!
+//! # The composite, and the premultiplied invariant
+//!
+//! This repo has been bitten twice by a straight-vs-premultiplied seam
+//! (in `stroke.rs` and in `fill.rs`), so the rule here is stated once
+//! and holds everywhere:
+//!
+//! * **Layer pixels are STRAIGHT** RGBA8 (the engine's working
+//!   convention — the decode bridge maps `u8/255` with no alpha
+//!   association).
+//! * **The fold accumulator is PREMULTIPLIED** rgba16float, starting at
+//!   transparent black (all zeros), which is what the `compose.*`
+//!   family's contract requires on BOTH inputs.
+//! * A layer therefore enters through `cast.premultiply` and the FINAL
+//!   accumulator leaves through `cast.unpremultiply` — once each, never
+//!   per pair.
+//!
+//! Both casts are skipped exactly where they are PROVABLY the identity,
+//! on the same test the stroke compositor uses
+//! ([`image_gpu::stroke::window_is_opaque`]): premultiplying a
+//! fully-opaque window is `rgb·1`, and unpremultiplying a fully-opaque
+//! accumulator divides by one. That is an exact statement about bytes,
+//! not an approximation.
+//!
+//! The per-layer step is one dispatch:
+//!
+//! ```text
+//! acc ← compose.<blend>(acc, premul(layer), opacity = layer.opacity)
+//! ```
+//!
+//! and the compose family computes `over(a, b·α)`, i.e. the layer's
+//! opacity IS the `α` its param block already carries. **No new kernel
+//! is needed for any of this**, which is the point: a layer composite is
+//! a fold over kernels that shipped with the blend-mode work.
+//!
+//! # The fast path (why a one-layer document costs nothing)
+//!
+//! A stack of ONE visible layer at opacity 1 with `compose.normal` folds
+//! to `unpremultiply(over(transparent, premultiply(L)))` ≡ `L`. So that
+//! case returns the layer's pixels VERBATIM — the same `Arc`, no f16
+//! round-trip, no dispatch, **no GPU required**. Every document starts
+//! that way, so opening a layer stack over an ingested image costs one
+//! `Arc` clone and compositing it costs nothing at all. The lanes that
+//! never wanted a device (identity adjust, tiles, histogram, save-back)
+//! keep working exactly as before.
+//!
+//! # Undo
+//!
+//! [`LayerStack`] owns an `image_graph::TileJournal`. A pixel edit
+//! ([`LayerStack::edit_active`]) snapshots only the tiles its damage
+//! region covers before writing, so a small stroke on a big canvas
+//! journals a tile or two. The bound and its behaviour at the limit are
+//! the journal's, documented there and surfaced through
+//! [`LayerStack::history`].
+//!
+//! Each entry is SCOPED to the layer it edited (by the layer's stable
+//! id), so undoing after switching layers restores the layer that was
+//! painted — not whichever one is selected — and makes it active again.
+//!
+//! **The journal is a PIXEL log.** Layer STRUCTURE — add, remove,
+//! reorder, rename, opacity, blend, visibility — is not journaled. That
+//! is a stated limit, not an oversight: those operations are cheap to
+//! reverse by hand, and journaling them would mean holding a removed
+//! layer's whole canvas. Two consequences follow and both are enforced
+//! here rather than discovered: removing the LAST layer is refused (a
+//! document can never become pixel-less by one click), and removing any
+//! other CLEARS the journal, because its entries are keyed to pixels
+//! that no longer exist and an entry that can never be applied is worse
+//! than no entry at all.
+
+use std::sync::Arc;
+
+use image_core::Region;
+use image_gpu::stroke::window_is_opaque;
+use image_gpu::{GpuContext, TileInput};
+use image_graph::journal::{FlatImage, RecordOutcome, TileJournal};
+use image_kernels::families::cast::{
+    CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
+};
+use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
+use image_kernels::KernelDef;
+
+use crate::fill::{f16_to_rgba8, rgba8_to_f16};
+use crate::ingest::IngestError;
+use crate::stroke::blend_kernel;
+
+/// The default name of the layer an ingested image becomes.
+pub const BACKGROUND_LAYER_NAME: &str = "Background";
+
+/// One pixel layer: canvas-extent straight RGBA8 plus the four
+/// properties the composite reads and the one (`locked`) it refuses on.
+#[derive(Debug, Clone)]
+pub struct Layer {
+    /// Stable across reorders — the id the UI keys rows by.
+    pub id: u32,
+    pub name: String,
+    pub visible: bool,
+    /// A locked layer refuses PIXEL edits (paint, fill, bake). Its
+    /// properties are still editable — that is what "lock the pixels"
+    /// means, and pretending otherwise would just be a different lie.
+    pub locked: bool,
+    /// 0–1.
+    pub opacity: f32,
+    pub blend: &'static KernelDef,
+    /// Canvas-extent, tightly packed straight RGBA8. `Arc` so a layer
+    /// can share the ingest's allocation and a snapshot is a pointer.
+    pub rgba: Arc<[u8]>,
+}
+
+impl Layer {
+    /// The blend's wire name (the `compose.` prefix dropped) — what the
+    /// panel's picker and the JSON readout use.
+    pub fn blend_name(&self) -> &'static str {
+        self.blend
+            .id
+            .strip_prefix("compose.")
+            .unwrap_or(self.blend.id)
+    }
+
+    /// Are this layer's PROPERTIES ones that let it contribute? A hidden
+    /// layer or one at zero opacity contributes EXACTLY nothing — the
+    /// compose spine sets `alpha_s = b.a · opacity`, and at `alpha_s = 0`
+    /// its output reduces to the backdrop for all 26 blend modes — so
+    /// skipping it is exact, not an approximation.
+    fn enabled(&self) -> bool {
+        self.visible && self.opacity > 0.0
+    }
+
+    /// Is this layer a plain, unmodified pass-through — the shape that
+    /// makes a one-layer composite the identity?
+    fn is_plain(&self) -> bool {
+        self.opacity >= 1.0 && std::ptr::eq(self.blend, &COMPOSE_NORMAL)
+    }
+}
+
+/// Is every texel of a straight RGBA8 buffer fully TRANSPARENT?
+///
+/// Such a layer is exactly the identity in the fold — `alpha_s = 0` in
+/// the compose spine leaves the backdrop untouched for every blend mode
+/// — so it is skipped. That is not a micro-optimization: "add a layer"
+/// is the first thing anyone does, and skipping the empty one keeps the
+/// composite trivial (and therefore GPU-free) until something is
+/// actually painted into it.
+fn is_fully_transparent(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).all(|t| t[3] == 0)
+}
+
+/// The undo/redo readout the panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryStats {
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub depth: usize,
+    pub redo_depth: usize,
+    pub bytes: usize,
+    pub max_bytes: usize,
+    pub max_entries: usize,
+    /// Entries evicted by the bound so far (see the journal docs) —
+    /// surfaced so "history is a window" is said, never discovered.
+    pub dropped: u64,
+    pub generation: u64,
+}
+
+/// An ordered stack of pixel layers over one canvas, with the COW undo
+/// journal for its pixel edits.
+pub struct LayerStack {
+    width: u32,
+    height: u32,
+    /// Bottom-first (index 0 is the bottom-most layer).
+    layers: Vec<Layer>,
+    active: usize,
+    next_id: u32,
+    journal: TileJournal,
+}
+
+impl LayerStack {
+    /// Open a stack over `rgba` — one full-canvas [`BACKGROUND_LAYER_NAME`]
+    /// layer. The pixels are SHARED (an `Arc` clone), so this is O(1) and
+    /// costs no extra memory over the image it was opened on.
+    pub fn from_image(width: u32, height: u32, rgba: Arc<[u8]>) -> Result<LayerStack, IngestError> {
+        let want = (width as usize) * (height as usize) * 4;
+        if width == 0 || height == 0 || rgba.len() != want {
+            return Err(IngestError::Decode(format!(
+                "layer stack: {} bytes for {width}×{height} (expected {want})",
+                rgba.len()
+            )));
+        }
+        Ok(LayerStack {
+            width,
+            height,
+            layers: vec![Layer {
+                id: 1,
+                name: BACKGROUND_LAYER_NAME.to_string(),
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                blend: &COMPOSE_NORMAL,
+                rgba,
+            }],
+            active: 0,
+            next_id: 2,
+            journal: TileJournal::new(),
+        })
+    }
+
+    /// Open a stack from a PSD's imported layer plates
+    /// ([`image_psd::LayerImport`], bottom-first) — the layered PSD lane.
+    /// Blend keys resolve through [`psd_blend_kernel`]; an unmodeled key
+    /// falls back to `normal` (the file's own bytes are preserved
+    /// regardless, and the panel names the layer so the user can see it).
+    pub fn from_psd_plates(import: &image_psd::LayerImport) -> Result<LayerStack, IngestError> {
+        let (width, height) = (import.width, import.height);
+        if import.layers.is_empty() {
+            return Err(IngestError::Unsupported(
+                "PSD layer import produced no layers".into(),
+            ));
+        }
+        let want = (width as usize) * (height as usize) * 4;
+        let mut layers = Vec::with_capacity(import.layers.len());
+        for (i, plate) in import.layers.iter().enumerate() {
+            if plate.rgba.len() != want {
+                return Err(IngestError::Decode(format!(
+                    "PSD layer \"{}\" is {} bytes for {width}×{height} (expected {want})",
+                    plate.name,
+                    plate.rgba.len()
+                )));
+            }
+            layers.push(Layer {
+                id: (i as u32) + 1,
+                name: if plate.name.is_empty() {
+                    format!("Layer {}", i + 1)
+                } else {
+                    plate.name.clone()
+                },
+                visible: !plate.hidden,
+                locked: false,
+                opacity: plate.opacity as f32 / 255.0,
+                blend: psd_blend_kernel(&plate.blend_key),
+                rgba: Arc::from(plate.rgba.clone().into_boxed_slice()),
+            });
+        }
+        let next_id = layers.len() as u32 + 1;
+        Ok(LayerStack {
+            width,
+            height,
+            active: layers.len() - 1,
+            layers,
+            next_id,
+            journal: TileJournal::new(),
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    pub fn active(&self) -> &Layer {
+        &self.layers[self.active]
+    }
+
+    /// A transparent canvas-extent buffer (a new empty layer's pixels).
+    fn transparent(&self) -> Arc<[u8]> {
+        Arc::from(vec![0u8; (self.width as usize) * (self.height as usize) * 4].into_boxed_slice())
+    }
+
+    fn fresh_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Add an empty transparent layer directly ABOVE the active one and
+    /// make it active. Returns its index.
+    pub fn add(&mut self, name: &str) -> usize {
+        let id = self.fresh_id();
+        let at = self.active + 1;
+        let pixels = self.transparent();
+        self.layers.insert(
+            at,
+            Layer {
+                id,
+                name: if name.is_empty() {
+                    format!("Layer {id}")
+                } else {
+                    name.to_string()
+                },
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                blend: &COMPOSE_NORMAL,
+                rgba: pixels,
+            },
+        );
+        self.active = at;
+        at
+    }
+
+    /// Duplicate `index` directly above itself (pixels shared behind the
+    /// `Arc` until one of the two is edited) and make the copy active.
+    pub fn duplicate(&mut self, index: usize) -> Option<usize> {
+        let src = self.layers.get(index)?.clone();
+        let id = self.fresh_id();
+        let at = index + 1;
+        self.layers.insert(
+            at,
+            Layer {
+                id,
+                name: format!("{} copy", src.name),
+                ..src
+            },
+        );
+        self.active = at;
+        Some(at)
+    }
+
+    /// Remove `index`. Refused for the LAST layer — a document with no
+    /// pixels at all is not a state this offers by one click.
+    pub fn remove(&mut self, index: usize) -> Result<(), IngestError> {
+        if index >= self.layers.len() {
+            return Err(IngestError::Unsupported(format!("no layer {index}")));
+        }
+        if self.layers.len() == 1 {
+            return Err(IngestError::Unsupported(
+                "cannot remove the only layer (a document keeps at least one)".into(),
+            ));
+        }
+        self.layers.remove(index);
+        if self.active >= self.layers.len() {
+            self.active = self.layers.len() - 1;
+        }
+        // The journal's entries are keyed by LAYER ID, and this one's
+        // pixels are gone — an entry that can never be applied is worse
+        // than no entry, so the whole history goes. That is the price of
+        // a linear journal and it is stated in the panel rather than
+        // discovered when Undo does nothing.
+        self.journal.clear();
+        Ok(())
+    }
+
+    /// Move `from` to `to` (both in stack order, 0 = bottom), carrying
+    /// the active selection with the moved layer.
+    pub fn reorder(&mut self, from: usize, to: usize) -> Result<(), IngestError> {
+        if from >= self.layers.len() || to >= self.layers.len() {
+            return Err(IngestError::Unsupported(format!(
+                "reorder {from}→{to} outside 0..{}",
+                self.layers.len()
+            )));
+        }
+        if from == to {
+            return Ok(());
+        }
+        let was_active = self.layers[self.active].id;
+        let l = self.layers.remove(from);
+        self.layers.insert(to, l);
+        self.active = self
+            .layers
+            .iter()
+            .position(|l| l.id == was_active)
+            .unwrap_or(to);
+        Ok(())
+    }
+
+    pub fn set_active(&mut self, index: usize) -> Result<(), IngestError> {
+        if index >= self.layers.len() {
+            return Err(IngestError::Unsupported(format!("no layer {index}")));
+        }
+        self.active = index;
+        Ok(())
+    }
+
+    fn layer_mut(&mut self, index: usize) -> Result<&mut Layer, IngestError> {
+        self.layers
+            .get_mut(index)
+            .ok_or_else(|| IngestError::Unsupported(format!("no layer {index}")))
+    }
+
+    pub fn set_visible(&mut self, index: usize, visible: bool) -> Result<(), IngestError> {
+        self.layer_mut(index)?.visible = visible;
+        Ok(())
+    }
+
+    pub fn set_locked(&mut self, index: usize, locked: bool) -> Result<(), IngestError> {
+        self.layer_mut(index)?.locked = locked;
+        Ok(())
+    }
+
+    pub fn set_opacity(&mut self, index: usize, opacity: f32) -> Result<(), IngestError> {
+        self.layer_mut(index)?.opacity = opacity.clamp(0.0, 1.0);
+        Ok(())
+    }
+
+    pub fn set_name(&mut self, index: usize, name: &str) -> Result<(), IngestError> {
+        self.layer_mut(index)?.name = name.to_string();
+        Ok(())
+    }
+
+    /// Set the blend by wire name (`"multiply"` or `"compose.multiply"`)
+    /// — resolved through the kernel registry, so an unknown name is a
+    /// clean error rather than a silent fall back to normal.
+    pub fn set_blend(&mut self, index: usize, name: &str) -> Result<(), IngestError> {
+        let k = blend_kernel(name).ok_or_else(|| {
+            IngestError::Unsupported(format!(
+                "unknown blend mode \"{name}\" (a compose.* kernel name)"
+            ))
+        })?;
+        self.layer_mut(index)?.blend = k;
+        Ok(())
+    }
+
+    // ───────────────────────── pixel edits ──────────────────────────
+
+    /// Replace the ACTIVE layer's pixels, journaling the tiles `damage`
+    /// covers first. `pixels` must be canvas-extent.
+    ///
+    /// `damage` is the caller's honest damage region — the stroke's
+    /// bounds, the fill's rect, the whole canvas for a bake. Undo
+    /// restores exactly those tiles, so a damage region that under-claims
+    /// makes undo incomplete; every caller here passes the region the
+    /// engine itself computed.
+    pub fn edit_active(
+        &mut self,
+        label: &str,
+        damage: Region,
+        pixels: Arc<[u8]>,
+    ) -> Result<RecordOutcome, IngestError> {
+        let want = (self.width as usize) * (self.height as usize) * 4;
+        if pixels.len() != want {
+            return Err(IngestError::Decode(format!(
+                "layer edit: {} bytes for {}×{} (expected {want})",
+                pixels.len(),
+                self.width,
+                self.height
+            )));
+        }
+        let active = &self.layers[self.active];
+        if active.locked {
+            return Err(IngestError::Unsupported(format!(
+                "layer \"{}\" is locked",
+                active.name
+            )));
+        }
+        let clipped = damage
+            .intersect(Region::new(0, 0, self.width, self.height))
+            .unwrap_or(Region::new(0, 0, 0, 0));
+        let outcome = {
+            let view = FlatImage::new(self.width, self.height, 4, &*active.rgba)
+                .ok_or_else(|| IngestError::Decode("layer pixels are mis-sized".into()))?;
+            // The layer's stable ID is the entry's SCOPE, so undo lands
+            // in the layer that was painted and not in whichever one
+            // happens to be selected when the user reaches for it.
+            self.journal.record(label, active.id as u64, &view, clipped)
+        };
+        self.layers[self.active].rgba = pixels;
+        Ok(outcome)
+    }
+
+    /// Is the active layer editable (present, unlocked)? The doors check
+    /// this BEFORE doing GPU work so a refusal is instant and honest.
+    pub fn active_is_editable(&self) -> Result<(), IngestError> {
+        let a = self.active();
+        if a.locked {
+            return Err(IngestError::Unsupported(format!(
+                "layer \"{}\" is locked — unlock it to paint on it",
+                a.name
+            )));
+        }
+        Ok(())
+    }
+
+    // ──────────────────────────── undo ──────────────────────────────
+
+    /// Revert the newest journaled pixel edit. Returns its label, or
+    /// `None` when there is nothing to undo.
+    pub fn undo(&mut self) -> Option<String> {
+        self.apply_history(true)
+    }
+
+    /// Replay the newest undone pixel edit.
+    pub fn redo(&mut self) -> Option<String> {
+        self.apply_history(false)
+    }
+
+    /// Undo/redo share everything but direction.
+    ///
+    /// The entry's SCOPE says which layer it belongs to — the newest
+    /// edit is not necessarily on the layer that happens to be active —
+    /// so the scope is resolved to a layer id FIRST, the restore lands
+    /// there, and that layer becomes active so the change is visibly
+    /// where it happened. The layer's shared pixels are materialized
+    /// once (the journal splices into a mutable buffer) and re-shared.
+    fn apply_history(&mut self, undo: bool) -> Option<String> {
+        let scope = if undo {
+            self.journal.undo_scope()
+        } else {
+            self.journal.redo_scope()
+        }?;
+        // A scope with no layer cannot happen — `remove` clears the
+        // journal precisely so a removed layer leaves no orphan entries
+        // — but if it ever did, doing nothing is the only safe answer.
+        let idx = self.layers.iter().position(|l| l.id as u64 == scope)?;
+        let (w, h) = (self.width, self.height);
+        let mut buf: Vec<u8> = self.layers[idx].rgba.to_vec();
+        let label = {
+            let mut view = FlatImage::new(w, h, 4, buf.as_mut_slice())?;
+            if undo {
+                self.journal.undo(&mut view)
+            } else {
+                self.journal.redo(&mut view)
+            }
+        }?;
+        self.layers[idx].rgba = Arc::from(buf.into_boxed_slice());
+        self.active = idx;
+        Some(label)
+    }
+
+    pub fn history(&self) -> HistoryStats {
+        let b = self.journal.budget();
+        HistoryStats {
+            can_undo: self.journal.can_undo(),
+            can_redo: self.journal.can_redo(),
+            depth: self.journal.depth(),
+            redo_depth: self.journal.redo_depth(),
+            bytes: self.journal.bytes(),
+            max_bytes: b.max_bytes,
+            max_entries: b.max_entries,
+            dropped: self.journal.dropped(),
+            generation: self.journal.generation(),
+        }
+    }
+
+    pub fn undo_label(&self) -> Option<&str> {
+        self.journal.undo_label()
+    }
+
+    pub fn redo_label(&self) -> Option<&str> {
+        self.journal.redo_label()
+    }
+
+    /// Drop the history (a resolution change makes every tile snapshot
+    /// meaningless — better to say "no history" than to restore garbage).
+    pub fn clear_history(&mut self) {
+        self.journal.clear();
+    }
+
+    // ───────────────────────── the composite ────────────────────────
+
+    /// Can the composite run without a GPU? True exactly when the fast
+    /// path applies (see the module docs) — the doors use it so a
+    /// GPU-less realm still gets its one-layer document.
+    pub fn composite_is_trivial(&self) -> bool {
+        let mut plates = self.plates(None).into_iter();
+        match (plates.next(), plates.next()) {
+            (None, _) => true,
+            (Some((l, _)), None) => l.is_plain(),
+            _ => false,
+        }
+    }
+
+    /// The layers that actually contribute, bottom-first, paired with
+    /// the pixels to composite (the active layer's may be overridden by
+    /// an in-flight stroke). Hidden, zero-opacity and fully transparent
+    /// layers drop out here — each is exactly the identity in the fold.
+    fn plates<'a>(
+        &'a self,
+        override_active: Option<&'a Arc<[u8]>>,
+    ) -> Vec<(&'a Layer, &'a Arc<[u8]>)> {
+        self.layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                if !l.enabled() {
+                    return None;
+                }
+                let px = match override_active {
+                    Some(o) if i == self.active => o,
+                    _ => &l.rgba,
+                };
+                if is_fully_transparent(px) {
+                    return None;
+                }
+                Some((l, px))
+            })
+            .collect()
+    }
+
+    /// Fold the stack bottom-up into one straight-RGBA8 canvas.
+    ///
+    /// `override_active` replaces the ACTIVE layer's pixels for this
+    /// composite only — how a stroke in flight previews through the rest
+    /// of the stack without being committed to it.
+    ///
+    /// GPU-only whenever there is anything to blend (every step is a
+    /// registered `compose.*`/`cast.*` dispatch, spec §6); the trivial
+    /// stack short-circuits before touching the device.
+    pub async fn composite(
+        &self,
+        ctx: Option<&GpuContext>,
+        override_active: Option<&Arc<[u8]>>,
+    ) -> Result<Arc<[u8]>, IngestError> {
+        let (w, h) = (self.width, self.height);
+        let plates = self.plates(override_active);
+
+        match plates.as_slice() {
+            // Nothing contributes: an honest transparent canvas.
+            [] => return Ok(self.transparent()),
+            // The identity fold — the pixels ARE the composite. Handed
+            // back as the very same allocation (an `Arc` clone), so a
+            // one-layer document costs nothing to composite.
+            [(l, px)] if l.is_plain() => return Ok(Arc::clone(px)),
+            _ => {}
+        }
+
+        let ctx = ctx.ok_or_else(|| {
+            IngestError::Unsupported(
+                "compositing layers is GPU-only — call init_gpu first (the blend \
+                 is a registered WGSL kernel dispatch; no CPU blend path ships)"
+                    .into(),
+            )
+        })?;
+
+        // The accumulator is PREMULTIPLIED rgba16float, starting at
+        // transparent black — the compose family's `in0` contract.
+        let mut acc = vec![0u8; (w as usize) * (h as usize) * 8];
+        for (layer, px) in plates {
+            let straight = rgba8_to_f16(px);
+            // `premultiply` over a fully-opaque window is `rgb·1` — the
+            // identity, provably; skip the round-trip there.
+            let premul = if window_is_opaque(&straight) {
+                straight
+            } else {
+                dispatch_unary(
+                    ctx,
+                    &CAST_PREMULTIPLY,
+                    CastPremultiplyParams::new().as_bytes(),
+                    &straight,
+                    w,
+                    h,
+                )
+                .await?
+            };
+            acc = image_gpu::execute_tile_once_async(
+                ctx,
+                layer.blend,
+                &[
+                    TileInput { f16_bytes: &acc },
+                    TileInput { f16_bytes: &premul },
+                ],
+                // The layer's opacity IS the compose family's α: the
+                // spine computes `over(a, b·α)`.
+                ComposeParams::new(layer.opacity).as_bytes(),
+                None,
+                w,
+                h,
+            )
+            .await
+            .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+        }
+
+        // …and back out of premultiplied space, once — skipped where the
+        // result is fully opaque and the division is by one.
+        let out = if window_is_opaque(&acc) {
+            acc
+        } else {
+            dispatch_unary(
+                ctx,
+                &CAST_UNPREMULTIPLY,
+                CastUnpremultiplyParams::new().as_bytes(),
+                &acc,
+                w,
+                h,
+            )
+            .await?
+        };
+        Ok(Arc::from(f16_to_rgba8(&out).into_boxed_slice()))
+    }
+}
+
+/// The `compose.*` kernel for a PSD blend-mode fourcc.
+///
+/// All 26 registered blend modes have a PSD key and all 26 are mapped;
+/// keys outside that set (`diss` dissolve, `pass` group pass-through,
+/// and Photoshop's own additions) fall back to `normal` — the honest
+/// approximation, and one the panel makes visible because the layer's
+/// blend then READS as "normal" rather than silently claiming otherwise.
+///
+/// Provenance: Adobe Photoshop File Format specification — Layer
+/// Records, "Blend mode key"; the operator semantics are W3C
+/// Compositing and Blending Level 1, which is what the `compose.*`
+/// kernels implement.
+pub fn psd_blend_kernel(key: &[u8; 4]) -> &'static KernelDef {
+    let name = match key {
+        b"norm" => "normal",
+        b"mul " => "multiply",
+        b"scrn" => "screen",
+        b"over" => "overlay",
+        b"dark" => "darken",
+        b"lite" => "lighten",
+        b"div " => "color_dodge",
+        b"idiv" => "color_burn",
+        b"hLit" => "hard_light",
+        b"sLit" => "soft_light",
+        b"diff" => "difference",
+        b"smud" => "exclusion",
+        b"hue " => "hue",
+        b"sat " => "saturation",
+        b"colr" => "color",
+        b"lum " => "luminosity",
+        b"lbrn" => "linear_burn",
+        b"lddg" => "linear_dodge",
+        b"dkCl" => "darker_color",
+        b"lgCl" => "lighter_color",
+        b"vLit" => "vivid_light",
+        b"lLit" => "linear_light",
+        b"pLit" => "pin_light",
+        b"hMix" => "hard_mix",
+        b"fsub" => "subtract",
+        b"fdiv" => "divide",
+        _ => return &COMPOSE_NORMAL,
+    };
+    blend_kernel(name).unwrap_or(&COMPOSE_NORMAL)
+}
+
+/// One whole-image UNARY dispatch (the `cast.*` bracket steps) — the
+/// same shape `crate::fill` uses.
+async fn dispatch_unary(
+    ctx: &GpuContext,
+    def: &'static KernelDef,
+    params: &[u8],
+    src_f16: &[u8],
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, IngestError> {
+    image_gpu::execute_tile_once_async(
+        ctx,
+        def,
+        &[TileInput { f16_bytes: src_f16 }],
+        params,
+        None,
+        w,
+        h,
+    )
+    .await
+    .map_err(|e| IngestError::Pipeline(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px(w: u32, h: u32, v: u8) -> Arc<[u8]> {
+        Arc::from(vec![v; (w * h * 4) as usize].into_boxed_slice())
+    }
+
+    fn stack(w: u32, h: u32) -> LayerStack {
+        LayerStack::from_image(w, h, px(w, h, 128)).expect("valid")
+    }
+
+    fn device() -> Option<&'static GpuContext> {
+        use std::sync::OnceLock;
+        static DEVICE: OnceLock<Option<GpuContext>> = OnceLock::new();
+        DEVICE
+            .get_or_init(|| match pollster::block_on(GpuContext::new()) {
+                Ok(ctx) => Some(ctx),
+                Err(e) => {
+                    eprintln!("layers GPU unavailable: {e} — device tests will skip");
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    // ── the model ────────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_an_ingested_image_opens_as_one_background_layer() {
+        let s = stack(8, 8);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.active_index(), 0);
+        let l = s.active();
+        assert_eq!(l.name, BACKGROUND_LAYER_NAME);
+        assert!(l.visible && !l.locked);
+        assert_eq!(l.opacity, 1.0);
+        assert_eq!(l.blend_name(), "normal");
+    }
+
+    #[test]
+    fn image_editor_layers_opening_a_stack_shares_the_pixels() {
+        // O(1): the background layer must not clone the ingest buffer.
+        let pixels = px(64, 64, 3);
+        let s = LayerStack::from_image(64, 64, Arc::clone(&pixels)).expect("valid");
+        assert!(Arc::ptr_eq(&s.active().rgba, &pixels));
+    }
+
+    #[test]
+    fn image_editor_layers_a_mis_sized_buffer_is_a_clean_error() {
+        assert!(LayerStack::from_image(4, 4, px(2, 2, 0)).is_err());
+        assert!(LayerStack::from_image(0, 0, px(0, 0, 0)).is_err());
+    }
+
+    #[test]
+    fn image_editor_layers_add_puts_a_transparent_layer_above_the_active_one() {
+        let mut s = stack(4, 4);
+        let at = s.add("Paint");
+        assert_eq!(at, 1, "above the background, not below it");
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.active_index(), 1, "and becomes active");
+        assert_eq!(s.active().name, "Paint");
+        assert!(s.active().rgba.iter().all(|&b| b == 0), "transparent");
+        // Ids are stable and unique.
+        assert_ne!(s.layers()[0].id, s.layers()[1].id);
+    }
+
+    #[test]
+    fn image_editor_layers_reorder_carries_the_active_selection() {
+        let mut s = stack(4, 4);
+        s.add("A");
+        s.add("B"); // [bg, A, B], active = B (index 2)
+        assert_eq!(s.active().name, "B");
+        s.reorder(2, 0).expect("in range");
+        assert_eq!(
+            s.layers()
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "Background", "A"]
+        );
+        assert_eq!(s.active().name, "B", "the moved layer stays active");
+        assert!(s.reorder(0, 9).is_err());
+    }
+
+    #[test]
+    fn image_editor_layers_the_last_layer_cannot_be_removed() {
+        let mut s = stack(4, 4);
+        assert!(s.remove(0).is_err(), "a document keeps at least one layer");
+        s.add("A");
+        assert!(s.remove(1).is_ok());
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.active_index(), 0, "the active index follows the removal");
+    }
+
+    #[test]
+    fn image_editor_layers_blend_is_resolved_through_the_kernel_registry() {
+        let mut s = stack(4, 4);
+        s.set_blend(0, "multiply").expect("registered");
+        assert_eq!(s.layers()[0].blend.id, "compose.multiply");
+        s.set_blend(0, "compose.screen")
+            .expect("qualified id works");
+        assert_eq!(s.layers()[0].blend_name(), "screen");
+        assert!(
+            s.set_blend(0, "dissolve").is_err(),
+            "an unregistered mode is a clean error, never a silent normal"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_opacity_is_clamped() {
+        let mut s = stack(4, 4);
+        s.set_opacity(0, 5.0).expect("in range");
+        assert_eq!(s.layers()[0].opacity, 1.0);
+        s.set_opacity(0, -1.0).expect("in range");
+        assert_eq!(s.layers()[0].opacity, 0.0);
+    }
+
+    #[test]
+    fn image_editor_layers_a_locked_layer_refuses_pixel_edits_but_not_properties() {
+        let mut s = stack(4, 4);
+        s.set_locked(0, true).expect("in range");
+        assert!(s.active_is_editable().is_err());
+        assert!(s
+            .edit_active("paint", Region::new(0, 0, 4, 4), px(4, 4, 9))
+            .is_err());
+        // …properties still move (that is what "lock the PIXELS" means).
+        assert!(s.set_opacity(0, 0.5).is_ok());
+        assert!(s.set_name(0, "Locked").is_ok());
+    }
+
+    // ── the PSD lane ─────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_every_psd_blend_key_maps_to_a_registered_kernel() {
+        // All 26 compose kernels have a PSD key and all 26 are reachable
+        // — the mapping cannot silently collapse modes into normal.
+        const KEYS: [&[u8; 4]; 26] = [
+            b"norm", b"mul ", b"scrn", b"over", b"dark", b"lite", b"div ", b"idiv", b"hLit",
+            b"sLit", b"diff", b"smud", b"hue ", b"sat ", b"colr", b"lum ", b"lbrn", b"lddg",
+            b"dkCl", b"lgCl", b"vLit", b"lLit", b"pLit", b"hMix", b"fsub", b"fdiv",
+        ];
+        let mut seen: Vec<&str> = KEYS.iter().map(|k| psd_blend_kernel(k).id).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 26, "every key maps to a DISTINCT kernel");
+        // An unmodeled key (dissolve, group pass-through) falls back to
+        // normal — the honest approximation, and a visible one.
+        assert_eq!(psd_blend_kernel(b"diss").id, "compose.normal");
+        assert_eq!(psd_blend_kernel(b"pass").id, "compose.normal");
+    }
+
+    #[test]
+    fn image_editor_layers_a_psd_import_becomes_a_stack_bottom_first() {
+        let plate = |name: &str, key: &[u8; 4], opacity: u8, hidden: bool| image_psd::LayerPlate {
+            name: name.to_string(),
+            blend_key: *key,
+            opacity,
+            hidden,
+            rgba: vec![0u8; 4 * 4 * 4],
+        };
+        let import = image_psd::LayerImport {
+            width: 4,
+            height: 4,
+            layers: vec![
+                plate("base", b"norm", 255, false),
+                plate("mult", b"mul ", 128, true),
+            ],
+        };
+        let s = LayerStack::from_psd_plates(&import).expect("well-formed");
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.layers()[0].name, "base");
+        assert_eq!(s.layers()[1].name, "mult");
+        assert_eq!(s.layers()[1].blend_name(), "multiply");
+        assert!((s.layers()[1].opacity - 128.0 / 255.0).abs() < 1e-6);
+        assert!(!s.layers()[1].visible, "the PSD hidden flag carries");
+        assert_eq!(s.active_index(), 1, "the TOP layer starts active");
+    }
+
+    #[test]
+    fn image_editor_layers_a_psd_import_with_a_mis_sized_plate_is_a_clean_error() {
+        let import = image_psd::LayerImport {
+            width: 4,
+            height: 4,
+            layers: vec![image_psd::LayerPlate {
+                name: "short".into(),
+                blend_key: *b"norm",
+                opacity: 255,
+                hidden: false,
+                rgba: vec![0u8; 8],
+            }],
+        };
+        assert!(LayerStack::from_psd_plates(&import).is_err());
+    }
+
+    // ── the composite ────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_a_plain_single_layer_composites_to_itself_without_a_gpu() {
+        let s = stack(8, 8);
+        let out = pollster::block_on(s.composite(None, None)).expect("no device needed");
+        assert!(
+            Arc::ptr_eq(&out, &s.active().rgba),
+            "the identity fold returns the very same buffer"
+        );
+        assert!(s.composite_is_trivial());
+    }
+
+    #[test]
+    fn image_editor_layers_a_hidden_only_layer_composites_to_transparent() {
+        let mut s = stack(4, 4);
+        s.set_visible(0, false).expect("in range");
+        assert!(s.composite_is_trivial());
+        let out = pollster::block_on(s.composite(None, None)).expect("no device needed");
+        assert!(out.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn image_editor_layers_an_empty_layer_keeps_the_composite_trivial() {
+        // "Add layer" is the first thing anyone does. A fully
+        // TRANSPARENT layer is exactly the identity in the fold
+        // (`alpha_s = 0` leaves the backdrop for every blend mode), so
+        // it is skipped — the composite stays GPU-free until something
+        // is actually painted into it.
+        let mut s = stack(4, 4);
+        s.add("Paint");
+        assert!(s.composite_is_trivial());
+        let out = pollster::block_on(s.composite(None, None)).expect("no device needed");
+        assert!(Arc::ptr_eq(&out, &s.layers()[0].rgba));
+    }
+
+    #[test]
+    fn image_editor_layers_a_second_painted_layer_makes_the_composite_gpu_only() {
+        let mut s = stack(4, 4);
+        s.add("Paint");
+        s.edit_active("fill", Region::new(0, 0, 4, 4), px(4, 4, 200))
+            .expect("unlocked");
+        assert!(!s.composite_is_trivial());
+        // …and says so rather than inventing a CPU blend.
+        let err = pollster::block_on(s.composite(None, None)).expect_err("GPU-only");
+        assert!(format!("{err}").contains("GPU-only"));
+    }
+
+    #[test]
+    fn image_editor_layers_a_transparent_layer_on_top_leaves_the_backdrop_alone() {
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = s.active().rgba.to_vec();
+        s.add("Empty");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert_eq!(
+            out.to_vec(),
+            base,
+            "source-over with a fully transparent source is the identity"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_an_opaque_layer_on_top_hides_the_one_below() {
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        s.add("Cover");
+        let white: Arc<[u8]> = px(16, 16, 255);
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+            .expect("unlocked");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert!(out.iter().all(|&b| b == 255));
+    }
+
+    #[test]
+    fn image_editor_layers_opacity_rides_the_compose_param_block() {
+        let Some(ctx) = device() else { return };
+        // Black backdrop, white layer at 50%: the result is mid-grey.
+        let mut s = LayerStack::from_image(8, 8, px(8, 8, 0)).expect("valid");
+        // …but the backdrop's ALPHA must be opaque, or "over" is not
+        // what we are measuring. px(8,8,0) is transparent black, so set
+        // an opaque black background explicitly.
+        let mut opaque_black = vec![0u8; 8 * 8 * 4];
+        for p in opaque_black.chunks_exact_mut(4) {
+            p[3] = 255;
+        }
+        s.edit_active(
+            "base",
+            Region::new(0, 0, 8, 8),
+            Arc::from(opaque_black.into_boxed_slice()),
+        )
+        .expect("unlocked");
+        s.add("White");
+        s.edit_active("fill", Region::new(0, 0, 8, 8), px(8, 8, 255))
+            .expect("unlocked");
+        s.set_opacity(1, 0.5).expect("in range");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        for t in out.chunks_exact(4) {
+            assert!(
+                (t[0] as i32 - 128).abs() <= 2,
+                "50% white over black should be ~128, got {}",
+                t[0]
+            );
+            assert_eq!(t[3], 255, "…and stay opaque");
+        }
+    }
+
+    #[test]
+    fn image_editor_layers_multiply_darkens_through_the_registered_kernel() {
+        let Some(ctx) = device() else { return };
+        let mut s = LayerStack::from_image(8, 8, px(8, 8, 255)).expect("valid");
+        s.add("Half");
+        let mut half = vec![128u8; 8 * 8 * 4];
+        for p in half.chunks_exact_mut(4) {
+            p[3] = 255;
+        }
+        s.edit_active(
+            "fill",
+            Region::new(0, 0, 8, 8),
+            Arc::from(half.into_boxed_slice()),
+        )
+        .expect("unlocked");
+        s.set_blend(1, "multiply").expect("registered");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        for t in out.chunks_exact(4) {
+            assert!(
+                (t[0] as i32 - 128).abs() <= 2,
+                "white × 50% grey is 50% grey, got {}",
+                t[0]
+            );
+        }
+    }
+
+    #[test]
+    fn image_editor_layers_the_stroke_override_previews_through_the_stack() {
+        let Some(ctx) = device() else { return };
+        let mut s = stack(8, 8);
+        s.add("Paint");
+        // The override stands in for the active layer WITHOUT committing.
+        let white: Arc<[u8]> = px(8, 8, 255);
+        let out = pollster::block_on(s.composite(Some(ctx), Some(&white))).expect("composite");
+        assert!(out.iter().all(|&b| b == 255), "the override composited");
+        assert!(
+            s.active().rgba.iter().all(|&b| b == 0),
+            "…and the layer itself was never touched"
+        );
+    }
+
+    // ── the deliverable, end to end ──────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_a_stroke_lands_in_the_active_layer_and_undoes() {
+        // THE caveat this whole thing exists to retire, proven on the
+        // device: paint on a layer ABOVE the photo, and (1) the photo's
+        // own pixels are untouched, (2) the composite shows the paint,
+        // (3) Undo takes it back exactly. Same lane the wasm door drives
+        // (`StrokeSession::begin_on` over the active layer's pixels).
+        let Some(ctx) = device() else { return };
+        use crate::stroke::{StrokeParams, StrokeSession, StrokeTool};
+        use image_gpu::dab::StrokeSample;
+
+        let (w, h) = (64u32, 64u32);
+        // An OPAQUE photo layer, so the composite is well defined.
+        let mut photo = vec![0u8; (w * h * 4) as usize];
+        for p in photo.chunks_exact_mut(4) {
+            p[0] = 40;
+            p[1] = 90;
+            p[2] = 160;
+            p[3] = 255;
+        }
+        let photo: Arc<[u8]> = Arc::from(photo.into_boxed_slice());
+        let mut s = LayerStack::from_image(w, h, Arc::clone(&photo)).expect("valid");
+        s.add("Paint");
+        assert_eq!(s.active_index(), 1);
+
+        // Paint a red dot into the ACTIVE (empty, top) layer.
+        let mut params = StrokeParams::defaults(StrokeTool::Brush);
+        params.color = [1.0, 0.0, 0.0, 1.0];
+        params.hardness = 1.0;
+        let mut stroke =
+            StrokeSession::begin_on(1, w, h, Arc::clone(&s.active().rgba), params, None)
+                .expect("begin on the layer");
+        pollster::block_on(stroke.extend(ctx, StrokeSample::new(32.0, 32.0, 1.0))).expect("extend");
+        let damage = stroke.stroke_bounds().expect("a dot has bounds");
+        let painted: Arc<[u8]> = Arc::from(stroke.commit().into_boxed_slice());
+
+        let composite_before = pollster::block_on(s.composite(Some(ctx), None)).expect("fold");
+        s.edit_active("Paint", damage, painted).expect("unlocked");
+
+        // (1) the photo layer never moved.
+        assert!(
+            Arc::ptr_eq(&s.layers()[0].rgba, &photo),
+            "the layer below is untouched — not merely equal, the same buffer"
+        );
+        // (2) the composite shows the paint at the dab centre and the
+        //     photo in the corner the dab never reached.
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("fold");
+        let at = |buf: &[u8], x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        let centre = at(&out, 32, 32);
+        assert!(
+            centre[0] > 200 && centre[1] < 60 && centre[2] < 60,
+            "the dab should read red over the photo, got {centre:?}"
+        );
+        assert_eq!(at(&out, 0, 0), at(&photo, 0, 0), "the corner is the photo");
+
+        // (3) undo restores the layer and therefore the composite.
+        assert_eq!(s.undo().as_deref(), Some("Paint"));
+        let after_undo = pollster::block_on(s.composite(Some(ctx), None)).expect("fold");
+        assert_eq!(
+            after_undo.to_vec(),
+            composite_before.to_vec(),
+            "undo returns the composite byte for byte"
+        );
+        // …and redo puts it back.
+        assert_eq!(s.redo().as_deref(), Some("Paint"));
+        let after_redo = pollster::block_on(s.composite(Some(ctx), None)).expect("fold");
+        assert_eq!(after_redo.to_vec(), out.to_vec());
+    }
+
+    // ── the journal, through the stack ───────────────────────────────
+
+    #[test]
+    fn image_editor_undo_a_layer_edit_is_reversible_byte_for_byte() {
+        let mut s = stack(300, 200);
+        let before = s.active().rgba.to_vec();
+        let mut painted = before.clone();
+        for p in painted.chunks_exact_mut(4) {
+            p[0] = 200;
+        }
+        s.edit_active(
+            "Paint",
+            Region::new(0, 0, 300, 200),
+            Arc::from(painted.clone().into_boxed_slice()),
+        )
+        .expect("unlocked");
+        assert_eq!(s.active().rgba.to_vec(), painted);
+
+        assert_eq!(s.undo().as_deref(), Some("Paint"));
+        assert_eq!(s.active().rgba.to_vec(), before, "byte-for-byte");
+        assert_eq!(s.redo().as_deref(), Some("Paint"));
+        assert_eq!(s.active().rgba.to_vec(), painted);
+        assert!(s.undo().is_some());
+        assert!(s.undo().is_none(), "nothing left to undo");
+    }
+
+    #[test]
+    fn image_editor_undo_a_small_edit_journals_only_the_tiles_it_covered() {
+        // 1024×1024 = 16 tiles; a stroke in one corner journals ONE.
+        let mut s = stack(1024, 1024);
+        let painted = s.active().rgba.to_vec();
+        s.edit_active(
+            "Paint",
+            Region::new(10, 10, 40, 40),
+            Arc::from(painted.into_boxed_slice()),
+        )
+        .expect("unlocked");
+        let h = s.history();
+        assert!(h.can_undo);
+        assert_eq!(h.bytes, 256 * 256 * 4, "one tile, not the 4 MB canvas");
+        assert!(h.bytes < 1024 * 1024 * 4 / 4);
+    }
+
+    #[test]
+    fn image_editor_undo_the_history_readout_states_its_bound() {
+        let s = stack(8, 8);
+        let h = s.history();
+        assert!(!h.can_undo && !h.can_redo);
+        assert_eq!(h.depth, 0);
+        assert_eq!(h.dropped, 0);
+        assert_eq!(h.max_bytes, image_graph::DEFAULT_MAX_BYTES);
+        assert_eq!(h.max_entries, image_graph::DEFAULT_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn image_editor_undo_lands_in_the_layer_that_was_painted_not_the_active_one() {
+        // The bug this exists to prevent: paint on layer B, select layer
+        // A, hit Undo — and get B's pre-edit tiles written into A.
+        let mut s = stack(64, 64);
+        s.add("B");
+        let b_before = s.active().rgba.to_vec();
+        s.edit_active("Paint B", Region::new(0, 0, 64, 64), px(64, 64, 200))
+            .expect("unlocked");
+        let a_before = s.layers()[0].rgba.to_vec();
+
+        s.set_active(0).expect("in range");
+        assert_eq!(s.undo().as_deref(), Some("Paint B"));
+        assert_eq!(s.layers()[0].rgba.to_vec(), a_before, "A is untouched");
+        assert_eq!(s.layers()[1].rgba.to_vec(), b_before, "B is restored");
+        // …and the layer the undo landed in becomes active, so the
+        // change is visibly where it happened.
+        assert_eq!(s.active_index(), 1);
+    }
+
+    #[test]
+    fn image_editor_undo_removing_a_layer_clears_the_history() {
+        // The journal is keyed by layer id; a removed layer's entries
+        // could never be applied, so the whole (linear) history goes —
+        // stated, not discovered when Undo silently does nothing.
+        let mut s = stack(32, 32);
+        s.add("B");
+        s.edit_active("Paint", Region::new(0, 0, 32, 32), px(32, 32, 9))
+            .expect("unlocked");
+        assert!(s.history().can_undo);
+        s.remove(1).expect("not the last layer");
+        assert!(!s.history().can_undo);
+        assert_eq!(s.history().bytes, 0);
+    }
+
+    #[test]
+    fn image_editor_undo_a_damage_region_outside_the_canvas_records_nothing() {
+        let mut s = stack(16, 16);
+        let px16 = s.active().rgba.clone();
+        let out = s
+            .edit_active("Paint", Region::new(500, 500, 10, 10), px16)
+            .expect("unlocked");
+        assert_eq!(out, RecordOutcome::NoChange);
+        assert!(!s.history().can_undo);
+    }
+}

@@ -165,3 +165,18 @@
     - "Adobe Photoshop File Format specification — Layer Records (blend-mode key) + Channel Image Data (decode) + lsct group markers (skipped: no pixels)"
   tests:
     rust: ["image-conformance/tests/psd_render.rs", "image-conformance/src/psd_render.rs"]
+
+- id: image.psd.layer.pixel-import
+  state_row: image.psd.roundtrip
+  tier: rendered         # the PRODUCTION layer-pixel decode (image-psd layer_pixels.rs): a parsed PSD's layer tree as canvas-extent straight-RGBA8 plates, feeding the editor's LAYER GRAPH instead of only the merged composite. Pure READ — the preservation model is untouched, so a layered open still re-emits byte-identically.
+  oracle: reference      # folding the plates with compose_ref reproduces flatten_reference EXACTLY (the M1 render oracle's own stimulus), so a mis-decoded channel / mis-placed rect / dropped alpha shows up as a pixel difference
+  provenance:
+    - "Adobe Photoshop File Format specification — Layer Records (bounds T/L/B/R, blend-mode key, opacity, flags bit 1 = hidden)"
+    - "Adobe Photoshop File Format specification — Channel Image Data (per-channel decode; ids 0/1/2 = R/G/B, -1 = transparency; a layer with no transparency channel is opaque inside its rect)"
+    - "Adobe Photoshop File Format specification — Additional Layer Information: lsct section dividers (group markers refuse the import), luni (canonical name)"
+    - "spec §10.4 — decode-on-demand read over the retained parse; no re-encode, no mutation"
+  # DECLINED, with a stated reason, rather than approximated: groups
+  # (lsct), clipping layers, layer masks (-2/-3), non-8-bit-RGB, and an
+  # over-budget canvas (MAX_IMPORT_BYTES — plates are canvas-extent).
+  tests:
+    rust: ["image-conformance/tests/psd_layer_import.rs", "image-psd/src/layer_pixels.rs"]

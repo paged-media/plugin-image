@@ -91,14 +91,23 @@ export function brush_stroke_begin(handle: number, tool: string, size: number, h
 export function brush_stroke_cancel(): void;
 
 /**
- * COMMIT the stroke: register the painted pixels as a NEW
- * engine-held image and return its handle. The source handle is
- * left for the caller to free (the crop / fill commit pattern).
+ * COMMIT the stroke.
  *
- * The result is the same size, so the caller may carry the
- * selection over with `selection_transfer`.
+ * * **With a layer stack bound** (the normal case): the painted
+ *   pixels are written into the ACTIVE LAYER, the tiles the stroke's
+ *   bounding box covers are journaled first (so the stroke is
+ *   undoable, tile-granularly, within the journal's stated bound),
+ *   and the stack is re-composited into the SAME engine-held image.
+ *   The returned handle is therefore the handle you started with —
+ *   the caller must NOT free it.
+ * * **Without one**: the pre-layer behaviour — the painted pixels
+ *   are registered as a NEW engine-held image and the caller swaps
+ *   handles and frees the old one.
+ *
+ * Either way the result is the same size, so the caller may carry
+ * the selection over with `selection_transfer`.
  */
-export function brush_stroke_commit(): DecodedHandle;
+export function brush_stroke_commit(): Promise<DecodedHandle>;
 
 /**
  * EXTEND the stroke with one pointer sample (image px + normalized
@@ -199,7 +208,9 @@ export function fill_gradient(handle: number, kind: string, c0: Float32Array, c1
 export function fill_noise(handle: number, amount: number, seed: number): Promise<DecodedHandle>;
 
 /**
- * Release an engine-held decoded image (and its mip pyramid cache).
+ * Release an engine-held decoded image (its mip pyramid cache, and
+ * the layer stack bound to it — a stack whose composite target is
+ * gone has nowhere to land).
  */
 export function free_image(handle: number): void;
 
@@ -287,6 +298,134 @@ export function init(): void;
 export function init_gpu(): Promise<void>;
 
 export function kernel_count(): number;
+
+/**
+ * Add an empty transparent layer above the active one (it becomes
+ * active). Returns its index.
+ */
+export function layers_add(name: string): number;
+
+/**
+ * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
+ * per-layer adjustment (the panel's chain is otherwise a re-runnable
+ * PREVIEW of the composite and mutates nothing). Journaled over the
+ * whole canvas, so it is undoable; refuses on a locked layer and at
+ * identity. Arguments mirror `adjust_image_ext` minus the handle.
+ */
+export function layers_bake_adjust(exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean, ext: Float32Array): Promise<Uint8Array>;
+
+/**
+ * The handle the stack is bound to, or `-1` when none is open.
+ */
+export function layers_bound(): number;
+
+/**
+ * Drop the bound stack (and its undo history).
+ */
+export function layers_close(): void;
+
+/**
+ * COMPOSITE the stack bottom-up and write the result back into the
+ * bound engine-held image, returning the straight RGBA8 (the C-1
+ * Stage-A payload). GPU-only whenever there is anything to blend; a
+ * single plain visible layer short-circuits to its own pixels with
+ * no dispatch at all, so a one-layer document needs no device.
+ */
+export function layers_composite(): Promise<Uint8Array>;
+
+/**
+ * Duplicate `index` above itself (the copy becomes active).
+ */
+export function layers_duplicate(index: number): number;
+
+/**
+ * The undo/redo readout as JSON — including the BOUND and how much
+ * of it is used, so "history is a window" is stated rather than
+ * discovered. `null` when no stack is open.
+ */
+export function layers_history(): string;
+
+/**
+ * The stack as JSON, BOTTOM-first:
+ * `{"active":i,"layers":[{index,id,name,visible,locked,opacity,blend}]}`.
+ * `opacity` is 0–1; `blend` is the `compose.*` wire name.
+ */
+export function layers_list(): string;
+
+/**
+ * OPEN a layer stack over an engine-held image: one full-canvas
+ * "Background" layer sharing that image's pixels. Re-opening on the
+ * SAME handle is a no-op (the stack survives); opening on a
+ * different handle replaces it, which is what a crop / resize /
+ * straighten commit does (it flattens).
+ */
+export function layers_open(handle: number): void;
+
+/**
+ * OPEN a layer stack from a retained PSD parse instead of from the
+ * flattened composite — the PSD's own layer tree, bottom-first, with
+ * its names, blend modes, opacities and visibility. Returns the
+ * layer count.
+ *
+ * This DECLINES (with the engine's stated reason) for every PSD
+ * whose structure the layer model does not reproduce — groups,
+ * clipping layers, layer masks, non-8-bit-RGB, or an over-budget
+ * canvas — because swapping Photoshop's own composite for a
+ * different-looking one of ours would be worse than flattening. On a
+ * refusal the caller keeps `layers_open` (the flatten) and shows the
+ * reason.
+ *
+ * `image_handle` must be the composite already ingested from the
+ * same file (same extent); `psd_handle` is a `psd_open` handle.
+ */
+export function layers_open_from_psd(image_handle: number, psd_handle: number): number;
+
+/**
+ * REDO the newest undone pixel edit.
+ */
+export function layers_redo(): Promise<string>;
+
+/**
+ * Remove `index`. Removing the ONLY layer is refused (a document
+ * keeps at least one). NOT journaled — see the section docs.
+ */
+export function layers_remove(index: number): void;
+
+/**
+ * Move a layer in stack order (0 = bottom).
+ */
+export function layers_reorder(from: number, to: number): void;
+
+export function layers_set_active(index: number): void;
+
+/**
+ * Set a layer's blend by `compose.*` wire name (prefix optional).
+ * An unregistered name is a clean error, never a silent normal.
+ */
+export function layers_set_blend(index: number, blend: string): void;
+
+/**
+ * Lock a layer's PIXELS: paint / fill / bake refuse on it. Its
+ * properties stay editable — that is what the lock means.
+ */
+export function layers_set_locked(index: number, locked: boolean): void;
+
+export function layers_set_name(index: number, name: string): void;
+
+/**
+ * Set a layer's opacity (0–1, clamped).
+ */
+export function layers_set_opacity(index: number, opacity: number): void;
+
+export function layers_set_visible(index: number, visible: boolean): void;
+
+/**
+ * UNDO the newest journaled pixel edit (paint / fill / bake),
+ * re-composite, and answer the reverted edit's label — an EMPTY
+ * string when there is nothing to undo. Layer STRUCTURE changes are
+ * not journaled (see the section docs).
+ */
+export function layers_undo(): Promise<string>;
 
 /**
  * PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
@@ -482,7 +621,7 @@ export interface InitOutput {
     readonly brush_stroke_active: () => number;
     readonly brush_stroke_begin: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
     readonly brush_stroke_cancel: () => void;
-    readonly brush_stroke_commit: () => [number, number, number];
+    readonly brush_stroke_commit: () => any;
     readonly brush_stroke_extend: (a: number, b: number, c: number) => any;
     readonly brush_stroke_stats: () => [number, number];
     readonly crop_apply_drag: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
@@ -504,6 +643,26 @@ export interface InitOutput {
     readonly init: () => void;
     readonly init_gpu: () => any;
     readonly kernel_count: () => number;
+    readonly layers_add: (a: number, b: number) => [number, number, number];
+    readonly layers_bake_adjust: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => any;
+    readonly layers_bound: () => number;
+    readonly layers_close: () => void;
+    readonly layers_composite: () => any;
+    readonly layers_duplicate: (a: number) => [number, number, number];
+    readonly layers_history: () => [number, number];
+    readonly layers_list: () => [number, number];
+    readonly layers_open: (a: number) => [number, number];
+    readonly layers_open_from_psd: (a: number, b: number) => [number, number, number];
+    readonly layers_redo: () => any;
+    readonly layers_remove: (a: number) => [number, number];
+    readonly layers_reorder: (a: number, b: number) => [number, number];
+    readonly layers_set_active: (a: number) => [number, number];
+    readonly layers_set_blend: (a: number, b: number, c: number) => [number, number];
+    readonly layers_set_locked: (a: number, b: number) => [number, number];
+    readonly layers_set_name: (a: number, b: number, c: number) => [number, number];
+    readonly layers_set_opacity: (a: number, b: number) => [number, number];
+    readonly layers_set_visible: (a: number, b: number) => [number, number];
+    readonly layers_undo: () => any;
     readonly psd_apply_adjusted: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly psd_close: (a: number) => void;
     readonly psd_layer_list: (a: number) => [number, number, number, number];

@@ -51,7 +51,11 @@
       "media.paged.image.command.selectAll",
       "media.paged.image.command.deselect",
       "media.paged.image.command.invertSelection",
-      "media.paged.image.command.featherSelection"
+      "media.paged.image.command.featherSelection",
+      "media.paged.image.command.addLayer",
+      "media.paged.image.command.bakeAdjustToLayer",
+      "media.paged.image.command.undo",
+      "media.paged.image.command.redo"
     ],
     "tools": [
       "media.paged.image.tool.crop",

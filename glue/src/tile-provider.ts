@@ -73,13 +73,19 @@ export function claimImageTiles(
   src: TileSource,
   engine: ImageEngine,
   getHandle: () => number | null,
-): Disposable {
+): Disposable & { bump(): void } {
   // The provider is honest about what it has: one level. `levels: 1`
   // tells the renderer not to ask above level 0 — but the SDK adapter
   // still routes whatever the worker reports, so `source` also guards
   // `level > 0` (defense in depth + the named gap).
+  //
+  // `bump()` is the CONTENT-CHANGE signal. It matters now that the layer
+  // graph edits an image IN PLACE (the composite is written back into
+  // the same handle), so the handle no longer changing is not evidence
+  // that the pixels did not: without a bump the renderer would keep
+  // serving tiles it cached before the stroke.
   let revision = 1;
-  return host.images.claimImageResource(src.elementId, {
+  const claim = host.images.claimImageResource(src.elementId, {
     levels: 1,
     tileSize: TILE_SIZE,
     baseWidth: src.width,
@@ -108,6 +114,12 @@ export function claimImageTiles(
       return { x, y, width: tw, height: th, rgba };
     },
   });
+  return {
+    dispose: () => claim.dispose(),
+    bump() {
+      revision = nextRevision(revision);
+    },
+  };
 }
 
 /** Bump on a content change (a re-decode of the same frame) so the

@@ -72,6 +72,7 @@ pub mod composite;
 pub mod compression;
 pub mod container;
 pub mod edit;
+pub mod layer_pixels;
 pub mod model;
 pub mod reader;
 pub mod writer;
@@ -81,6 +82,7 @@ mod parse;
 
 pub use composite::CompositeRgba8;
 pub use container::Container;
+pub use layer_pixels::{LayerImport, LayerPlate, MAX_IMPORT_BYTES};
 pub use model::PsdFile;
 
 #[derive(Debug, thiserror::Error)]
