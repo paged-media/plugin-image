@@ -60,14 +60,39 @@
 //! 1. **generate** — the `gen.*` kernel, mask `None` (the generator must
 //!    paint everywhere; masking it here would multiply the fill by the
 //!    coverage BEFORE the composite and double-darken feathered edges).
-//! 2. **composite** — `compose.normal` with `in0` = the ORIGINAL image,
-//!    `in1` = the generated field, opacity 1, and the selection coverage
-//!    bound at `@group(2)`. The ABI's `mix(a, result, m)` then yields
-//!    exactly `mix(original, generated, coverage)`: the fill lands inside
-//!    the selection, feathered edges blend once, and outside the
-//!    selection the original survives bit-for-bit.
+//! 2. **composite** — `compose.normal` with `in0` = the ORIGINAL image
+//!    (alpha-associated, see below), `in1` = the generated field, opacity
+//!    1, and the selection coverage bound at `@group(2)`. The ABI's
+//!    `mix(a, result, m)` then yields exactly
+//!    `mix(original, generated, coverage)`: the fill lands inside the
+//!    selection, feathered edges blend once, and outside the selection
+//!    the original survives bit-for-bit.
 //!
 //! No selection ⇒ mask `None` ⇒ the whole image is filled.
+//!
+//! # The premultiply bracket (the same one the brush composites through)
+//!
+//! The engine's working buffers are STRAIGHT RGBA — the decode bridge
+//! maps u8 verbatim (`/255`) with no alpha association — while the
+//! `compose.*` family's contract is PREMULTIPLIED on both inputs
+//! (`cb = unpremul_rgb(a)` in its `main`). Handing straight bytes to
+//! `in0` is therefore only correct where the two coincide: over an
+//! OPAQUE backdrop. Over a PNG with alpha it is wrong — the backdrop
+//! reads back brighter than it is (`rgb/α` of an unassociated colour),
+//! and the composite's own premultiplied output is then re-interpreted
+//! as straight. So the backdrop is bracketed by `cast.premultiply` /
+//! `cast.unpremultiply`, exactly as [`image_gpu::stroke`] brackets the
+//! brush's dab composite.
+//!
+//! The bracket is two extra GPU round-trips, and — provably, not
+//! approximately — the identity when every texel of the backdrop is
+//! fully opaque (`rgb·1 = rgb`), which is the overwhelmingly common case
+//! (a JPEG, a PSD composite, most placed photographs). So it is applied
+//! only when the backdrop actually carries alpha, gated on the same
+//! [`image_gpu::stroke::window_is_opaque`] test the stroke compositor
+//! uses. The tail is skipped on the same footing: source-over onto an
+//! opaque backdrop yields `αo = αs + 1·(1 − αs) = 1`, so
+//! `unpremultiply` would divide by one.
 //!
 //! # Honest v0 scope
 //!
@@ -86,7 +111,11 @@ use std::sync::Arc;
 
 use half::f16;
 use image_core::Region;
+use image_gpu::stroke::window_is_opaque;
 use image_gpu::{GpuContext, SelectionCoverage, TileInput};
+use image_kernels::families::cast::{
+    CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
+};
 use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
 use image_kernels::families::gen::{
     GenAngularGradientParams, GenDiamondGradientParams, GenLinearGradientParams, GenNoiseParams,
@@ -246,45 +275,67 @@ pub async fn fill_rgba8(
                     // Left → right across the frame, vertically centred.
                     let p =
                         GenLinearGradientParams::new(0, 0, geom.x, cy, geom.x + geom.w, cy, a, b);
-                    dispatch_gen(ctx, &GEN_LINEAR_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                    dispatch_unary(ctx, &GEN_LINEAR_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
                 }
                 GradientKind::Radial => {
                     let p = GenRadialGradientParams::new(0, 0, cx, cy, geom.half_extent(), a, b);
-                    dispatch_gen(ctx, &GEN_RADIAL_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                    dispatch_unary(ctx, &GEN_RADIAL_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
                 }
                 GradientKind::Angular => {
                     let p = GenAngularGradientParams::new(0, 0, cx, cy, 0.0, a, b);
-                    dispatch_gen(ctx, &GEN_ANGULAR_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                    dispatch_unary(ctx, &GEN_ANGULAR_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
                 }
                 GradientKind::Reflected => {
                     // Mirrored about the frame CENTRE, reaching the right edge.
                     let p =
                         GenReflectedGradientParams::new(0, 0, cx, cy, geom.x + geom.w, cy, a, b);
-                    dispatch_gen(ctx, &GEN_REFLECTED_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                    dispatch_unary(ctx, &GEN_REFLECTED_GRADIENT, p.as_bytes(), &src_f16, w, h)
+                        .await?
                 }
                 GradientKind::Diamond => {
                     let p =
                         GenDiamondGradientParams::new(0, 0, cx, cy, 0.0, geom.half_extent(), a, b);
-                    dispatch_gen(ctx, &GEN_DIAMOND_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                    dispatch_unary(ctx, &GEN_DIAMOND_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
                 }
             }
         }
         FillSpec::Noise { amount, seed } => {
             let p = GenNoiseParams::new(0, 0, seed, amount);
-            dispatch_gen(ctx, &GEN_NOISE, p.as_bytes(), &src_f16, w, h).await?
+            dispatch_unary(ctx, &GEN_NOISE, p.as_bytes(), &src_f16, w, h).await?
         }
     };
 
     // ── pass 2: composite the generated field over the original through
-    // the selection mask (`mix(a, normal(a, b), m)`; the fill is opaque,
-    // so inside the selection the result IS the generated field) ─────
+    // the selection mask (`mix(a, normal(a, b), m)`; an opaque fill means
+    // the result inside the selection IS the generated field) ────────
+    //
+    // The backdrop enters the compose family's PREMULTIPLIED contract, so
+    // it is alpha-associated first and dissociated after — skipped where
+    // the backdrop is fully opaque and the bracket is provably the
+    // identity (see the module docs).
     let mask = selection.map(|c| c.mask_window_f16(Region::new(0, 0, w, h)));
-    let out_f16 = image_gpu::execute_tile_once_async(
+    let opaque = window_is_opaque(&src_f16);
+    let base_premul = if opaque {
+        None
+    } else {
+        Some(
+            dispatch_unary(
+                ctx,
+                &CAST_PREMULTIPLY,
+                CastPremultiplyParams::new().as_bytes(),
+                &src_f16,
+                w,
+                h,
+            )
+            .await?,
+        )
+    };
+    let composed = image_gpu::execute_tile_once_async(
         ctx,
         &COMPOSE_NORMAL,
         &[
             TileInput {
-                f16_bytes: &src_f16,
+                f16_bytes: base_premul.as_deref().unwrap_or(&src_f16),
             },
             TileInput {
                 f16_bytes: &gen_f16,
@@ -298,13 +349,29 @@ pub async fn fill_rgba8(
     .await
     .map_err(|e| IngestError::Pipeline(e.to_string()))?;
 
+    let out_f16 = if opaque {
+        composed
+    } else {
+        dispatch_unary(
+            ctx,
+            &CAST_UNPREMULTIPLY,
+            CastUnpremultiplyParams::new().as_bytes(),
+            &composed,
+            w,
+            h,
+        )
+        .await?
+    };
+
     Ok(f16_to_rgba8(&out_f16))
 }
 
-/// One whole-image generator dispatch. The `in0` window is the source
+/// One whole-image UNARY dispatch (`inputs: 1`, `ox = oy = 0`, no mask)
+/// — the shape both the generators and the premultiply bracket's
+/// `cast.*` steps take. For a generator the `in0` window is the source
 /// image only because the family's zero-input convention wires the
-/// generators as UNARY (`inputs: 1`) — the shaders never sample it.
-async fn dispatch_gen(
+/// generators as unary; the shaders never sample it.
+async fn dispatch_unary(
     ctx: &GpuContext,
     def: &'static image_kernels::KernelDef,
     params: &[u8],

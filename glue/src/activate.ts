@@ -35,6 +35,7 @@ import { createImageSession } from "./session";
 import { makeImagePanel } from "./panels/image-panel";
 import { makeCropGesture } from "./crop-tool";
 import { makeSelectionGesture } from "./selection-tool";
+import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 
 const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
@@ -42,6 +43,9 @@ const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
 const MAGIC_WAND_TOOL_ID = "media.paged.image.tool.magicWand";
+const BRUSH_TOOL_ID = "media.paged.image.tool.brush";
+const PENCIL_TOOL_ID = "media.paged.image.tool.pencil";
+const ERASER_TOOL_ID = "media.paged.image.tool.eraser";
 
 export function activate(host: BundleHost): BundleHandle {
   const session = createImageSession(host);
@@ -185,6 +189,55 @@ export function activate(host: BundleHost): BundleHandle {
     section: "selection",
     shortcut: "shift+w",
     gesture: () => makeSelectionGesture(host, session, "wand"),
+  });
+
+  // ── PAINT tools (spec §6.3 — the brush engine's editor reach) ──
+  //
+  // Three tools over ONE gesture architecture (the selection pattern:
+  // gesture → machine → engine doors → overlay affordance). They paint
+  // RASTER pixels into the ingested image, which is what distinguishes
+  // them from paged.draw's VECTOR Paintbrush / Blob Brush / Eraser on
+  // the same rail — hence the "(raster)" in every title. Their scope is
+  // stated in as many words in the panel's Brush section (BRUSH_SCOPE_NOTE):
+  // there is no layer graph here, so a committed stroke is DESTRUCTIVE
+  // into the single engine-held image.
+  //
+  // SHORTCUTS (INV-REG-1, globally unique tool shortcuts): "q" is the
+  // last free single letter, and shift+f / shift+e are free in the shift
+  // register — verified at pick time against the editor built-ins (v a
+  // shift+p u b t shift+t \ p n f m l c e r s o g shift+g i k h z),
+  // paged.draw (= - shift+c/u/n/a/m/b/r/j/k/i/d/s/q) and this bundle's
+  // own five (shift+x, y, shift+y, shift+l, shift+w). "[" and "]" are
+  // deliberately LEFT FREE for brush-size nudging.
+  contributeTool(host, {
+    id: BRUSH_TOOL_ID,
+    title: "Brush (raster)",
+    icon: "tool-paintbrush",
+    group: BRUSH_TOOL_ID,
+    section: "drawType",
+    shortcut: "q",
+    cursor: PAINT_CURSOR,
+    gesture: () => makeBrushGesture(host, session, "brush"),
+  });
+  contributeTool(host, {
+    id: PENCIL_TOOL_ID,
+    title: "Pencil (raster)",
+    icon: "tool-pencil",
+    group: PENCIL_TOOL_ID,
+    section: "drawType",
+    shortcut: "shift+f",
+    cursor: PAINT_CURSOR,
+    gesture: () => makeBrushGesture(host, session, "pencil"),
+  });
+  contributeTool(host, {
+    id: ERASER_TOOL_ID,
+    title: "Eraser (raster)",
+    icon: "tool-erase",
+    group: ERASER_TOOL_ID,
+    section: "drawType",
+    shortcut: "shift+e",
+    cursor: PAINT_CURSOR,
+    gesture: () => makeBrushGesture(host, session, "eraser"),
   });
 
   // GENERATE — the `gen.*` family's editor reach. Fills the CURRENT

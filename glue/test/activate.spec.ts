@@ -65,6 +65,9 @@ describe("imageBundle.activate", () => {
       "media.paged.image.tool.marqueeEllipse",
       "media.paged.image.tool.lasso",
       "media.paged.image.tool.magicWand",
+      "media.paged.image.tool.brush",
+      "media.paged.image.tool.pencil",
+      "media.paged.image.tool.eraser",
     ]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);
   });

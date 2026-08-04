@@ -571,6 +571,79 @@ fn image_editor_generate_noise_fills_the_whole_image_without_a_selection() {
     assert_eq!(out, again, "same seed ⇒ same noise");
 }
 
+#[test]
+fn image_editor_generate_fill_composites_through_the_premultiply_bracket() {
+    // The seam the brush compositor already closes (image_gpu::stroke):
+    // the engine's working buffers are STRAIGHT RGBA, the `compose.*`
+    // family's contract is PREMULTIPLIED. Over an OPAQUE backdrop the two
+    // coincide and nothing is at stake — which is why the other fill
+    // tests never caught this — but over a PNG with alpha, feeding
+    // straight bytes to `in0` reads the backdrop back too bright and then
+    // returns the composite's premultiplied output as if it were
+    // straight. This asserts the CORRECT source-over, not "it changed".
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    // Backdrop: HALF-TRANSPARENT red (straight (1, 0, 0, 128/255)).
+    let img =
+        image_js::ingest::DecodedImage::from_rgba8(1, 1, vec![255, 0, 0, 128]).expect("valid");
+    // Fill: a flat (both stops equal) HALF-TRANSPARENT blue, so the
+    // generated field does not simply cover the backdrop.
+    let spec = image_js::fill::FillSpec::Gradient {
+        kind: image_js::fill::GradientKind::Linear,
+        c0: [0.0, 0.0, 1.0, 0.5],
+        c1: [0.0, 0.0, 1.0, 0.5],
+    };
+    let out =
+        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None)).expect("fill");
+
+    // Source-over of s = (0,0,1) @ 0.5 onto b = (1,0,0) @ 128/255:
+    //   αo = αs + αb(1 − αs)               = 0.5 + 0.50196·0.5 = 0.75098
+    //   Co·αo = αs(1−αb)·cs + αs·αb·cs + (1−αs)·αb·cb
+    //         = (0.25098, 0, 0.5)          [premultiplied]
+    //   Co    = (0.3342, 0, 0.6658)        [straight, ÷ αo]
+    let expect = [85u8, 0, 170, 191];
+    // What the un-bracketed composite produced instead: the backdrop
+    // dissociated as if premultiplied (rgb/α ⇒ red at 2.0) and the
+    // premultiplied result handed back as straight ⇒ (128, 0, 128, 191).
+    for (i, (&got, &want)) in out.iter().zip(expect.iter()).enumerate() {
+        assert!(
+            (got as i32 - want as i32).abs() <= 2,
+            "channel {i}: got {got}, expected {want} (f16 working-space \
+             tolerance). {out:?} vs {expect:?} — an un-bracketed composite \
+             gives [128, 0, 128, 191]"
+        );
+    }
+}
+
+#[test]
+fn image_editor_generate_fill_leaves_an_opaque_backdrop_on_the_fast_path() {
+    // The bracket's opaque short-circuit must not change the answer: a
+    // fully-opaque backdrop composites identically with or without the
+    // `cast.*` steps (premultiply IS the identity there), so an opaque
+    // fill lands exactly on the fill colour.
+    let Some(ctx) = pollster::block_on(maybe_device()) else {
+        println!("SKIP: no GPU adapter");
+        return;
+    };
+    let img =
+        image_js::ingest::DecodedImage::from_rgba8(1, 1, vec![255, 0, 0, 255]).expect("valid");
+    let spec = image_js::fill::FillSpec::Gradient {
+        kind: image_js::fill::GradientKind::Linear,
+        c0: [0.0, 0.0, 1.0, 1.0],
+        c1: [0.0, 0.0, 1.0, 1.0],
+    };
+    let out =
+        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None)).expect("fill");
+    for (i, (&got, &want)) in out.iter().zip([0u8, 0, 255, 255].iter()).enumerate() {
+        assert!(
+            (got as i32 - want as i32).abs() <= 2,
+            "channel {i}: got {got}, expected {want} — {out:?}"
+        );
+    }
+}
+
 // ── the STRAIGHTEN commit (geom.rotate_bilinear) ─────────────────────
 //
 // feat: image.editor.crop. The crop tool previewed a rotated frame long

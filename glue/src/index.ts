@@ -36,14 +36,19 @@ export {
   freshIdentityParams,
   packAdjustExt,
   ADJUST_EXT_LEN,
+  DEFAULT_BRUSH_PARAMS,
   DEFAULT_BW_WEIGHTS,
   DEFAULT_PHOTO_FILTER_COLOR,
   GRADIENT_KINDS,
   IDENTITY_PARAMS,
   IDENTITY_LEVELS_CHANNEL,
   ENGINE_NOT_BUILT,
+  PRESSURE_TARGETS,
+  STROKE_TOOLS,
   type AdjustParams,
   type BlackWhiteParams,
+  type BrushParams,
+  type BrushStats,
   type ChannelMixerParams,
   type ColorBalanceParams,
   type GradientKind,
@@ -52,8 +57,10 @@ export {
   type LevelsChannel,
   type LevelsRgbParams,
   type PhotoFilterParams,
+  type PressureTarget,
   type RasterFormat,
   type Rgba01,
+  type StrokeTool,
 } from "./engine";
 export {
   createImageSession,
@@ -74,6 +81,26 @@ export {
   type SelectionShapeKind,
 } from "./selection-machine";
 export { makeSelectionGesture } from "./selection-tool";
+export {
+  createBrushMachine,
+  normalizePressure,
+  tipOutline,
+  NON_PEN_PRESSURE,
+  TIP_SEGMENTS,
+  type BrushMachine,
+  type BrushMachineState,
+  type BrushPointerType,
+  type BrushSample,
+} from "./brush-machine";
+export { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
+export { BRUSH_SCOPE_NOTE, BrushSection } from "./panels/image-panel";
+export {
+  fitInto,
+  imageToPage,
+  pageToImage,
+  resolveFrameFit,
+  type FitTransform,
+} from "./frame-fit";
 export {
   selectionModeCode,
   type SelectionMode,

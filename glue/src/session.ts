@@ -33,9 +33,12 @@ import type { BundleHost, Disposable } from "@paged-media/plugin-api";
 
 import {
   bootEngine,
+  DEFAULT_BRUSH_PARAMS,
   freshIdentityParams,
   isIdentity,
   type AdjustParams,
+  type BrushParams,
+  type BrushStats,
   type GradientKind,
   type ImageEngine,
   type ImageHistogram,
@@ -45,6 +48,7 @@ import {
   type Rgba01,
   type LevelsParams,
   type SelectionStats,
+  type StrokeTool,
 } from "./engine";
 import { claimImageTiles } from "./tile-provider";
 import { createDecodePool, type DecodePool } from "./decode-pool";
@@ -53,6 +57,11 @@ import {
   createSelectionMachine,
   type SelectionMachine,
 } from "./selection-machine";
+import {
+  createBrushMachine,
+  type BrushMachine,
+  type BrushSample,
+} from "./brush-machine";
 
 /** The fixed v0 feather sigma (px) the `featherSelection` command uses
  *  when the caller passes none (a slider is a follow-up). */
@@ -128,6 +137,19 @@ export interface ImageSessionState {
    *  the host wires no save-FILE door (`shell.pickFile` reads, it does
    *  not write), so the exporter registry is the whole delivery lane. */
   saveBack: SaveBackResult | null;
+  /** The brush/pencil/eraser parameters, FROZEN into each stroke at
+   *  `brushBegin` (the engine refuses a stroke whose size changes
+   *  mid-drag — it would not be replayable). */
+  brush: BrushParams;
+  /** Every blend mode a stroke can paint through, read from the engine's
+   *  `compose.*` registry at boot (empty until the engine is up — the
+   *  panel's picker is never a hardcoded list). */
+  blendModes: string[];
+  /** A stroke is in progress (the tools' pointer-down → up window). */
+  strokeActive: boolean;
+  /** The in-flight stroke's dab count + bounds, or null before the
+   *  first dab lands on the canvas. */
+  strokeStats: BrushStats | null;
 }
 
 export interface ImageSession {
@@ -212,6 +234,31 @@ export interface ImageSession {
   /** Gaussian-feather the selection edge (σ px; the fixed v0 default
    *  when omitted). False when there is no selection to feather. */
   featherSelection(sigma?: number): boolean;
+  /** The PAINT interaction machine (null until an image is ingested).
+   *  The brush / pencil / eraser tools drive it; it holds the pointer
+   *  sampling only — the stroke's pixels are engine state. */
+  brushMachine(): BrushMachine | null;
+  /** Merge into the brush parameters (the panel's Brush section). Takes
+   *  effect on the NEXT stroke — the in-flight one is frozen. */
+  setBrushParams(p: Partial<BrushParams>): void;
+  /** OPEN a stroke on the engine-held source with the current brush
+   *  params + the bound selection (both frozen for its duration).
+   *  GPU-only: false with an honest status when there is no device,
+   *  nothing ingested, or the engine refuses. */
+  brushBegin(tool: StrokeTool): Promise<boolean>;
+  /** Feed one pointer sample and re-submit the in-frame preview from the
+   *  painted pixels. False when no stroke is open. */
+  brushExtend(sample: BrushSample): Promise<boolean>;
+  /** CLOSE the stroke: the painted pixels become a NEW engine-held
+   *  source (the crop / fill commit pattern — DESTRUCTIVE into the
+   *  engine's working image; the document and the source file are
+   *  untouched, and re-ingesting the frame is the only restore this
+   *  plugin owns). Carries the selection over (the result is the same
+   *  size) and re-composites through the adjust chain. */
+  brushCommit(): Promise<boolean>;
+  /** ABANDON the stroke — the engine-held source was never mutated, so
+   *  this restores it exactly (and re-composites the frame). */
+  brushCancel(): void;
   /** Commit the crop: cut the machine's rect out of the source image, swap
    *  the engine-held source to the cropped result, recompute the
    *  histogram, and re-composite in-frame. Returns false when there is
@@ -258,6 +305,14 @@ export function createImageSession(host: BundleHost): ImageSession {
   // The selection interaction machine (rebuilt alongside the crop
   // machine; the selection itself is ENGINE state keyed to the handle).
   let selectionMachineRef: SelectionMachine | null = null;
+  // The paint interaction machine (pointer sampling only — the stroke's
+  // base snapshot + coverage live engine-side).
+  let brushMachineRef: BrushMachine | null = null;
+  // The frame the IN-FLIGHT stroke previews into, resolved once at
+  // begin: per-sample geometry reads would put an async round-trip in
+  // the middle of a drag.
+  let strokeTarget: string | null = null;
+  let strokeBox: { w: number; h: number } | null = null;
   let disposed = false;
 
   const state: ImageSessionState = {
@@ -273,6 +328,10 @@ export function createImageSession(host: BundleHost): ImageSession {
     psd: null,
     selection: null,
     saveBack: null,
+    brush: { ...DEFAULT_BRUSH_PARAMS, color: [...DEFAULT_BRUSH_PARAMS.color] },
+    blendModes: [],
+    strokeActive: false,
+    strokeStats: null,
   };
   /** The retained PSD parse handle (wasm-side), when state.psd is set. */
   let psdHandle: number | null = null;
@@ -310,6 +369,14 @@ export function createImageSession(host: BundleHost): ImageSession {
           engine = e;
           state.engine = "ready";
           state.gpu = gpu;
+          try {
+            // The blend picker's options come from the kernel registry,
+            // never from a list this side could let drift.
+            state.blendModes = e.brushBlendModes();
+          } catch (err) {
+            host.log.debug("blend-mode registry read failed", err);
+            state.blendModes = [];
+          }
           state.engineDetail = gpu
             ? null
             : "WebGPU unavailable — adjustments disabled (kernels are " +
@@ -374,7 +441,28 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
   };
 
+  /** Drop an in-flight stroke engine-side (the base pixels were never
+   *  mutated, so this is a true restore). Shared by the explicit cancel
+   *  and by every path that pulls the source out from under a stroke. */
+  const discardStroke = () => {
+    if (engine && state.strokeActive) {
+      try {
+        engine.brushCancel();
+      } catch (err) {
+        host.log.debug("stroke cancel failed", err);
+      }
+    }
+    state.strokeActive = false;
+    state.strokeStats = null;
+    strokeTarget = null;
+    strokeBox = null;
+    brushMachineRef?.cancel();
+  };
+
   const freeSource = () => {
+    // A stroke holds the OLD handle's base snapshot — a re-ingest under
+    // one would commit into pixels that no longer exist.
+    discardStroke();
     // A claim points at THIS source's handle — release it before the
     // pixels go (the renderer drops to the whole-image fallback lane).
     releaseTiles();
@@ -383,6 +471,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     state.histogram = null;
     cropMachineRef = null;
     selectionMachineRef = null;
+    brushMachineRef = null;
     state.selection = null;
     if (psdHandle !== null && engine) engine.psdClose(psdHandle);
     psdHandle = null;
@@ -465,6 +554,66 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
     selectionMachineRef = createSelectionMachine(engine, () => api.refreshSelection());
     state.selection = engine.selectionStats();
+    // The paint machine is pure pointer bookkeeping, but it is rebuilt
+    // with the source so a stale sample queue can never leak across a
+    // crop / resize / fill / paint handle swap.
+    brushMachineRef = createBrushMachine();
+  };
+
+  /** The frame's content box in page pt (falls back to the image's own
+   *  extent when the geometry read misses — an honest 1:1 rather than a
+   *  throw). */
+  const frameBox = async (target: string): Promise<{ w: number; h: number }> => {
+    const src = state.source;
+    const fallback = { w: src?.width ?? 1, h: src?.height ?? 1 };
+    try {
+      const geom = await host.document.elementGeometry([
+        host.selection.get().find((i) => elementIdOf(i) === target) ??
+          ({ kind: "rectangle", id: target } as never),
+      ]);
+      const bounds = geom[0]?.bounds;
+      if (!bounds) return fallback;
+      const [top, left, bottom, right] = bounds;
+      return { w: Math.max(right - left, 1), h: Math.max(bottom - top, 1) };
+    } catch (err) {
+      host.log.debug("frame geometry read failed", err);
+      return fallback;
+    }
+  };
+
+  /** Submit one whole-image RGBA8 payload as the C-1 Stage-A image scene
+   *  item, aspect-fit + centered in the frame's content box (the layer is
+   *  clipped + transformed by core; §8.5 — the plugin never compensates).
+   *  The ONE composite path: the committed Apply and the live stroke
+   *  preview both land here, so they cannot lay pixels out differently. */
+  const submitLayer = async (
+    target: string,
+    rgba: Uint8Array,
+    width: number,
+    height: number,
+    box: { w: number; h: number },
+  ): Promise<boolean> => {
+    const surface = scene();
+    if (!surface) return false;
+    const scale = Math.min(box.w / width, box.h / height);
+    const w = width * scale;
+    const h = height * scale;
+    await surface.submit(target, {
+      items: [
+        {
+          kind: "image",
+          rgba: Array.from(rgba),
+          width,
+          height,
+          x: (box.w - w) / 2,
+          y: (box.h - h) / 2,
+          w,
+          h,
+        },
+      ],
+    });
+    state.compositedFrame = target;
+    return true;
   };
 
   const clearLayer = async () => {
@@ -958,6 +1107,137 @@ export function createImageSession(host: BundleHost): ImageSession {
       return true;
     },
 
+    brushMachine() {
+      return brushMachineRef;
+    },
+
+    setBrushParams(p) {
+      state.brush = { ...state.brush, ...p };
+      emit();
+    },
+
+    async brushBegin(tool) {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing to paint on — ingest a placed image first.");
+        return false;
+      }
+      if (!state.gpu) {
+        // No CPU blend path ships (spec §6) — the dab composite IS a
+        // registered WGSL dispatch.
+        setStatus("WebGPU unavailable — painting is GPU-only.");
+        return false;
+      }
+      if (state.strokeActive) return false;
+      try {
+        engine.brushBegin(src.handle, tool, state.brush);
+      } catch (err) {
+        setStatus(`Paint failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      state.strokeActive = true;
+      state.strokeStats = null;
+      // Resolve the preview frame ONCE — a geometry read per pointer
+      // sample would put an async round-trip inside the drag.
+      strokeTarget = src.elementId;
+      if (!strokeTarget) {
+        const ids = host.selection.get();
+        strokeTarget = ids.length === 1 ? elementIdOf(ids[0]) : null;
+        if (strokeTarget) src.elementId = strokeTarget;
+      }
+      strokeBox = strokeTarget ? await frameBox(strokeTarget) : null;
+      if (!strokeTarget) {
+        // The stroke still paints into the engine image — say why nothing
+        // shows on the canvas rather than letting it look broken.
+        setStatus(
+          "Painting into the engine image — select the target frame to see " +
+            "the stroke in-frame.",
+        );
+      }
+      emit();
+      return true;
+    },
+
+    async brushExtend(sample) {
+      const src = state.source;
+      if (!src || !engine || !state.strokeActive) return false;
+      let rgba: Uint8Array;
+      try {
+        rgba = await engine.brushExtend(sample.x, sample.y, sample.pressure);
+      } catch (err) {
+        setStatus(`Paint failed: ${err instanceof Error ? err.message : err}`);
+        discardStroke();
+        emit();
+        return false;
+      }
+      state.strokeStats = engine.brushStats();
+      // The LIVE preview is the painted pixels themselves — NOT the
+      // adjust chain's output. The chain is a function of the source, so
+      // re-running it per sample would double the GPU work in the middle
+      // of a drag; the committed Apply (which brushCommit triggers) puts
+      // the adjusted composite back. Stated in the panel.
+      if (strokeTarget && strokeBox) {
+        await submitLayer(strokeTarget, rgba, src.width, src.height, strokeBox);
+      }
+      emit();
+      return true;
+    },
+
+    async brushCommit() {
+      const src = state.source;
+      if (!src || !engine || !state.strokeActive) return false;
+      const dabs = state.strokeStats?.dabs ?? 0;
+      let painted: { handle: number; width: number; height: number };
+      try {
+        painted = engine.brushCommit();
+      } catch (err) {
+        setStatus(`Paint commit failed: ${err instanceof Error ? err.message : err}`);
+        discardStroke();
+        emit();
+        return false;
+      }
+      state.strokeActive = false;
+      state.strokeStats = null;
+      strokeTarget = null;
+      strokeBox = null;
+      brushMachineRef?.cancel();
+      // Swap the engine-held source (the crop / fill commit pattern):
+      // DESTRUCTIVE into the working pixels, document untouched.
+      releaseTiles();
+      engine.freeImage(src.handle);
+      src.handle = painted.handle;
+      src.width = painted.width;
+      src.height = painted.height;
+      state.saveBack = null;
+      // Same size, so the SELECTION is still meaningful on the result —
+      // carry it over instead of making the user reselect (the fill
+      // lane's rule; a crop/resize swap still drops it).
+      try {
+        engine.selectionTransfer(painted.handle);
+      } catch (err) {
+        host.log.debug("selection transfer failed", err);
+      }
+      refreshSourceReadout();
+      // Put the ADJUSTED composite back over the raw stroke preview.
+      if (src.elementId) await api.apply();
+      setStatus(
+        `Painted ${dabs} dab${dabs === 1 ? "" : "s"} into the engine image ` +
+          "(destructive — there is no layer graph; the document and the " +
+          "source file are unchanged, re-ingest to restore).",
+      );
+      return true;
+    },
+
+    brushCancel() {
+      if (!state.strokeActive) return;
+      discardStroke();
+      setStatus("Stroke cancelled — the engine pixels are exactly as they were.");
+      // The frame is still showing the abandoned preview; put the
+      // committed composite back.
+      if (state.compositedFrame && state.source?.elementId) void api.apply();
+      else emit();
+    },
+
     async commitCrop() {
       const src = state.source;
       if (!src || !engine || !cropMachineRef) {
@@ -1027,46 +1307,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       setStatus("Adjusting…");
       try {
         const rgba = await engine.adjust(src.handle, state.params);
-
-        // Frame content box (the layer is clipped + transformed by core;
-        // §8.5 — the plugin never compensates). Aspect-fit, centered.
-        let boxW = src.width;
-        let boxH = src.height;
-        try {
-          const geom = await host.document.elementGeometry([
-            host.selection.get().find((i) => elementIdOf(i) === target) ??
-              ({ kind: "rectangle", id: target } as never),
-          ]);
-          const bounds = geom[0]?.bounds;
-          if (bounds) {
-            const [top, left, bottom, right] = bounds;
-            boxW = Math.max(right - left, 1);
-            boxH = Math.max(bottom - top, 1);
-          }
-        } catch (err) {
-          host.log.debug("apply: frame geometry read failed", err);
-        }
-        const scale = Math.min(boxW / src.width, boxH / src.height);
-        const w = src.width * scale;
-        const h = src.height * scale;
-        const x = (boxW - w) / 2;
-        const y = (boxH - h) / 2;
-
-        await surface.submit(target, {
-          items: [
-            {
-              kind: "image",
-              rgba: Array.from(rgba),
-              width: src.width,
-              height: src.height,
-              x,
-              y,
-              w,
-              h,
-            },
-          ],
-        });
-        state.compositedFrame = target;
+        await submitLayer(target, rgba, src.width, src.height, await frameBox(target));
         // The engine masked the chain by the bound selection (if any) —
         // say so, honestly.
         const sel = state.selection ? " (adjustments masked to the selection)" : "";
@@ -1140,6 +1381,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     dispose() {
       disposed = true;
       selectionSub.dispose();
+      discardStroke();
       releaseTiles();
       // K-3 — terminate the decode pool's workers (the host ALSO
       // auto-terminates them on bundle dispose; this is the explicit,

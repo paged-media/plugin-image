@@ -34,13 +34,16 @@ import manifest from "../../manifest.json";
 import type { ImageSession } from "../session";
 import type {
   AdjustParams,
+  BrushParams,
+  BrushStats,
   GradientKind,
   ImageHistogram,
   LevelsChannel,
+  PressureTarget,
   ResampleFilter,
   Rgba01,
 } from "../engine";
-import { DEFAULT_BW_WEIGHTS, GRADIENT_KINDS } from "../engine";
+import { DEFAULT_BW_WEIGHTS, GRADIENT_KINDS, PRESSURE_TARGETS } from "../engine";
 import type { AspectPreset } from "../crop-machine";
 
 const row: CSSProperties = {
@@ -367,6 +370,212 @@ const stopCss = (c: Rgba01) =>
   `rgba(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(
     c[2] * 255,
   )}, ${c[3]})`;
+
+// ── brush ────────────────────────────────────────────────────────────
+
+/** The brush colour wells. The engine takes ANY straight RGBA; this is
+ *  the shortlist the panel offers because the host contract wires no
+ *  colour-picker door (the same reason the gradient stops are a list). */
+const BRUSH_COLORS: Array<{ name: string; rgba: Rgba01 }> = [
+  { name: "Black", rgba: [0, 0, 0, 1] },
+  { name: "White", rgba: [1, 1, 1, 1] },
+  { name: "50% grey", rgba: [0.5, 0.5, 0.5, 1] },
+  { name: "Red", rgba: [1, 0, 0, 1] },
+  { name: "Green", rgba: [0, 1, 0, 1] },
+  { name: "Blue", rgba: [0, 0, 1, 1] },
+  { name: "Yellow", rgba: [1, 1, 0, 1] },
+  { name: "Magenta", rgba: [1, 0, 1, 1] },
+  { name: "Cyan", rgba: [0, 1, 1, 1] },
+];
+
+/**
+ * THE SCOPE OF PAINTING, in the UI rather than in a code comment.
+ *
+ * Exported so a spec pins the WORDING: an honesty note that can be
+ * edited away silently is not a guarantee (the paged.draw Appearance
+ * panel's `APPEARANCE_BAKE_NOTE` convention).
+ */
+export const BRUSH_SCOPE_NOTE =
+  "There is no layer graph here. A stroke paints the SINGLE engine-held " +
+  "image — not a paint layer above the photo — so a committed stroke is " +
+  "destructive into those pixels, the same way a crop or a fill is: the " +
+  "painted result becomes the working image and what it covered is gone. " +
+  "The document and the source file are never touched (the in-frame result " +
+  "stays a preview layer), which is also why this plugin owns no undo for " +
+  "a stroke: re-ingesting the file is the only restore it has. A stroke " +
+  "still in flight can be abandoned — the base pixels are held until you " +
+  "release. While you drag, the frame shows the painted pixels themselves; " +
+  "the adjustment chain re-runs on release.";
+
+/** The paint parameters section — a PURE component (props in, elements
+ *  out, no hooks) so a spec can render it without a DOM and assert what
+ *  it says. */
+export function BrushSection({
+  brush,
+  blendModes,
+  strokeActive,
+  strokeStats,
+  masked,
+  gpu,
+  disabled,
+  onChange,
+}: {
+  brush: BrushParams;
+  /** From the engine's `compose.*` registry — never a hardcoded list. */
+  blendModes: readonly string[];
+  strokeActive: boolean;
+  strokeStats: BrushStats | null;
+  /** A selection exists, so strokes are clipped to it. */
+  masked: boolean;
+  gpu: boolean;
+  disabled: boolean;
+  onChange: (patch: Partial<BrushParams>) => void;
+}) {
+  const colorIndex = BRUSH_COLORS.findIndex(
+    (c) =>
+      c.rgba[0] === brush.color[0] &&
+      c.rgba[1] === brush.color[1] &&
+      c.rgba[2] === brush.color[2] &&
+      c.rgba[3] === brush.color[3],
+  );
+  return (
+    <>
+      <div style={sectionTitle}>
+        Brush{masked ? " — clipped to the selection" : ""}
+      </div>
+      <Slider
+        label="Size (px)"
+        min={1}
+        max={512}
+        step={1}
+        value={brush.size}
+        disabled={disabled}
+        onChange={(size) => onChange({ size })}
+      />
+      <Slider
+        label="Hardness"
+        min={0}
+        max={1}
+        step={0.05}
+        value={brush.hardness}
+        disabled={disabled}
+        onChange={(hardness) => onChange({ hardness })}
+      />
+      <Slider
+        label="Opacity"
+        min={0}
+        max={1}
+        step={0.05}
+        value={brush.opacity}
+        disabled={disabled}
+        onChange={(opacity) => onChange({ opacity })}
+      />
+      <Slider
+        label="Flow"
+        min={0}
+        max={1}
+        step={0.05}
+        value={brush.flow}
+        disabled={disabled}
+        onChange={(flow) => onChange({ flow })}
+      />
+      <Slider
+        label="Spacing (× diameter)"
+        min={0.01}
+        max={1}
+        step={0.01}
+        value={brush.spacing}
+        disabled={disabled}
+        onChange={(spacing) => onChange({ spacing })}
+      />
+      <div style={row}>
+        <label htmlFor="pg-image-brush-blend">Blend</label>
+        <select
+          id="pg-image-brush-blend"
+          data-image-brush-blend
+          value={brush.blend}
+          disabled={disabled || blendModes.length === 0}
+          onChange={(e) => onChange({ blend: e.target.value })}
+        >
+          {blendModes.length > 0 ? (
+            blendModes.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))
+          ) : (
+            <option value={brush.blend}>{`${brush.blend} (engine not booted)`}</option>
+          )}
+        </select>
+      </div>
+      <div style={row}>
+        <label htmlFor="pg-image-brush-color">Colour</label>
+        <select
+          id="pg-image-brush-color"
+          data-image-brush-color
+          value={colorIndex < 0 ? 0 : colorIndex}
+          disabled={disabled}
+          style={{ background: stopCss(brush.color) }}
+          onChange={(e) =>
+            onChange({ color: [...BRUSH_COLORS[Number(e.target.value)].rgba] })
+          }
+        >
+          {BRUSH_COLORS.map((c, i) => (
+            <option key={c.name} value={i}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div style={row}>
+        <label htmlFor="pg-image-brush-pressure">Pen pressure drives</label>
+        <select
+          id="pg-image-brush-pressure"
+          data-image-brush-pressure
+          value={brush.pressureTarget}
+          disabled={disabled}
+          onChange={(e) =>
+            onChange({ pressureTarget: e.target.value as PressureTarget })
+          }
+        >
+          {PRESSURE_TARGETS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+      </div>
+      {strokeActive ? (
+        <div style={row}>
+          <span>Stroke</span>
+          <span style={mono} data-image-brush-stats>
+            {strokeStats
+              ? `${strokeStats.dabs} dabs · ${Math.round(strokeStats.x)},${Math.round(
+                  strokeStats.y,
+                )} ${Math.round(strokeStats.w)}×${Math.round(strokeStats.h)}`
+              : "in progress"}
+          </span>
+        </div>
+      ) : null}
+      {!gpu ? (
+        <div style={note}>
+          Painting is GPU-only — the dab composite is a registered WGSL
+          kernel dispatch and no CPU blend path ships. Without a WebGPU
+          device the paint tools decline instead of painting differently.
+        </div>
+      ) : null}
+      <div style={note} data-image-brush-note>
+        {BRUSH_SCOPE_NOTE}
+      </div>
+      <div style={note}>
+        Colours are a shortlist (the host contract wires no colour-picker
+        door); the blend list is the engine&apos;s own `compose.*` kernel
+        registry. Parameters are frozen into each stroke at pointer-down —
+        a stroke whose size changed halfway through would not replay.
+      </div>
+    </>
+  );
+}
 
 export function makeImagePanel(session: ImageSession) {
   return function ImagePanel() {
@@ -881,6 +1090,21 @@ export function makeImagePanel(session: ImageSession) {
           Invert colors
         </label>
 
+        {/* BRUSH — the paint tools' frozen-at-pointer-down parameters
+            (paged.image's RASTER brush/pencil/eraser, distinct from
+            paged.draw's vector ones on the same rail). The section states
+            the scope in the UI, not only in the code. */}
+        <BrushSection
+          brush={s.brush}
+          blendModes={s.blendModes}
+          strokeActive={s.strokeActive}
+          strokeStats={s.strokeStats}
+          masked={s.selection !== null}
+          gpu={s.gpu}
+          disabled={disabled}
+          onChange={(patch) => session.setBrushParams(patch)}
+        />
+
         {/* Resize — the T1 resample kernels (GPU-only; the button says so
             when no device). Swaps the engine source like a crop commit. */}
         <div style={sectionTitle}>Resize</div>
@@ -1119,8 +1343,11 @@ export function makeImagePanel(session: ImageSession) {
           document and the placed file are unchanged. The crop commit cuts
           the engine source, straightening first when the angle is non-zero
           (a bilinear resample, so it needs the GPU; 0&deg; stays an exact
-          axis-aligned cut). &ldquo;Apply to file&rdquo; is the save-back lane;
-          per-drag preview is still a later milestone.
+          axis-aligned cut). &ldquo;Apply to file&rdquo; is the save-back lane.
+          Per-drag preview for the ADJUSTMENT sliders is still a later
+          milestone (Stage B); the paint tools do stream a preview per
+          pointer sample, at the cost of a whole-image byte payload each
+          time.
         </div>
       </div>
     );

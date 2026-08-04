@@ -451,6 +451,77 @@ export type Rgba01 = [number, number, number, number];
 /** The raster re-encode formats the non-PSD save-back lane offers. */
 export type RasterFormat = "png" | "jpeg";
 
+// ─────────────────────────────── PAINT ───────────────────────────────
+
+/** The three painting tools the engine's `brush_stroke_begin` takes
+ *  (mirrors the Rust `StrokeTool` wire names). */
+export type StrokeTool = "brush" | "pencil" | "eraser";
+
+export const STROKE_TOOLS: StrokeTool[] = ["brush", "pencil", "eraser"];
+
+/** What a pen's pressure drives (mirrors the Rust `PressureTarget`). */
+export type PressureTarget = "none" | "size" | "opacity" | "both";
+
+export const PRESSURE_TARGETS: PressureTarget[] = [
+  "none",
+  "size",
+  "opacity",
+  "both",
+];
+
+/** Everything a stroke FREEZES at `begin` (a stroke whose size changed
+ *  halfway through would not be replayable — the engine says so and this
+ *  shape mirrors its `StrokeParams` field for field). Straight RGBA in
+ *  [0,1] for `color`; `blend` is a `compose.*` kernel name with the
+ *  prefix optional. */
+export interface BrushParams {
+  /** Tip diameter in IMAGE pixels (before pressure scaling). */
+  size: number;
+  /** Fully-opaque fraction of the radius, 0..1 (the pencil ignores it —
+   *  its binary tip is the point). */
+  hardness: number;
+  /** The ceiling the whole stroke composites at, 0..1. */
+  opacity: number;
+  /** How much each dab deposits, 0..1 (forced to 1 for the pencil). */
+  flow: number;
+  /** Dab spacing as a fraction of the tip DIAMETER (Photoshop's
+   *  convention): 0.25 = a dab every quarter-diameter. */
+  spacing: number;
+  /** The `compose.*` blend the paint goes down through (the eraser
+   *  ignores it — erasing is `band.set_alpha`, not a blend). */
+  blend: string;
+  color: Rgba01;
+  pressureTarget: PressureTarget;
+}
+
+/** The v0 defaults — the SAME values the Rust `StrokeParams::defaults`
+ *  documents (24 px half-hard round tip, full opacity and flow,
+ *  quarter-diameter spacing, normal blend, opaque black, pressure
+ *  driving size AND flow). Kept in lockstep by
+ *  `image_editor_paint_defaults_are_the_documented_v0` on the Rust side
+ *  and the brush spec on this one. */
+export const DEFAULT_BRUSH_PARAMS: BrushParams = {
+  size: 24,
+  hardness: 0.5,
+  opacity: 1,
+  flow: 1,
+  spacing: 0.25,
+  blend: "normal",
+  color: [0, 0, 0, 1],
+  pressureTarget: "both",
+};
+
+/** The in-flight stroke's readout (`brush_stroke_stats`): the dab count
+ *  and the stroke's bounding box in image px. Null when no stroke is in
+ *  progress or nothing has landed on the canvas yet. */
+export interface BrushStats {
+  dabs: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 /** One PSD layer-record row (`psd_layer_list`), record order. */
 export interface PsdLayerInfo {
   index: number;
@@ -633,6 +704,26 @@ export interface ImageEngine {
    *  still meaningful there). False when the extent changed — then it
    *  behaves like `selectionBind` and the selection drops. */
   selectionTransfer(handle: number): boolean;
+  /** PAINT doors (spec §6.3). One in-flight stroke per engine realm:
+   *  `brushBegin` snapshots the base pixels and freezes the params (the
+   *  bound selection is frozen too, so a stroke can never half-honour a
+   *  selection that changed mid-drag); every `brushExtend` stamps the
+   *  sample's dabs and returns the WHOLE image as straight RGBA8 (the
+   *  C-1 Stage-A preview payload); `brushCommit` registers the painted
+   *  pixels as a NEW engine-held image (the crop/fill commit pattern);
+   *  `brushCancel` throws them away — the source was never mutated.
+   *  GPU-only: `brushBegin` rejects without a device. */
+  brushBegin(handle: number, tool: StrokeTool, params: BrushParams): void;
+  brushExtend(x: number, y: number, pressure: number): Promise<Uint8Array>;
+  brushCommit(): DecodedInfo;
+  brushCancel(): void;
+  brushActive(): boolean;
+  /** The in-flight stroke's readout, or null before the first dab lands. */
+  brushStats(): BrushStats | null;
+  /** Every blend mode a stroke can paint through, derived from the
+   *  `compose.*` registry — so the panel's picker cannot drift from the
+   *  kernels that actually exist. */
+  brushBlendModes(): string[];
 }
 
 // ---------------------------------------------------- wasm surface shape
@@ -802,6 +893,24 @@ export interface ImageWasmModule {
   selection_stats(): Float32Array;
   selection_coverage_bytes(): Uint8Array;
   selection_transfer(handle: number): boolean;
+  brush_stroke_begin(
+    handle: number,
+    tool: string,
+    size: number,
+    hardness: number,
+    opacity: number,
+    flow: number,
+    spacing: number,
+    blend: string,
+    color: Float32Array,
+    pressure_target: string,
+  ): void;
+  brush_stroke_extend(x: number, y: number, pressure: number): Promise<Uint8Array>;
+  brush_stroke_commit(): DecodedHandleWasm;
+  brush_stroke_cancel(): void;
+  brush_stroke_active(): boolean;
+  brush_stroke_stats(): Float64Array;
+  brush_blend_modes(): string;
   psd_open(bytes: Uint8Array): number;
   psd_layer_list(handle: number): string;
   psd_set_layer_opacity(handle: number, layer: number, opacity: number): void;
@@ -1007,6 +1116,40 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     selectionCoverageBytes: () => wasm.selection_coverage_bytes(),
     selectionTransfer: (handle) => wasm.selection_transfer(handle),
+    brushBegin: (handle, tool, p) =>
+      wasm.brush_stroke_begin(
+        handle,
+        tool,
+        p.size,
+        p.hardness,
+        p.opacity,
+        p.flow,
+        p.spacing,
+        p.blend,
+        Float32Array.from(p.color),
+        p.pressureTarget,
+      ),
+    brushExtend: (x, y, pressure) => wasm.brush_stroke_extend(x, y, pressure),
+    brushCommit() {
+      const h = wasm.brush_stroke_commit();
+      const info = { handle: h.handle, width: h.width, height: h.height };
+      h.free();
+      return info;
+    },
+    brushCancel: () => wasm.brush_stroke_cancel(),
+    brushActive: () => wasm.brush_stroke_active(),
+    brushStats() {
+      // Rust returns [dabs, x, y, w, h], or an EMPTY vector before the
+      // first dab lands on the canvas.
+      const s = wasm.brush_stroke_stats();
+      if (s.length < 5) return null;
+      return { dabs: s[0], x: s[1], y: s[2], w: s[3], h: s[4] };
+    },
+    brushBlendModes: () =>
+      wasm
+        .brush_blend_modes()
+        .split("\n")
+        .filter((n) => n.length > 0),
   };
 }
 

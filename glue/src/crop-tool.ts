@@ -32,47 +32,18 @@
 import type {
   BundleHost,
   CanvasPointerEvent,
-  ElementGeometryItem,
   GestureHandler,
   PagedEditor,
   ToolPreviewPolyline,
 } from "@paged-media/plugin-api";
 
 import type { ImageSession } from "./session";
-
-/** The image→page aspect-fit transform for one frame box. */
-interface FitTransform {
-  pageId: string;
-  /** page-local pt of the image's top-left (0,0). */
-  originX: number;
-  originY: number;
-  /** image-px → page-pt scale (uniform; aspect-fit). */
-  scale: number;
-}
-
-/** Aspect-fit an `imgW`×`imgH` image into the frame `bounds`
- *  `[top,left,bottom,right]` (page-local pt), centered. Mirrors the
- *  session Apply box math so the overlay lines up with the composite. */
-function fitInto(
-  geom: ElementGeometryItem,
-  imgW: number,
-  imgH: number,
-): FitTransform | null {
-  const b = geom.bounds;
-  if (!b) return null;
-  const [top, left, bottom, right] = b;
-  const boxW = Math.max(right - left, 1);
-  const boxH = Math.max(bottom - top, 1);
-  const scale = Math.min(boxW / imgW, boxH / imgH);
-  const w = imgW * scale;
-  const h = imgH * scale;
-  return {
-    pageId: geom.pageId,
-    originX: left + (boxW - w) / 2,
-    originY: top + (boxH - h) / 2,
-    scale,
-  };
-}
+import {
+  imageToPage as toPage,
+  pageToImage as toImage,
+  resolveFrameFit,
+  type FitTransform,
+} from "./frame-fit";
 
 /** The crop tool's gesture. Activates over the composited frame: reads its
  *  geometry, maps pointer points to image px, drives the session's crop
@@ -80,10 +51,8 @@ function fitInto(
 export function makeCropGesture(host: BundleHost, session: ImageSession): GestureHandler {
   let fit: FitTransform | null = null;
 
-  const imageToPage = (p: [number, number]): [number, number] =>
-    fit ? [fit.originX + p[0] * fit.scale, fit.originY + p[1] * fit.scale] : p;
-  const pageToImage = (p: [number, number]): [number, number] =>
-    fit ? [(p[0] - fit.originX) / fit.scale, (p[1] - fit.originY) / fit.scale] : p;
+  const imageToPage = (p: [number, number]): [number, number] => toPage(fit, p);
+  const pageToImage = (p: [number, number]): [number, number] => toImage(fit, p);
 
   /** Push the crop frame polyline to the overlay (or clear it). */
   const renderOverlay = () => {
@@ -104,20 +73,7 @@ export function makeCropGesture(host: BundleHost, session: ImageSession): Gestur
   /** Resolve the composited frame's fit transform (async; cached until the
    *  gesture deactivates or the source changes). */
   const ensureFit = async () => {
-    const src = session.state().source;
-    if (!src || !src.elementId) {
-      fit = null;
-      return;
-    }
-    try {
-      const geom = await host.document.elementGeometry([
-        { kind: "rectangle", id: src.elementId } as never,
-      ]);
-      fit = geom[0] ? fitInto(geom[0], src.width, src.height) : null;
-    } catch (err) {
-      host.log.debug("crop tool: frame geometry read failed", err);
-      fit = null;
-    }
+    fit = await resolveFrameFit(host, session.state().source, "crop tool");
     renderOverlay();
   };
 
