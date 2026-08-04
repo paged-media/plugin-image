@@ -195,9 +195,9 @@ const TYPE_RATIONAL: u16 = 5;
 
 fn type_size(field_type: u16) -> usize {
     match field_type {
-        1 | 2 | 6 | 7 => 1, // BYTE/ASCII/SBYTE/UNDEFINED
-        TYPE_SHORT | 8 => 2, // SHORT/SSHORT
-        TYPE_LONG | 9 | 11 => 4, // LONG/SLONG/FLOAT
+        1 | 2 | 6 | 7 => 1,           // BYTE/ASCII/SBYTE/UNDEFINED
+        TYPE_SHORT | 8 => 2,          // SHORT/SSHORT
+        TYPE_LONG | 9 | 11 => 4,      // LONG/SLONG/FLOAT
         TYPE_RATIONAL | 10 | 12 => 8, // RATIONAL/SRATIONAL/DOUBLE
         _ => 0,
     }
@@ -292,8 +292,7 @@ fn iter_ifd<'a>(r: &Reader<'a>, ifd_off: usize) -> Vec<Entry> {
     let count = count.min(512) as usize;
     for i in 0..count {
         let e = ifd_off + 2 + i * 12;
-        let (Some(tag), Some(field_type), Some(cnt)) =
-            (r.u16(e), r.u16(e + 2), r.u32(e + 4))
+        let (Some(tag), Some(field_type), Some(cnt)) = (r.u16(e), r.u16(e + 2), r.u32(e + 4))
         else {
             break;
         };
@@ -359,7 +358,7 @@ mod tests {
             + xres.is_some() as usize
             + res_unit.is_some() as usize
             + color_space.is_some() as usize; // Exif-IFD pointer entry
-        // IFD0 spans: 2 (count) + 12*n + 4 (next-IFD offset).
+                                              // IFD0 spans: 2 (count) + 12*n + 4 (next-IFD offset).
         let ifd0_end = 8 + 2 + 12 * n_ifd0 + 4;
         let mut tail = Vec::new();
         let mut next = ifd0_end;
@@ -397,7 +396,7 @@ mod tests {
         buf.extend_from_slice(b"II");
         buf.extend_from_slice(&42u16.to_le_bytes());
         buf.extend_from_slice(&8u32.to_le_bytes()); // IFD0 at offset 8
-        // IFD0.
+                                                    // IFD0.
         buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
         // sort entries by tag (TIFF requires ascending tag order; our
         // reader doesn't depend on it, but keep it realistic).
@@ -512,10 +511,7 @@ mod tests {
         // SHORT value 8, big-endian left-justified in the 4-byte field.
         buf.extend_from_slice(&[0x00, 0x08, 0x00, 0x00]);
         buf.extend_from_slice(&0u32.to_be_bytes());
-        assert_eq!(
-            Exif::parse(&buf).orientation,
-            Some(Orientation::LeftBottom)
-        );
+        assert_eq!(Exif::parse(&buf).orientation, Some(Orientation::LeftBottom));
     }
 
     #[test]

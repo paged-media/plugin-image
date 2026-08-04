@@ -206,7 +206,10 @@ fn cmyk_lut_icc() -> Vec<u8> {
 
         let a2b0 = make_clut(0.0); // Perceptual
         let a2b1 = make_clut(0.12); // colorimetric — perturbed
-        assert!(!a2b0.is_null() && !a2b1.is_null(), "CMYK CLUT pipeline alloc");
+        assert!(
+            !a2b0.is_null() && !a2b1.is_null(),
+            "CMYK CLUT pipeline alloc"
+        );
         assert_eq!(
             ffi::cmsWriteTag(h, ffi::TagSignature::AToB0Tag, a2b0 as *const c_void),
             1,
@@ -357,7 +360,11 @@ fn image_cms_cmyk_lane_moxcms_lcms2_oracle_per_channel() {
 
     // lcms2 intent codes mirror our [`Intent`] (Perceptual=0, RelCol=1).
     let intents: &[(Intent, lcms2_sys::Intent, &str)] = &[
-        (Intent::Perceptual, lcms2_sys::Intent::Perceptual, "perceptual"),
+        (
+            Intent::Perceptual,
+            lcms2_sys::Intent::Perceptual,
+            "perceptual",
+        ),
         (
             Intent::RelativeColorimetric,
             lcms2_sys::Intent::RelativeColorimetric,
