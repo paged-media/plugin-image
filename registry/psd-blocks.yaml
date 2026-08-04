@@ -180,3 +180,60 @@
   # over-budget canvas (MAX_IMPORT_BYTES — plates are canvas-extent).
   tests:
     rust: ["image-conformance/tests/psd_layer_import.rs", "image-psd/src/layer_pixels.rs"]
+
+# ── PSD descriptor-family primitives ─────────────────────────────────
+# Neither of these is a top-level PSD *block*; they are the two
+# structures descriptor-carrying blocks are BUILT FROM. They live here
+# because they are `image-psd` components with the same provenance
+# discipline, and because the day adjustment layers / layer effects /
+# the text engine stop being preserved-opaque and start being modelled,
+# they are what those blocks will be read with. The ABR lane that
+# motivated them has its own registry: registry/abr.yaml.
+
+- id: image.psd.descriptor
+  state_row: image.psd.roundtrip
+  tier: parsed           # READ-ONLY view. There is no descriptor WRITER: the preservation invariant keeps the opaque-bytes path authoritative for re-emission (§10.4), and a decoded tree is a derived view. Promoting this to `mutatable` means writing a descriptor emitter, which is a separate decision.
+  oracle: independent-emitter   # image-conformance/src/abr_builder emits descriptor bytes with its own big-endian sink; the reader never shares code with it
+  provenance:
+    - "Adobe Photoshop File Formats Specification — Descriptor structure (class name + class id + item count + items; the key-or-4cc length-0 convention; the OSType table Objc/VlLs/doub/UntF/TEXT/enum/long/comp/bool/type/GlbC/GlbO/alis/tdta; unit codes #Ang/#Prc/#Pxl/#Rsl/#Rlt/#Nne/#Pnt/#Mlm) [PUB]"
+    - "thoughts/docs/paged/plugin-image/abr-brush-format-spec.md §4.1 — the DUAL DIALECT: 45,706 long-form item keys vs 36,220 4-byte ones, and 16,202 long-form class ids vs 409 4-byte, IN THE SAME FILES [OBS]. A reader that handles one form fails on every fixture."
+    - "abr-brush-format-spec.md §9 — enum values are TWO independent key-or-4cc fields and there is no `.` in the bytes (zero literal dots in the whole corpus); the dotted `BlnM.Nrml` form is a third-party reader's RENDERING, not the wire form [OBS]"
+    - "abr-brush-format-spec.md §6.4 — Adobe's `$$$/path/key=Default English` localisable-string form; the unwrap rule lives in one place (descriptor::localized_display) and the raw value is preserved [OBS]"
+    - "abr-brush-format-spec.md §4.3 — FINDING: image-psd had NO descriptor parser; this is new work, not reuse, and it is the bulk of the ABR job"
+  # DECLINED, with a stated reason rather than approximated: `obj `
+  # (reference), `ObAr` and `UnFl`. Their payload layouts are not
+  # established by any source available to this crate, and a descriptor
+  # item is NOT length-delimited — a value that cannot be decoded also
+  # cannot be stepped over. They return PsdError::Unsupported naming the
+  # OSType. None of the three occurred in ~89,000 observed .abr values.
+  tests:
+    rust:
+      - "image-psd/src/descriptor.rs (unit: image_psd_descriptor_key_accepts_both_dialects, _key_equality_ignores_dialect, _trailing_spaces_are_significant, _key_length_guard, _item_count_is_bounded, _localized_display_strips_the_token, _unsupported_ostype_is_named_not_skipped)"
+      - "image-conformance/tests/abr_reader.rs (image_psd_descriptor_reads_every_framable_ostype, image_psd_descriptor_accepts_both_key_dialects_in_one_descriptor, image_psd_descriptor_trailing_spaces_in_keys_are_significant, image_psd_descriptor_localisation_token_is_unwrapped_but_the_raw_survives, image_psd_descriptor_unknown_ostype_is_refused_by_name_not_skipped)"
+
+- id: image.psd.vm-array-list
+  state_row: image.psd.roundtrip
+  tier: parsed           # READ-ONLY, like the descriptor tree above
+  oracle: independent-emitter + structural-self-check   # a correct parse leaves ZERO bytes unaccounted for in a record; the emitter can vary array_count and the written slot to break the 264 constant deliberately
+  provenance:
+    - "abr-brush-format-spec.md §2.2 — the corrected sampled-tip record layout, decoded byte-exactly from 3,202 records in 7 files, every internal length field reconciling to the byte [OBS]. CONTRADICTS every public source AND revision 1 of that document, which describe the region as an opaque 264-byte skip."
+    - "abr-brush-format-spec.md §2.2 — 264 is arithmetic, not a format fact: 4+4+4+16+4 header, 55 empty slots x 4, then 12 bytes of the written slot's own prefix, given array_count 56 and the plane in slot 55. The loop runs array_count+2 times, and the two extra empty slots written AFTER the pixel data are the '8 unexplained trailing bytes' of every public description."
+    - "abr-brush-format-spec.md §2.2 — bounds are stored Y-FIRST (top, left, bottom, right); the rectangle appears TWICE and the per-array one dimensions its pixel data [OBS]"
+    - "abr-brush-format-spec.md §2.3/§2.4 — raw (w*h bytes, no row padding; 19 records observed) and PackBits with an UP-FRONT h-entry u16 row-length table, ALL rows first (3,183 records / ~1.1M rows) [OBS]"
+    - "Adobe Photoshop File Formats Specification — the pattern record that embeds this same container [PUB]; TIFF 6.0 PackBits appendix (via image-psd's existing decoder, reused UNCHANGED)"
+  # The PackBits decoder is image-psd's existing ERRORING one, reused as
+  # is. The behaviour spec DOWNGRADED the claim that real files emit
+  # over-long runs: 3,183 RLE records / ~1.1M rows produced ZERO
+  # overruns and ZERO short rows, so the erroring decoder would have
+  # accepted every record in the corpus. It was not loosened.
+  #
+  # DECLINED: 16-bit RLE. Whether the row table counts compressed bytes
+  # of 16-bit samples or Photoshop splits high/low byte planes as PSD
+  # does is unknown — no 16-bit tip exists in the corpus at all. It
+  # returns Unsupported with that diagnostic instead of guessing. 16-bit
+  # RAW is implemented to the layout the spec states but is UNVERIFIED
+  # against any real file, and says so via AbrWarning.
+  tests:
+    rust:
+      - "image-psd/src/vm_array.rs (unit: image_psd_vm_array_list_the_264_constant_is_arithmetic_not_a_format_fact, _a_different_slot_would_break_the_constant, _a_different_array_count_would_break_the_constant, _bounds_are_y_first, _non_positive_bounds_are_refused, _rle_row_table_is_up_front_not_per_row, _rle_expansion_bound_rejects_absurd_dimensions, _sixteen_bit_rle_is_refused_by_name, _sixteen_bit_raw_keeps_full_precision)"
+      - "image-conformance/tests/abr_reader.rs (image_abr_samp_record_is_a_vm_array_list_not_a_264_byte_skip)"

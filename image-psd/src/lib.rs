@@ -68,20 +68,25 @@
 
 #![forbid(unsafe_code)]
 
+pub mod abr;
 pub mod composite;
 pub mod compression;
 pub mod container;
+pub mod descriptor;
 pub mod edit;
 pub mod layer_pixels;
 pub mod model;
 pub mod reader;
+pub mod vm_array;
 pub mod writer;
 
 mod emit;
 mod parse;
 
+pub use abr::AbrFile;
 pub use composite::CompositeRgba8;
 pub use container::Container;
+pub use descriptor::{Descriptor, DescriptorValue};
 pub use layer_pixels::{LayerImport, LayerPlate, MAX_IMPORT_BYTES};
 pub use model::PsdFile;
 

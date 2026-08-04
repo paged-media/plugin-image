@@ -88,7 +88,8 @@ pub mod distance;
 
 pub use coverage::{CombineMode, SelectionCoverage};
 pub use dab::{
-    plan_segment, BrushTip, Dab, PressureTarget, StrokeAccumulator, StrokeSample, StrokeWalk,
+    plan_segment, BrushTip, Dab, PressureTarget, SampledTip, StrokeAccumulator, StrokeSample,
+    StrokeWalk, TipCoverage,
 };
 pub use device::GpuContext;
 pub use dispatch::{BatchTile, DispatchBatch};

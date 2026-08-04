@@ -249,6 +249,233 @@ impl BrushTip {
     }
 }
 
+/// What the stroke machinery needs of a tip: a coverage value per pixel
+/// and a bounding box to iterate.
+///
+/// Extracted so a *sampled* tip — an alpha bitmap loaded from a `.abr`
+/// brush preset — can be stamped by exactly the same accumulator,
+/// spacing walk and compositing rule as the round parametric
+/// [`BrushTip`]. Nothing about the stroke model changes: a tip is a
+/// coverage field, and where the field comes from is the tip's business.
+pub trait TipCoverage {
+    /// Coverage in `[0, 1]` of the pixel whose integer coords are
+    /// `(px, py)`, for a dab centred at `(cx, cy)` in image px.
+    fn coverage_at_pixel(&self, cx: f32, cy: f32, px: u32, py: u32) -> f32;
+
+    /// The dab's integer bounding box clipped to a `w`×`h` field, or
+    /// `None` when it falls entirely outside.
+    fn dab_bounds(&self, cx: f32, cy: f32, w: u32, h: u32) -> Option<Region>;
+}
+
+impl TipCoverage for BrushTip {
+    fn coverage_at_pixel(&self, cx: f32, cy: f32, px: u32, py: u32) -> f32 {
+        BrushTip::coverage_at_pixel(self, cx, cy, px, py)
+    }
+
+    fn dab_bounds(&self, cx: f32, cy: f32, w: u32, h: u32) -> Option<Region> {
+        BrushTip::dab_bounds(self, cx, cy, w, h)
+    }
+}
+
+/// A **sampled** tip: an alpha bitmap, scaled to a target diameter.
+///
+/// This is the bridge from `image-psd`'s `.abr` reader to the paint
+/// path. An `.abr` sampled tip decodes to a single-channel `w`×`h`
+/// coverage mask (`image_psd::abr::AbrSample::coverage8`), and that mask
+/// IS the brush: 255 means fully painted, 0 means no paint, and it must
+/// NOT be inverted. GIMP-lineage readers invert because GIMP's
+/// brush-mask convention is the opposite of coverage; porting that
+/// inward paints the negative of the artwork — a failure that looks like
+/// a broken blend mode, because the silhouette still looks right.
+///
+/// # What it honours, and what it declines
+///
+/// * **Diameter.** The preset's `Dmtr` is a *target* diameter, not the
+///   bitmap's size: the bitmap is scaled so that its LARGER dimension
+///   becomes `diameter`. `max(w, h)` is what `Dmtr` is initialised to
+///   when a tip is defined (3,176 of 3,202 corpus tips), but it is
+///   thereafter a free parameter — the 26 exceptions are authors having
+///   dragged the size slider, and painting a bitmap at its native size
+///   would render some of them 4× too large.
+/// * **Roundness.** `Rndn` squashes the tip on its minor axis, taken
+///   here as the vertical at zero rotation. Roundness was 100% on
+///   3,205 of 3,205 corpus tips, so the axis choice is a *rendering
+///   decision recorded here*, not a measured fact.
+/// * **Flips.** `flipX`/`flipY` mirror the bitmap. These are the
+///   SHAPE-level flags (a static mirror), never the brush-level ones of
+///   the same name, which are per-stamp jitter toggles.
+/// * **Rotation is DECLINED.** The preset's `Angl` is in degrees — that
+///   much is certain — but its sign convention and its composition
+///   order with the flips cannot be settled by parsing; they need a
+///   reference rendering of a known asymmetric tip from Photoshop.
+///   Rather than pick a handedness and be silently wrong on half the
+///   world's brushes, this tip does not rotate. Named gap.
+///
+/// Sampling is bilinear against texel centres, so a scaled tip is smooth
+/// and a sub-pixel dab position still moves the coverage field — the
+/// same sub-pixel property the round tip has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampledTip {
+    width: u32,
+    height: u32,
+    /// Coverage, row-major, `width * height` bytes. 255 = fully painted.
+    alpha: Vec<u8>,
+    diameter: f32,
+    roundness: f32,
+    flip_x: bool,
+    flip_y: bool,
+}
+
+impl SampledTip {
+    /// Build from a decoded alpha bitmap. Returns `None` unless
+    /// `alpha.len() == width * height` and both dimensions are non-zero.
+    ///
+    /// The default diameter is `max(width, height)` — the value a
+    /// freshly defined preset carries. Override it with
+    /// [`SampledTip::with_diameter`] from the preset's `Dmtr`.
+    pub fn new(width: u32, height: u32, alpha: Vec<u8>) -> Option<SampledTip> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if alpha.len() != (width as usize).checked_mul(height as usize)? {
+            return None;
+        }
+        Some(SampledTip {
+            width,
+            height,
+            alpha,
+            diameter: width.max(height) as f32,
+            roundness: 1.0,
+            flip_x: false,
+            flip_y: false,
+        })
+    }
+
+    /// The preset's `Dmtr`, in image px. Non-finite or non-positive
+    /// values leave the tip unchanged rather than producing a degenerate
+    /// stamp.
+    pub fn with_diameter(mut self, diameter: f32) -> Self {
+        if diameter.is_finite() && diameter > 0.0 {
+            self.diameter = diameter;
+        }
+        self
+    }
+
+    /// The preset's `Rndn` as a fraction (1.0 = unsquashed).
+    pub fn with_roundness(mut self, roundness: f32) -> Self {
+        if roundness.is_finite() && roundness > 0.0 {
+            self.roundness = roundness;
+        }
+        self
+    }
+
+    /// The SHAPE-level `flipX`/`flipY` static mirrors.
+    pub fn with_flips(mut self, flip_x: bool, flip_y: bool) -> Self {
+        self.flip_x = flip_x;
+        self.flip_y = flip_y;
+        self
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn diameter(&self) -> f32 {
+        self.diameter
+    }
+
+    /// Scale factor from bitmap texels to image px on the major axis.
+    fn scale(&self) -> f32 {
+        self.diameter / self.width.max(self.height) as f32
+    }
+
+    /// Half-extents of the stamped footprint in image px.
+    fn half_extents(&self) -> (f32, f32) {
+        let s = self.scale();
+        (
+            self.width as f32 * s * 0.5,
+            self.height as f32 * s * self.roundness * 0.5,
+        )
+    }
+
+    /// One texel, or `0` outside the bitmap — an unsampled surround is
+    /// "no paint", which is what the artwork's own tight crop implies.
+    fn texel(&self, x: i64, y: i64) -> f32 {
+        if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
+            return 0.0;
+        }
+        self.alpha[(y as usize) * (self.width as usize) + x as usize] as f32
+    }
+
+    /// Bilinear sample at bitmap coordinates `(tx, ty)`, where integer
+    /// `+ 0.5` are texel centres. Returns `0..=1`.
+    fn sample(&self, tx: f32, ty: f32) -> f32 {
+        let x = tx - 0.5;
+        let y = ty - 0.5;
+        let x0 = x.floor();
+        let y0 = y.floor();
+        let fx = x - x0;
+        let fy = y - y0;
+        let (xi, yi) = (x0 as i64, y0 as i64);
+        let a = self.texel(xi, yi);
+        let b = self.texel(xi + 1, yi);
+        let c = self.texel(xi, yi + 1);
+        let d = self.texel(xi + 1, yi + 1);
+        let top = a + (b - a) * fx;
+        let bot = c + (d - c) * fx;
+        (top + (bot - top) * fy) / 255.0
+    }
+}
+
+impl TipCoverage for SampledTip {
+    fn coverage_at_pixel(&self, cx: f32, cy: f32, px: u32, py: u32) -> f32 {
+        let s = self.scale();
+        let sy = s * self.roundness;
+        if !(s.is_finite() && sy.is_finite()) || s <= 0.0 || sy <= 0.0 {
+            return 0.0;
+        }
+        // Pixel CENTRE, exactly as the round tip does — this is what
+        // makes a sub-pixel dab position change the coverage field.
+        let dx = (px as f32 + 0.5) - cx;
+        let dy = (py as f32 + 0.5) - cy;
+        let mut tx = dx / s + self.width as f32 * 0.5;
+        let mut ty = dy / sy + self.height as f32 * 0.5;
+        if self.flip_x {
+            tx = self.width as f32 - tx;
+        }
+        if self.flip_y {
+            ty = self.height as f32 - ty;
+        }
+        self.sample(tx, ty).clamp(0.0, 1.0)
+    }
+
+    fn dab_bounds(&self, cx: f32, cy: f32, w: u32, h: u32) -> Option<Region> {
+        let (hx, hy) = self.half_extents();
+        if !cx.is_finite() || !cy.is_finite() || w == 0 || h == 0 || hx <= 0.0 || hy <= 0.0 {
+            return None;
+        }
+        // One pixel of slack on each side so the bilinear tail at the
+        // rim is included, matching the round tip's `reach`.
+        let x0 = (cx - hx - 1.0).floor().max(0.0) as i64;
+        let y0 = (cy - hy - 1.0).floor().max(0.0) as i64;
+        let x1 = (cx + hx + 1.0).ceil().min(w as f32) as i64;
+        let y1 = (cy + hy + 1.0).ceil().min(h as f32) as i64;
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some(Region::new(
+            x0 as i32,
+            y0 as i32,
+            (x1 - x0) as u32,
+            (y1 - y0) as u32,
+        ))
+    }
+}
+
 /// One pointer sample: position in IMAGE px plus normalized pressure.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StrokeSample {
@@ -441,7 +668,12 @@ impl StrokeAccumulator {
     ///
     /// `acc ← acc + flow·dab·(1 − acc)`: an over-composite, so a soft
     /// brush builds up smoothly toward 1 and never overshoots it.
-    pub fn stamp(&mut self, tip: &BrushTip, cx: f32, cy: f32, flow: f32) -> bool {
+    ///
+    /// Generic over [`TipCoverage`] so a round [`BrushTip`] and a
+    /// [`SampledTip`] loaded from an `.abr` preset go through exactly
+    /// this accumulation rule — the sampled tip is not a second paint
+    /// path, it is a different coverage field.
+    pub fn stamp<T: TipCoverage + ?Sized>(&mut self, tip: &T, cx: f32, cy: f32, flow: f32) -> bool {
         let flow = flow.clamp(0.0, 1.0);
         if flow <= 0.0 {
             return false;
@@ -943,5 +1175,165 @@ mod tests {
             }
         }
         assert!(a.dab_count() > 10, "the fixture actually painted");
+    }
+
+    // ── sampled tips (the .abr bridge) ───────────────────────────────
+
+    /// A `w`×`h` bitmap that is fully painted everywhere.
+    fn solid(w: u32, h: u32) -> SampledTip {
+        SampledTip::new(w, h, vec![255u8; (w * h) as usize]).unwrap()
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_rejects_a_bitmap_whose_length_disagrees_with_its_bounds()
+    {
+        assert!(SampledTip::new(4, 4, vec![0; 15]).is_none());
+        assert!(SampledTip::new(4, 4, vec![0; 17]).is_none());
+        assert!(SampledTip::new(0, 4, vec![]).is_none());
+        assert!(SampledTip::new(4, 4, vec![0; 16]).is_some());
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_stored_values_are_coverage_and_are_never_inverted() {
+        // Left half painted, right half empty. If a GIMP-style inversion
+        // ever creeps back in, the painted half moves.
+        let mut alpha = vec![0u8; 16];
+        for y in 0..4 {
+            for x in 0..2 {
+                alpha[y * 4 + x] = 255;
+            }
+        }
+        let tip = SampledTip::new(4, 4, alpha).unwrap();
+        let mut acc = StrokeAccumulator::new(8, 8);
+        assert!(acc.stamp(&tip, 4.0, 4.0, 1.0));
+        // Bitmap centre maps to (4,4); texel (0..2) is the painted half,
+        // which lands left of centre.
+        assert!(acc.value_at(2, 4) > 0.9, "left half painted");
+        assert_eq!(acc.value_at(5, 4), 0.0, "right half is NOT painted");
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_defaults_its_diameter_to_the_larger_dimension() {
+        // Dmtr is INITIALISED to max(w, h) when a tip is defined.
+        assert_eq!(solid(20, 8).diameter(), 20.0);
+        assert_eq!(solid(8, 20).diameter(), 20.0);
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_scales_the_bitmap_to_the_preset_diameter() {
+        // A 4×4 bitmap asked to paint at diameter 16 covers 4× the span.
+        let native = solid(4, 4);
+        let scaled = solid(4, 4).with_diameter(16.0);
+        let nb = native.dab_bounds(32.0, 32.0, 64, 64).unwrap();
+        let sb = scaled.dab_bounds(32.0, 32.0, 64, 64).unwrap();
+        // 4 px vs 16 px of footprint, plus the constant 1 px of AA slack
+        // on each side: 6 vs 18.
+        assert!(sb.w > nb.w * 2, "native {} vs scaled {}", nb.w, sb.w);
+
+        let mut acc = StrokeAccumulator::new(64, 64);
+        acc.stamp(&scaled, 32.0, 32.0, 1.0);
+        // Well inside the scaled footprint but outside the native one.
+        assert!(acc.value_at(32 + 5, 32) > 0.9);
+        assert_eq!(acc.value_at(32 + 12, 32), 0.0, "and not beyond it");
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_is_not_transposed_by_a_non_square_bitmap() {
+        // 8 wide, 2 tall — a transposed reading would paint 2×8.
+        let tip = solid(8, 2);
+        let b = tip.dab_bounds(32.0, 32.0, 64, 64).unwrap();
+        assert!(b.w > b.h, "footprint {}×{} should be wide", b.w, b.h);
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_roundness_squashes_the_minor_axis() {
+        let round = solid(16, 16);
+        let squashed = solid(16, 16).with_roundness(0.25);
+        let rb = round.dab_bounds(32.0, 32.0, 64, 64).unwrap();
+        let sb = squashed.dab_bounds(32.0, 32.0, 64, 64).unwrap();
+        assert_eq!(sb.w, rb.w, "the major axis is untouched");
+        assert!(sb.h < rb.h, "the minor axis shrinks: {} vs {}", sb.h, rb.h);
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_flips_mirror_the_bitmap() {
+        let mut alpha = vec![0u8; 16];
+        for y in 0..4 {
+            alpha[y * 4] = 255; // leftmost column only
+        }
+        let plain = SampledTip::new(4, 4, alpha.clone()).unwrap();
+        let flipped = SampledTip::new(4, 4, alpha)
+            .unwrap()
+            .with_flips(true, false);
+
+        let mut a = StrokeAccumulator::new(8, 8);
+        a.stamp(&plain, 4.0, 4.0, 1.0);
+        let mut b = StrokeAccumulator::new(8, 8);
+        b.stamp(&flipped, 4.0, 4.0, 1.0);
+
+        let left = |acc: &StrokeAccumulator| (0..4).map(|x| acc.value_at(x, 4)).sum::<f32>();
+        let right = |acc: &StrokeAccumulator| (4..8).map(|x| acc.value_at(x, 4)).sum::<f32>();
+        assert!(left(&a) > right(&a), "unflipped paints on the left");
+        assert!(right(&b) > left(&b), "flipped paints on the right");
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_is_sub_pixel_positionable_like_the_round_tip() {
+        let tip = solid(6, 6);
+        let mut a = StrokeAccumulator::new(16, 16);
+        a.stamp(&tip, 8.0, 8.0, 1.0);
+        let mut b = StrokeAccumulator::new(16, 16);
+        b.stamp(&tip, 8.33, 8.0, 1.0);
+        let differs = (0..16)
+            .flat_map(|y| (0..16).map(move |x| (x, y)))
+            .any(|(x, y)| (a.value_at(x, y) - b.value_at(x, y)).abs() > 1e-4);
+        assert!(differs, "a third-of-a-pixel move must change the field");
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_rides_the_same_accumulation_rule_as_the_round_tip() {
+        // Two overlapping stamps at flow 0.5 approach but never exceed 1.
+        let tip = solid(8, 8);
+        let mut acc = StrokeAccumulator::new(16, 16);
+        acc.stamp(&tip, 8.0, 8.0, 0.5);
+        let once = acc.value_at(8, 8);
+        acc.stamp(&tip, 8.0, 8.0, 0.5);
+        let twice = acc.value_at(8, 8);
+        assert!((once - 0.5).abs() < 1e-3, "first deposit {once}");
+        assert!(twice > once && twice < 1.0, "second deposit {twice}");
+        assert_eq!(acc.dab_count(), 2);
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_walks_a_stroke_through_plan_segment_unchanged() {
+        // The spacing walk is tip-agnostic: it consumes a step in px.
+        let tip = solid(8, 8);
+        let mut acc = StrokeAccumulator::new(64, 64);
+        let mut walk = StrokeWalk::new();
+        let mut dabs = Vec::new();
+        plan_segment(
+            &mut walk,
+            StrokeSample::new(8.0, 32.0, 1.0),
+            StrokeSample::new(56.0, 32.0, 1.0),
+            8.0 * 0.25,
+            &mut dabs,
+        );
+        assert!(dabs.len() > 20, "{} dabs", dabs.len());
+        for d in &dabs {
+            acc.stamp(&tip, d.x, d.y, 1.0);
+        }
+        // A continuous painted band, not isolated dots.
+        for x in 12..52 {
+            assert!(acc.value_at(x, 32) > 0.9, "gap at x={x}");
+        }
+    }
+
+    #[test]
+    fn image_abr_engine_bridge_sampled_tip_outside_the_field_stamps_nothing() {
+        let tip = solid(8, 8);
+        let mut acc = StrokeAccumulator::new(16, 16);
+        assert!(!acc.stamp(&tip, -100.0, -100.0, 1.0));
+        assert!(!acc.stamp(&tip, f32::NAN, 8.0, 1.0));
+        assert!(acc.is_empty());
     }
 }

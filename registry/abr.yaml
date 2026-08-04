@@ -1,0 +1,232 @@
+# paged.image LOCAL `.abr` brush-preset registry — provenance and test
+# linkage for the Adobe Photoshop brush-preset reader (PROVENANCE
+# DISCIPLINE, spec §3: no row, no dispatch).
+#
+# WHY A SIBLING REGISTRY. registry/psd-blocks.yaml tracks the
+# fidelity ladder of PSD/PSB *blocks* against the round-trip invariant
+# (state_row image.psd.roundtrip). `.abr` is a different container and a
+# different claim: it is a READER, it writes nothing, and its ladder
+# tops out at `parsed`. The two descriptor-family primitives it is built
+# on — image.psd.descriptor and image.psd.vm-array-list — DO live in
+# psd-blocks.yaml, because they are `image-psd` structures that outlive
+# this lane (adjustment layers, layer effects, the text engine, and
+# PSD's own pattern records all need them).
+#
+# THE SOURCE OF EVERY FACT BELOW is the behaviour spec
+# `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` (rev. 2),
+# an ANALYST artifact under the clean-room two-role protocol
+# (plugin-image/CLAUDE.md §3.1), verified against 3,215 real brush
+# presets in 9 licensed files. Its confidence tags are carried through
+# to each row:
+#
+#   [OBS] measured in those files (counts given — the strongest tag)
+#   [PUB] Adobe's own specification or an independent public implementation
+#   [REF] a single third-party channel: plausible, UNCONFIRMED, and
+#         flagged at runtime wherever this reader depends on one
+#
+# Adobe has never published a specification for the modern (v6+) `.abr`
+# format. Everything about the brush descriptors is reverse-engineered
+# by somebody; these rows record by whom.
+#
+# NAMED GAP — the corpus is not wired in. The behaviour spec's own
+# regression proposal (§14.3) is to run the 9-file corpus at
+# `plugin-image/references/abr-fixtures/` as the gate: the
+# zero-bytes-unaccounted self-check over 3,202 records, the 238-way
+# byte-exact comparison against independently published PNG alpha, and
+# the 3,205-way join. That path is under `references/`, which the
+# clean-room protocol forbids an IMPLEMENTER from reading, so all three
+# gates are open work for whoever may open that directory. Everything
+# below is proved instead against `image-conformance/src/abr_builder`,
+# an INDEPENDENT byte emitter that shares no code with the reader.
+
+- id: image.abr.container
+  state_row: image.psd.abr
+  tier: parsed
+  oracle: independent-emitter
+  provenance:
+    - "abr-brush-format-spec.md §1.1/§1.2 — there is NO magic signature at offset 0, so the version word IS the integrity gate. The set is sparse and non-monotonic: {1,2} legacy, {6,7,9,10} modern, nothing else in the wild. Never test `>= 6` — a corrupt first word of 11 or 4096 would then be parsed as a section stream and read wildly out of bounds. [OBS] for 6 (8 files) and 10 (1 file), which parse byte-identically with no version-dependent branch; [REF] that 7 and 9 behave the same, neither ever seen."
+    - "abr-brush-format-spec.md §1.2 — modern files carry a second i16 minor version; known values 1 and 2. All nine fixtures are minor 2 [OBS]; minor 1 is [REF] and §14.2 item 4 warns the public '10 vs 264 byte skip' framing does NOT describe the minor-2 side, so it is treated as suspect rather than implemented."
+    - "abr-brush-format-spec.md §1.3 — the section stream: `8BIM` + 4-byte type + u32 size + body, padded to a multiple of 4 computed from the DECLARED size, repeated to EOF with no section count. [PUB] for the framing and the samp/desc/patt types; [OBS] for phry and for all four occurring."
+    - "abr-brush-format-spec.md §1.3 — the reader unconditionally seeks to section_start + size before applying the pad, so a descriptor with trailing bytes cannot desynchronise the stream (the third-party reference does not, and would)."
+  # DECLINED: the legacy v1/v2 dialect. It is a structurally unrelated
+  # format sharing only the extension, its files are Photoshop 5/6-era,
+  # and the behaviour spec's own RECOMMENDATION (§1.2) is to ship
+  # modern-only first. Rejected with a named diagnostic. §1.2 is
+  # publicly documented and rich enough to build that lane from later
+  # without re-consulting any third-party source.
+  tests:
+    rust:
+      - "image-psd/src/abr/mod.rs (unit: image_abr_container_version_set_is_matched_explicitly, _legacy_versions_are_refused_by_name, _an_empty_modern_file_parses_clean, _unknown_minor_version_warns_but_parses)"
+      - "image-conformance/tests/abr_reader.rs (image_abr_container_reads_a_file_with_every_section_type, image_abr_container_survives_a_missing_pad_after_the_last_section, image_abr_container_empty_samp_and_patt_sections_are_normal, image_abr_container_unknown_section_is_retained_not_fatal, image_abr_container_accumulates_repeated_sections, image_abr_container_version_10_parses_identically_to_6, image_abr_container_descriptor_version_other_than_16_warns_but_parses)"
+
+- id: image.abr.samp
+  state_row: image.psd.abr
+  tier: parsed
+  oracle: independent-emitter + structural-self-check
+  provenance:
+    - "abr-brush-format-spec.md §2.1 — records are a packed run: u32 brush_length, ROUNDED UP to a multiple of 4 BEFORE the record end is computed, and the end is measured from AFTER the length field. Verified on 3,202 records; the rounding is load-bearing because declared lengths are frequently 1-3 short of a multiple of 4 and the next record starts on the rounded boundary. [OBS]"
+    - "abr-brush-format-spec.md §2.2 — the record body is a Pascal-string id (pad-to-1, no padding) followed by a virtual memory array list; see image.psd.vm-array-list in registry/psd-blocks.yaml. The id is a 36-char UUID in 3,202/3,202 records, so the public GIMP-lineage loader's hardcoded 37-byte skip works by coincidence — but the id is LOAD-BEARING (it is the join key), so the Pascal string is actually read. [OBS]/[PUB]"
+    - "abr-brush-format-spec.md §2.2 — top/left are frequently non-zero and are the bounding box of the sampled region in the AUTHOR'S document. Provenance, NOT a canvas offset to honour when stamping: the published-PNG oracle shows each PNG is exactly w x h with no margin while the origins range over thousands of pixels. Preserved on AbrSample::origin, ignored by the paint path. [OBS]"
+    - "abr-brush-format-spec.md §2.5 — RESOLVED: the stored byte IS COVERAGE. 255 = fully painted, 0 = no paint, DO NOT INVERT. 238 of 238 tips decode byte-identically to 238 independently exported transparent PNGs of the same artwork (mean absolute difference 0.000; the inverted reading differs by ~225). Corroborated by a corpus statistic: 99.38% of bounding-box corner pixels are exactly 0. GIMP-lineage readers invert because GIMP's brush-mask convention is the opposite of coverage — that step belongs to their OUTPUT stage, and porting it inward paints the negative of the artwork. [OBS]"
+  # DECLINED: 16-bit tips are never truncated to 8 on the read path.
+  # The format stores 16 bits and image-core has 16-bit-capable buffers;
+  # the reduction is available as an explicit, lossy call at the engine
+  # boundary (VmSamples::to_eight_lossy) and nowhere else.
+  tests:
+    rust:
+      - "image-conformance/tests/abr_reader.rs (image_abr_samp_record_is_a_vm_array_list_not_a_264_byte_skip, image_abr_samp_bounds_are_y_first_and_the_tip_is_not_transposed, image_abr_samp_origin_is_provenance_not_a_stamping_offset, image_abr_samp_values_are_coverage_and_are_never_inverted, image_abr_samp_rle_row_lengths_are_an_up_front_table, image_abr_samp_raw_and_rle_produce_identical_pixels, image_abr_samp_record_lengths_are_rounded_up_before_the_end_is_computed)"
+
+- id: image.abr.join
+  state_row: image.psd.abr
+  tier: parsed
+  oracle: independent-emitter
+  provenance:
+    - "abr-brush-format-spec.md §3.3 — RESOLVED: the sampledData -> samp.id join is PLAIN, EXACT, CASE-SENSITIVE STRING EQUALITY. 3,205 of 3,205 references resolved that way; zero needed a prefix retry, zero failed, and no suffixed identifier was observed. The third-party reference performs no join at all — it returns brushes and samples as two unlinked lists — so the one link a brush engine cannot do without was entirely unspecified by it. [OBS]"
+    - "abr-brush-format-spec.md §3.3 — samples ARE SHARED (many-to-one): three corpus files contain a samp record referenced by two presets, and one fixture has 2,053 brushes against 2,052 samples for exactly that reason. Resolve by lookup, never by consuming as you go."
+    - "abr-brush-format-spec.md §3.3 — the dual brush's tip participates in the same join (3 of the 3,205 references), so the join runs over EVERY sampledData in the tree. [OBS]"
+    - "abr-brush-format-spec.md §3.2/§8.2 — brush-list ORDER IS LOAD-BEARING: the phry folder tree refers to presets positionally and there is no id at that level, so the list is kept in file order and carries an index."
+  # DECLINED, deliberately: a positional fallback. Exact matching has a
+  # 100% hit rate in the corpus, and a positional last resort would
+  # silently mis-pair exactly the files that matter. An unresolvable
+  # reference is REPORTED (AbrWarning::UnresolvedSampleReference), which
+  # is strictly better than papered over. The speculative 36-char-prefix
+  # retry is also omitted: it was never once needed in 3,205 references.
+  tests:
+    rust:
+      - "image-conformance/tests/abr_reader.rs (image_abr_join_is_exact_string_equality, image_abr_join_shares_one_sample_between_several_presets, image_abr_join_has_no_positional_fallback, image_abr_join_runs_over_the_dual_brush_tip_as_well)"
+
+- id: image.abr.brush-model
+  state_row: image.psd.abr
+  tier: parsed
+  oracle: independent-emitter
+  provenance:
+    - "abr-brush-format-spec.md §5 — the tip variant is selected by the nested descriptor's CLASS ID and by nothing else: computedBrush (7 observed), sampledBrush (3,205), dBrush (3), dTips (3). All four occur. An unknown class id degrades to `unsupported tip, preset retained as metadata` so one exotic brush cannot poison a 500-brush library. [OBS]"
+    - "abr-brush-format-spec.md §5.1 — the six shared keys Dmtr/Angl/Spcn/Intr/flipX/flipY on 3,218/3,218 tip descriptors with exactly the claimed types and units. `Intr` is the SPACING-ENABLED flag despite its name. Spacing exists at two levels and the SHAPE-level one carries the value (brush-level occurred on 4 of 3,215 brushes and was the no-op 100.0 every time); the brush-level value is preserved and ignored. [OBS]"
+    - "abr-brush-format-spec.md §4.2 CONTRADICTION — #Prc is NOT ONE SCALE. Dnst/Lngt/clumping/thickness/stiffness are stored as 0..1 FRACTIONS; every other observed percent is 0..100. A blanket divide-by-100 puts every stock bristle value below its documented Photoshop minimum (Lngt 1.37 = 137% becomes 1.37%, an order of magnitude under the 25% floor). Conversion is PER KEY, via a named constant. The fact that the scales differ is established; the membership of the five-key list rests on 3 bristle tips and is marked provisional. [OBS]"
+    - "abr-brush-format-spec.md §4.2 — percent-derived values are NOT clamped to [0,1]: tiltScale 200.0 and scatter jitter 368.0 both occur. [OBS]"
+    - "abr-brush-format-spec.md §6.1 — every dynamics site is a nested descriptor whose class id is `brVr` (220/220), carrying bVTy/fStp/jitter always and Mnm  optionally (39/220). RESOLVED: there is NO response curve anywhere in the format — 102 distinct keys exist in the entire corpus and none is a curve, a point list or a spline. jitter is INDEPENDENT of the control source (41 descriptors carry control `off` with non-zero jitter). [OBS]"
+    - "abr-brush-format-spec.md §6.2 — THE GATE DISCIPLINE IS ABSOLUTE: when a gate boolean is false NONE of its group's keys are present, 3,215/3,215, across all six flattened gates. The reader reads the gate and skips the group rather than inventing defaults. Dynamics groups are FLATTENED onto the brush descriptor; only dualBrush nests, and its gate lives INSIDE it. [OBS]"
+    - "abr-brush-format-spec.md §6.2 — flipX/flipY appear at BOTH levels with DIFFERENT meanings (static tip mirror on the shape; Flip X/Y JITTER on the brush) and both occur in the same files; the two namespaces are kept separate. [OBS]"
+    - "abr-brush-format-spec.md §6.3 CONTRADICTION — `Cnt ` is a `doub`, NOT a `long` (17/17 occurrences, including the 3 inside dualBrush). This is the most destructive of the type errors found because a 4-byte read desynchronises every SUBSEQUENT key in the brush rather than corrupting one field. Note that §6.5's own table still types the dualBrush `Cnt ` as `long`; the [OBS] finding wins. [OBS]"
+    - "abr-brush-format-spec.md §6.4 — texture is split: identity (Idnt, Nm  ) nests in a `Txtr` descriptor of class `Ptrn`, EVERY other texture parameter sits on the parent brush. textureBrightness/textureContrast are SIGNED bare `long`s centred on zero (observed -7 and -20), not percents. [OBS]"
+    - "abr-brush-format-spec.md §6.8 — brush-pose tilts and angle are bare `long`s while the tip's Angl is a #Ang unit float: two angle representations in one file. The tilts are NOT a normalised -1..1. [OBS]"
+    - "abr-brush-format-spec.md §7.1 — MODEL THE TREE GENERICALLY. The full key dump found two keys on every brush in every file (`Rpt`, `brushGroup`/`useBrushGroup`) that no published vocabulary had. Every AbrBrush therefore retains its complete Descriptor; the typed view is derived and cannot drop what it does not know. `interpretation` is likewise preserved and not acted on. [OBS], semantics [UNSURE]"
+    - "abr-brush-format-spec.md §9 — blend modes arrive in BOTH dialects in the same key in the same file (`Sbtr` 4-byte, `linearHeight` long-form). Legacy table first, long-form second, then Normal + a REPORTED unrecognised value. Includes the three ABR-only modes: linearHeight and Sbtr [OBS], Hght [REF], never seen. [PUB] for the classic vocabulary and for the long-form direction of travel (Adobe UXP/batchPlay)."
+  # DECLINED, each with its reason:
+  #
+  # * dTips `Shp ` and `dtipsType` are RETAINED AS INTEGERS and resolved
+  #   to NO name. The corpus contradicts the third-party reference —
+  #   `Square Charcoal` carries Shp 3, which is *square* in the erodible
+  #   table and *round angle* in the bristle one the reference uses —
+  #   but three tips do not settle the table's membership, and §5.5
+  #   explicitly says not to surface either until a purpose-made fixture
+  #   does. [OBS] that the reference is wrong; [UNSURE] what is right.
+  # * The four airbrush percents (granularity, streakiness, splatSize,
+  #   and the cutoff angle's siblings) are stored RAW and UNCONVERTED.
+  #   Only 0.0 and 1.0 were ever observed, which is consistent with both
+  #   the 0..100 and the 0..1 reading, so the scale is undetermined
+  #   (§14.2 item 16). Dividing would be inventing an answer.
+  # * The absent-percent default (100%) is [REF] and unverifiable from
+  #   files. It is a named, documented constant (ABSENT_PERCENT_DEFAULT)
+  #   and is NOT applied to the one field where it would bite: the
+  #   dynamics floor `Mnm ` stays None, because 38 of the 39 explicit
+  #   values in the corpus are 0.0 — suggestive evidence AGAINST the
+  #   claimed default.
+  # * The bVTy control-source table ORDERING is [REF]: the four observed
+  #   ordinals are in range but nothing in any file names them, and
+  #   unlike the bristle table there are no self-labelling stock presets.
+  #   The raw ordinal is retained alongside the resolved name.
+  # * §6.6 colour dynamics is the least-verified table in the document —
+  #   useColorDynamics was false on all 3,215 brushes, so not one of its
+  #   six keys has ever been emitted. It is read (the keys cost nothing
+  #   and the generic tree is authoritative anyway) but raises
+  #   AbrWarning::ColorDynamicsUnverified whenever the gate is true.
+  # * §7.2 toolOptions occurred ONCE in 3,215 brushes. Only the members
+  #   the corpus pins are typed (the class-id -> tool mapping with its
+  #   load-bearing fallback, flow/Opct as 0..100 plain numbers, Md  );
+  #   the ~25 remaining [REF] keys are reachable through the retained
+  #   sub-descriptor rather than modelled on one channel's authority.
+  tests:
+    rust:
+      - "image-psd/src/abr/model.rs (unit: image_abr_brush_model_percent_scale_splits_bristle_keys_from_the_rest, _percent_results_are_not_clamped, _bristle_shape_table_is_bounds_checked, _control_source_table_is_bounds_checked, _absent_percent_default_is_a_named_constant; image_abr_height_map_is_little_endian_float32, image_abr_height_map_size_mismatch_is_reported)"
+      - "image-psd/src/abr/blend.rs (unit: image_abr_brush_model_blend_accepts_both_dialects_for_the_same_mode, _legacy_wins_on_a_four_byte_key, _abr_only_modes_are_present, _modes_born_long_form_have_no_legacy_code, _unknown_identifier_is_reported_not_guessed, _there_is_no_dotted_form)"
+      - "image-conformance/tests/abr_reader.rs (image_abr_brush_model_tip_variant_is_selected_by_class_id_alone, image_abr_brush_model_tip_bristle_percents_are_fractions_while_siblings_are_0_to_100, image_abr_brush_model_tip_computed_carries_roundness_and_hardness_as_0_to_100, image_abr_height_map_erodible_tip_retains_both_ordinals_and_the_le_map, image_abr_brush_model_scatter_count_is_a_double_and_reading_four_bytes_would_desync, image_abr_brush_model_gate_false_means_the_group_is_absent_entirely, image_abr_brush_model_flip_flags_do_not_collide_across_the_two_levels, image_abr_brush_model_texture_identity_nests_while_its_parameters_do_not, image_abr_brush_model_blend_modes_arrive_in_both_dialects_in_one_file, image_abr_brush_model_color_dynamics_parses_but_announces_that_it_is_unverified, image_abr_brush_model_transfer_is_gated_by_use_paint_dynamics, image_abr_brush_model_brush_pose_angles_are_bare_longs, image_abr_brush_model_tool_options_class_id_names_the_tool_and_unknown_ids_fall_back, image_abr_brush_model_unmodelled_keys_survive_on_the_descriptor)"
+
+- id: image.abr.height-map
+  state_row: image.psd.abr
+  tier: parsed
+  oracle: independent-emitter
+  provenance:
+    - "abr-brush-format-spec.md §5.5 RESOLVED — the erodible tip height map is `gridSize^2 x 4` bytes of LITTLE-ENDIAN float32 in 0..1. Grid 11 -> 484 bytes, grid 5 -> 100 bytes, both exact. Decoded LE the grid-11 map is 121 values of exactly 1.0 (an unworn tip) and the grid-5 map is a clean normalised field; decoded BE the same bytes give 4.6e-41 and 4.9e+27. The endianness is not a judgement call. Revision 1's 8-bit hypothesis was wrong by a factor of four. [OBS]"
+    - "abr-brush-format-spec.md §5.5 — THIS IS THE ONE PLACE the format's otherwise universal big-endian rule does not hold: `tdta` payloads are opaque blobs whose interior follows the producing subsystem's convention. Do not generalise the big-endian rule INTO tdta bytes."
+    - "abr-brush-format-spec.md §5.5 — grid size and height map are COUPLED: both present together, both absent together. Do not read one without the other. [OBS]"
+  # DECLINED: row order (row-major vs column-major) and the wear
+  # semantics. A symmetric all-ones 11x11 plus a single 5x5 cannot
+  # distinguish them (§14.2 item 15), so the raw tdta bytes are retained
+  # verbatim alongside the decoded values.
+  tests:
+    rust:
+      - "image-psd/src/abr/model.rs (unit: image_abr_height_map_is_little_endian_float32, image_abr_height_map_size_mismatch_is_reported)"
+      - "image-conformance/tests/abr_reader.rs (image_abr_height_map_erodible_tip_retains_both_ordinals_and_the_le_map)"
+
+- id: image.abr.phry
+  state_row: image.psd.abr
+  tier: parsed
+  oracle: independent-emitter
+  provenance:
+    - "abr-brush-format-spec.md §8.2 RESOLVED — `phry` is the brush-panel FOLDER HIERARCHY, a flattened open/close token stream (not a nested structure) under a single `hierarchy` VlLs, dispatched by node class id: Grup (Nm  + zuid), preset (NO payload), groupEnd. 169 opens / 169 closes, perfectly balanced in every file, nesting to 4 levels, 3,170 preset nodes. The third-party reference parses this section and DISCARDS it with an explicit 'what is this?' note. [OBS]"
+    - "abr-brush-format-spec.md §8.2 — preset leaves carry no id, so the link to the brush list is POSITIONAL: the n-th preset node is the n-th element of the desc Brsh list. Counts match exactly in every file that has both (720/720, 238/238, 2,053/2,053, 159/159). This is inference from a perfect count match, not a stated rule."
+    - "abr-brush-format-spec.md §8.2 — phry may be PRESENT WITH AN EMPTY list (one fixture is exactly that, while still having a brush) and is ABSENT from 4 of 9 fixtures including files that do have brushes. Neither is an error. [OBS]"
+    - "abr-brush-format-spec.md §8.2 — 'a 2,000-brush library is unusable as a flat list; the folder tree IS the product'."
+  # The open/close balance is asserted as a free integrity check. When
+  # the preset count does not match the brush count the reader refuses
+  # to bind and falls back to a flat list, rather than mis-assigning
+  # brushes to folders.
+  tests:
+    rust:
+      - "image-psd/src/abr/phry.rs (unit: image_abr_phry_binds_presets_positionally, _count_mismatch_falls_back_to_flat, _unbalanced_is_reported, _present_but_empty_is_not_an_error)"
+      - "image-conformance/tests/abr_reader.rs (image_abr_phry_is_a_flat_open_close_token_stream_bound_positionally, image_abr_phry_count_mismatch_refuses_to_bind, image_abr_phry_present_but_empty_does_not_hide_the_brushes)"
+
+- id: image.abr.patt
+  state_row: image.psd.abr
+  tier: preserved        # DEFERRED BY DESIGN: retained as opaque bytes, never decoded
+  oracle: byte-retention
+  provenance:
+    - "abr-brush-format-spec.md §8.1 RECOMMENDATION — defer patterns. Texture support is not needed for a first brush engine and pattern records drag in indexed-colour palettes and a nested channel-plane format. [OBS] strengthens it: `patt` is EMPTY (size 0) in 7 of 9 fixtures, including all five real-world brush libraries; only two deliberately-constructed test files carry pattern data."
+    - "abr-brush-format-spec.md §8.1 — the pattern record and the sampled-tip record share the SAME virtual memory array list container, which is already implemented (image.psd.vm-array-list), so the remaining cost is the record header, the unicode name, the Pascal id and the optional 256-entry palette."
+  # Consequence, accepted: a texture's `Idnt` dangles. §6.4 already
+  # tolerates that, and Texture::pattern_id carries the unresolved value.
+  tests:
+    rust:
+      - "image-conformance/tests/abr_reader.rs (image_abr_container_reads_a_file_with_every_section_type asserts the body is retained verbatim; image_abr_container_empty_samp_and_patt_sections_are_normal asserts a zero-length section is not an error)"
+
+- id: image.abr.engine-bridge
+  state_row: image.psd.abr
+  tier: rendered         # a sampled tip is stamped by the SAME accumulator, spacing walk and over-composite rule as the round parametric tip
+  oracle: reference      # coverage asserted against the emitted bitmap and against the round tip's own accumulation behaviour
+  provenance:
+    - "abr-brush-format-spec.md §0 — 'a sampled tip is literally the alpha bitmap a brush engine paints with'. image-gpu::dab::SampledTip makes it one, behind a TipCoverage trait that BrushTip also implements, so StrokeAccumulator::stamp is generic and there is no second paint path."
+    - "abr-brush-format-spec.md §5.3 RESOLVED — Dmtr maps to the bitmap's LARGER dimension: Dmtr == max(w,h) in 3,176 of 3,202 tips, measured on 234 distinct w x h pairs in one fixture alone, which excludes width/height/diagonal. The 26 exceptions are authors having dragged the size slider, so max(w,h) is the DEFAULT, not an invariant — a reader must never derive one from the other, and painting the bitmap at native size would render some tips 4x too large. [OBS]"
+    - "abr-brush-format-spec.md §2.5 — the coverage polarity the bridge relies on (255 = painted, no inversion); see image.abr.samp."
+  # DECLINED — ROTATION. Angl is in degrees (certain: the unit code says
+  # so, on 3,218/3,218 tips), but its SIGN CONVENTION and its
+  # composition order with flipX/flipY cannot be settled by parsing —
+  # they are rendering semantics that need a reference rendering of a
+  # known asymmetric tip from Photoshop (§5.1, §14.2 item 9, §14.3
+  # bucket B). SampledTip therefore does not rotate. Picking a
+  # handedness would be silently wrong on half the world's brushes.
+  #
+  # RECORDED DECISION — roundness squashes the VERTICAL axis at zero
+  # rotation. Rndn was 100% on 3,205 of 3,205 corpus tips, so this is a
+  # rendering choice with no field coverage, not a measured fact.
+  #
+  # NOT WIRED — nothing in image-js calls this yet; the wasm surface is
+  # unchanged and the artifact is 1,276,293 B against the 8 MiB budget
+  # (400 B under the pre-change 1,276,693 B, since the reader is
+  # dead-code-eliminated from the wasm build). Exposing a "load .abr"
+  # door to the bundle is the next step and is deliberately not taken
+  # here.
+  tests:
+    rust:
+      - "image-gpu/src/dab.rs (unit, all image_abr_engine_bridge_sampled_tip_*: _rejects_a_bitmap_whose_length_disagrees_with_its_bounds, _stored_values_are_coverage_and_are_never_inverted, _defaults_its_diameter_to_the_larger_dimension, _scales_the_bitmap_to_the_preset_diameter, _is_not_transposed_by_a_non_square_bitmap, _roundness_squashes_the_minor_axis, _flips_mirror_the_bitmap, _is_sub_pixel_positionable_like_the_round_tip, _rides_the_same_accumulation_rule_as_the_round_tip, _walks_a_stroke_through_plan_segment_unchanged, _outside_the_field_stamps_nothing)"
+      - "image-conformance/tests/abr_reader.rs (image_abr_engine_bridge_sampled_tip_becomes_a_stampable_coverage_field — the end-to-end path: RLE-encoded .abr bytes -> decoded coverage -> SampledTip at the preset's Dmtr -> StrokeAccumulator)"
