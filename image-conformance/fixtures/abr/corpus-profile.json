@@ -1,0 +1,499 @@
+{
+ "_provenance": "Derived from the licensed .abr fixture corpus described in thoughts/docs/paged/plugin-image/abr-brush-format-spec.md \u00a713.3, by an ANALYST-role session under the clean-room two-role protocol (plugin-image/CLAUDE.md \u00a73.1). Contains only FACTS ABOUT BEHAVIOUR \u2014 counts, key names, OSTypes, unit codes, dimensions and cryptographic digests. It contains no corpus bytes, no third-party artwork, and nothing derived from the reference implementation mounted at references/ag-psd. IMPLEMENTER-LEGAL: consuming this file is not reading references/.",
+ "_spec": "thoughts/docs/paged/plugin-image/abr-brush-format-spec.md (rev. 3)",
+ "totals": {
+  "files": 9,
+  "brush_presets": 3215,
+  "sampled_tip_records": 3202,
+  "descriptor_values": 81926,
+  "distinct_keys": 102
+ },
+ "files": [
+  {
+   "file": "agpsd-sample-and-pattern.abr",
+   "bytes": 1076827,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 7812
+    },
+    {
+     "kind": "patt",
+     "size": 1065944
+    },
+    {
+     "kind": "desc",
+     "size": 2976
+    },
+    {
+     "kind": "phry",
+     "size": 43
+    }
+   ],
+   "last_section_padded": false,
+   "descriptor_version": 16,
+   "brushes": 1,
+   "sampled_tips": 1
+  },
+  {
+   "file": "agpsd-simple.abr",
+   "bytes": 662,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 0
+    },
+    {
+     "kind": "patt",
+     "size": 0
+    },
+    {
+     "kind": "desc",
+     "size": 622
+    }
+   ],
+   "last_section_padded": false,
+   "descriptor_version": 16,
+   "brushes": 1,
+   "sampled_tips": 0
+  },
+  {
+   "file": "agpsd-special.abr",
+   "bytes": 226125,
+   "version": 10,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 724
+    },
+    {
+     "kind": "patt",
+     "size": 213708
+    },
+    {
+     "kind": "desc",
+     "size": 11653
+    }
+   ],
+   "last_section_padded": false,
+   "descriptor_version": 16,
+   "brushes": 6,
+   "sampled_tips": 1
+  },
+  {
+   "file": "agpsd-tilt.abr",
+   "bytes": 1162,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 0
+    },
+    {
+     "kind": "patt",
+     "size": 0
+    },
+    {
+     "kind": "desc",
+     "size": 1122
+    }
+   ],
+   "last_section_padded": false,
+   "descriptor_version": 16,
+   "brushes": 1,
+   "sampled_tips": 0
+  },
+  {
+   "file": "kma-hogenburg-urban-cartography-brushes.abr",
+   "bytes": 8523016,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 7986052
+    },
+    {
+     "kind": "patt",
+     "size": 0
+    },
+    {
+     "kind": "desc",
+     "size": 510766
+    },
+    {
+     "kind": "phry",
+     "size": 26141
+    }
+   ],
+   "last_section_padded": true,
+   "descriptor_version": 16,
+   "brushes": 720,
+   "sampled_tips": 720
+  },
+  {
+   "file": "kma-mercator-settlement-brushes.abr",
+   "bytes": 3031968,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 2859744
+    },
+    {
+     "kind": "patt",
+     "size": 0
+    },
+    {
+     "kind": "desc",
+     "size": 163576
+    },
+    {
+     "kind": "phry",
+     "size": 8593
+    }
+   ],
+   "last_section_padded": true,
+   "descriptor_version": 16,
+   "brushes": 238,
+   "sampled_tips": 238
+  },
+  {
+   "file": "kma-moronobu-mokuhanga-cartography-brushes.abr",
+   "bytes": 16583112,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 15062668
+    },
+    {
+     "kind": "patt",
+     "size": 0
+    },
+    {
+     "kind": "desc",
+     "size": 1454460
+    },
+    {
+     "kind": "phry",
+     "size": 65931
+    }
+   ],
+   "last_section_padded": true,
+   "descriptor_version": 16,
+   "brushes": 2053,
+   "sampled_tips": 2052
+  },
+  {
+   "file": "kma-qianlong-cartography-brushes.abr",
+   "bytes": 3341916,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 3224184
+    },
+    {
+     "kind": "patt",
+     "size": 0
+    },
+    {
+     "kind": "desc",
+     "size": 111844
+    },
+    {
+     "kind": "phry",
+     "size": 5833
+    }
+   ],
+   "last_section_padded": true,
+   "descriptor_version": 16,
+   "brushes": 159,
+   "sampled_tips": 159
+  },
+  {
+   "file": "krita-brushes_by_mar_ka_d338ela.abr",
+   "bytes": 3676071,
+   "version": 6,
+   "minor_version": 2,
+   "sections": [
+    {
+     "kind": "samp",
+     "size": 3631900
+    },
+    {
+     "kind": "patt",
+     "size": 0
+    },
+    {
+     "kind": "desc",
+     "size": 44131
+    }
+   ],
+   "last_section_padded": false,
+   "descriptor_version": 16,
+   "brushes": 36,
+   "sampled_tips": 31
+  }
+ ],
+ "ostype_counts": {
+  "Objc": 9874,
+  "TEXT": 9973,
+  "UntF": 13278,
+  "VlLs": 14,
+  "bool": 48285,
+  "doub": 21,
+  "enum": 9,
+  "long": 470,
+  "tdta": 2
+ },
+ "key_form_counts": {
+  "4cc": 36220,
+  "long": 45706
+ },
+ "class_id_counts": {
+  "Grup": 169,
+  "PbTl": 1,
+  "Ptrn": 5,
+  "brVr": 220,
+  "brushGroup": 3215,
+  "brushPreset": 3215,
+  "computedBrush": 7,
+  "dBrush": 3,
+  "dTips": 3,
+  "dualBrush": 3215,
+  "groupEnd": 169,
+  "null": 14,
+  "preset": 3170,
+  "sampledBrush": 3205
+ },
+ "key_ostype_counts": {
+  "Angl|UntF": 3218,
+  "BlnM|enum": 3,
+  "Brsh|Objc": 3218,
+  "Brsh|VlLs": 9,
+  "Cnt |doub": 17,
+  "Dmtr|UntF": 3218,
+  "Dnst|UntF": 3,
+  "Flip|bool": 3,
+  "Hrdn|UntF": 7,
+  "Idnt|TEXT": 5,
+  "Intr|bool": 3218,
+  "InvT|bool": 5,
+  "Lngt|UntF": 3,
+  "Md  |enum": 1,
+  "Mnm |UntF": 39,
+  "Nm  |TEXT": 6594,
+  "Nose|bool": 3215,
+  "Opct|long": 1,
+  "Rndn|UntF": 3212,
+  "Rpt |bool": 3215,
+  "Shp |long": 6,
+  "Smoo|long": 1,
+  "Spcn|UntF": 3225,
+  "TxtC|bool": 5,
+  "Txtr|Objc": 5,
+  "Wtdg|bool": 3215,
+  "angleDynamics|Objc": 31,
+  "bVTy|long": 220,
+  "bothAxes|bool": 17,
+  "brushGroup|Objc": 3215,
+  "brushPoseAngle|long": 1,
+  "brushPosePressure|UntF": 1,
+  "brushPoseTiltX|long": 1,
+  "brushPoseTiltY|long": 1,
+  "brushPreset|bool": 1,
+  "brushProjection|bool": 2,
+  "clumping|UntF": 3,
+  "countDynamics|Objc": 17,
+  "dtipsAirbrushCutoffAngle|doub": 3,
+  "dtipsAirbrushGranularity|UntF": 3,
+  "dtipsAirbrushSplatCount|long": 3,
+  "dtipsAirbrushSplatSize|UntF": 3,
+  "dtipsAirbrushStreakiness|UntF": 3,
+  "dtipsErodibleTipHeightMap|tdta": 2,
+  "dtipsGridSize|long": 2,
+  "dtipsHardness|UntF": 3,
+  "dtipsLengthRatio|UntF": 3,
+  "dtipsType|long": 3,
+  "dualBrush|Objc": 3215,
+  "fStp|long": 220,
+  "flipX|bool": 3249,
+  "flipY|bool": 3249,
+  "flow|long": 1,
+  "hierarchy|VlLs": 5,
+  "interpretation|bool": 5,
+  "jitter|UntF": 220,
+  "minimumDepth|UntF": 5,
+  "minimumDiameter|UntF": 31,
+  "minimumRoundness|UntF": 31,
+  "mxVr|Objc": 5,
+  "opVr|Objc": 39,
+  "overridePoseAngle|bool": 1,
+  "overridePosePressure|bool": 1,
+  "overridePoseTiltX|bool": 1,
+  "overridePoseTiltY|bool": 1,
+  "physics|bool": 6,
+  "prVr|Objc": 39,
+  "pressureSmoothing|bool": 1,
+  "protectTexture|bool": 1,
+  "roundnessDynamics|Objc": 31,
+  "sampledData|TEXT": 3205,
+  "scatterDynamics|Objc": 17,
+  "smoothing|bool": 1,
+  "smoothingCatchup|bool": 1,
+  "smoothingCatchupAtEnd|bool": 1,
+  "smoothingRadiusMode|bool": 1,
+  "smoothingValue|doub": 1,
+  "smoothingZoomCompensation|bool": 1,
+  "stiffness|UntF": 3,
+  "szVr|Objc": 31,
+  "textureBlendMode|enum": 5,
+  "textureBrightness|long": 5,
+  "textureContrast|long": 5,
+  "textureDepth|UntF": 5,
+  "textureDepthDynamics|Objc": 5,
+  "textureScale|UntF": 5,
+  "thickness|UntF": 3,
+  "tiltScale|UntF": 31,
+  "toolOptions|Objc": 1,
+  "useBrushGroup|bool": 3215,
+  "useBrushPose|bool": 3179,
+  "useBrushSize|bool": 3179,
+  "useColorDynamics|bool": 3215,
+  "useDualBrush|bool": 3215,
+  "useLegacy|bool": 1,
+  "usePaintDynamics|bool": 3215,
+  "usePressureOverridesOpacity|bool": 1,
+  "usePressureOverridesSize|bool": 1,
+  "useScatter|bool": 3218,
+  "useTexture|bool": 3215,
+  "useTipDynamics|bool": 3215,
+  "wtVr|Objc": 5,
+  "zuid|TEXT": 169
+ },
+ "key_unit_counts": {
+  "Angl|#Ang": 3218,
+  "Dmtr|#Pxl": 3218,
+  "Dnst|#Prc": 3,
+  "Hrdn|#Prc": 7,
+  "Lngt|#Prc": 3,
+  "Mnm |#Prc": 39,
+  "Rndn|#Prc": 3212,
+  "Spcn|#Prc": 3225,
+  "brushPosePressure|#Prc": 1,
+  "clumping|#Prc": 3,
+  "dtipsAirbrushGranularity|#Prc": 3,
+  "dtipsAirbrushSplatSize|#Prc": 3,
+  "dtipsAirbrushStreakiness|#Prc": 3,
+  "dtipsHardness|#Prc": 3,
+  "dtipsLengthRatio|#Prc": 3,
+  "jitter|#Prc": 220,
+  "minimumDepth|#Prc": 5,
+  "minimumDiameter|#Prc": 31,
+  "minimumRoundness|#Prc": 31,
+  "stiffness|#Prc": 3,
+  "textureDepth|#Prc": 5,
+  "textureScale|#Prc": 5,
+  "thickness|#Prc": 3,
+  "tiltScale|#Prc": 31
+ },
+ "tip_class_counts": {
+  "computedBrush": 7,
+  "dBrush": 3,
+  "dTips": 3,
+  "sampledBrush": 3202
+ },
+ "gate_counts": {
+  "useTipDynamics": {
+   "present": 3215,
+   "absent": 0,
+   "true": 31
+  },
+  "useScatter": {
+   "present": 3215,
+   "absent": 0,
+   "true": 14
+  },
+  "useTexture": {
+   "present": 3215,
+   "absent": 0,
+   "true": 5
+  },
+  "useColorDynamics": {
+   "present": 3215,
+   "absent": 0,
+   "true": 0
+  },
+  "usePaintDynamics": {
+   "present": 3215,
+   "absent": 0,
+   "true": 39
+  },
+  "useBrushPose": {
+   "present": 3179,
+   "absent": 36,
+   "true": 1
+  },
+  "useDualBrush": {
+   "present": 3215,
+   "absent": 0,
+   "true": 3
+  }
+ },
+ "ordinal_value_counts": {
+  "Shp @dBrush": {
+   "0": 1,
+   "6": 2
+  },
+  "Shp @dTips": {
+   "0": 1,
+   "3": 1,
+   "5": 1
+  },
+  "bVTy": {
+   "0": 117,
+   "2": 96,
+   "3": 6,
+   "4": 1
+  },
+  "dtipsType": {
+   "0": 2,
+   "1": 1
+  },
+  "fStp": {
+   "1": 6,
+   "25": 207,
+   "100": 4,
+   "200": 3
+  }
+ },
+ "enum_pair_counts": {
+  "BlnM|BlnM|CBrn": 2,
+  "BlnM|BlnM|Drkn": 1,
+  "Md  |BlnM|Nrml": 1,
+  "textureBlendMode|BlnM|CBrn": 1,
+  "textureBlendMode|BlnM|Sbtr": 1,
+  "textureBlendMode|BlnM|linearHeight": 3
+ },
+ "dynamics_key_sets": {
+  "Mnm +bVTy+fStp+jitter": 39,
+  "bVTy+fStp+jitter": 181
+ },
+ "sampled_data_length_counts": {
+  "36": 3205
+ },
+ "join_counts": {
+  "resolved_exact": 3205
+ }
+}
