@@ -899,6 +899,75 @@ fn decode_height_map(bytes: &[u8], grid_size: Option<i32>, w: &mut Vec<AbrWarnin
     }
 }
 
+// ── the gated groups' own vocabularies ───────────────────────────────
+//
+// Each list is exactly the set of keys its group reads, and each key
+// appears in exactly one list. They exist so [`gated`] can report the
+// never-observed "group key present, gate false" case by name; they are
+// never used to decide whether a group is read — the gate does that.
+//
+// The two `flipX`/`flipY` entries are the BRUSH-level ones (Flip X/Y
+// Jitter) and not the shape-level static mirrors of the same name: the
+// latter live on the nested `Brsh` descriptor, which is a different
+// descriptor entirely (spec §6.2 trap).
+
+/// `useTipDynamics` (spec §6.2).
+const SHAPE_DYNAMICS_KEYS: [&[u8]; 9] = [
+    b"szVr",
+    b"angleDynamics",
+    b"roundnessDynamics",
+    b"minimumDiameter",
+    b"minimumRoundness",
+    b"tiltScale",
+    b"flipX",
+    b"flipY",
+    b"brushProjection",
+];
+
+/// `useScatter` (spec §6.3).
+const SCATTER_KEYS: [&[u8]; 4] = [b"scatterDynamics", b"countDynamics", b"Cnt ", b"bothAxes"];
+
+/// `useTexture` (spec §6.4).
+const TEXTURE_KEYS: [&[u8]; 10] = [
+    b"Txtr",
+    b"textureBlendMode",
+    b"textureScale",
+    b"textureDepth",
+    b"minimumDepth",
+    b"textureDepthDynamics",
+    b"InvT",
+    b"textureBrightness",
+    b"textureContrast",
+    b"TxtC",
+];
+
+/// `useColorDynamics` (spec §6.6) — the `[REF]`-only vocabulary, never
+/// emitted by any corpus file because the gate was false on all 3,215.
+const COLOR_DYNAMICS_KEYS: [&[u8]; 6] = [
+    b"clVr",
+    b"H   ",
+    b"Strt",
+    b"Brgh",
+    b"purity",
+    b"colorDynamicsPerTip",
+];
+
+/// `usePaintDynamics` — Photoshop's **Transfer** panel (spec §6.7).
+const TRANSFER_KEYS: [&[u8]; 4] = [b"prVr", b"opVr", b"wtVr", b"mxVr"];
+
+/// `useBrushPose` (spec §6.8) — the one gate that is ABSENT on 36 of
+/// 3,215 brushes, so absence must read as false.
+const BRUSH_POSE_KEYS: [&[u8]; 8] = [
+    b"overridePoseAngle",
+    b"overridePoseTiltX",
+    b"overridePoseTiltY",
+    b"overridePosePressure",
+    b"brushPosePressure",
+    b"brushPoseTiltX",
+    b"brushPoseTiltY",
+    b"brushPoseAngle",
+];
+
 /// Read one brush preset from its descriptor.
 pub(crate) fn read_brush(d: &Descriptor, index: usize, w: &mut Vec<AbrWarning>) -> AbrBrush {
     if !d.class_id.matches(b"brushPreset") {
@@ -924,26 +993,28 @@ pub(crate) fn read_brush(d: &Descriptor, index: usize, w: &mut Vec<AbrWarning>) 
     // skip the group entirely rather than inventing defaults for keys
     // that are not there. A group key present while its gate is false
     // never occurred once and is worth a diagnostic if it ever does.
-    let shape_dynamics = gated(d, b"useTipDynamics", w, |d, w| ShapeDynamics {
-        size: dynamics(d, b"szVr", w),
-        angle: dynamics(d, b"angleDynamics", w),
-        roundness: dynamics(d, b"roundnessDynamics", w),
-        minimum_diameter: percent(d, b"minimumDiameter", w),
-        minimum_roundness: percent(d, b"minimumRoundness", w),
-        tilt_scale: percent(d, b"tiltScale", w),
-        flip_x_jitter: d.bool(b"flipX"),
-        flip_y_jitter: d.bool(b"flipY"),
-        brush_projection: d.bool(b"brushProjection"),
+    let shape_dynamics = gated(d, b"useTipDynamics", &SHAPE_DYNAMICS_KEYS, w, |d, w| {
+        ShapeDynamics {
+            size: dynamics(d, b"szVr", w),
+            angle: dynamics(d, b"angleDynamics", w),
+            roundness: dynamics(d, b"roundnessDynamics", w),
+            minimum_diameter: percent(d, b"minimumDiameter", w),
+            minimum_roundness: percent(d, b"minimumRoundness", w),
+            tilt_scale: percent(d, b"tiltScale", w),
+            flip_x_jitter: d.bool(b"flipX"),
+            flip_y_jitter: d.bool(b"flipY"),
+            brush_projection: d.bool(b"brushProjection"),
+        }
     });
 
-    let scatter = gated(d, b"useScatter", w, |d, w| Scatter {
+    let scatter = gated(d, b"useScatter", &SCATTER_KEYS, w, |d, w| Scatter {
         scatter: dynamics(d, b"scatterDynamics", w),
         count_dynamics: dynamics(d, b"countDynamics", w),
         count: d.number(b"Cnt "),
         both_axes: d.bool(b"bothAxes"),
     });
 
-    let texture = gated(d, b"useTexture", w, |d, w| {
+    let texture = gated(d, b"useTexture", &TEXTURE_KEYS, w, |d, w| {
         // `useTexture` true does not guarantee a `Txtr` descriptor
         // exists; both conditions are required (§6.4 trap).
         let txtr = d.descriptor(b"Txtr");
@@ -983,26 +1054,28 @@ pub(crate) fn read_brush(d: &Descriptor, index: usize, w: &mut Vec<AbrWarning>) 
         }
     });
 
-    let color_dynamics = gated(d, b"useColorDynamics", w, |d, w| ColorDynamics {
-        foreground_background: dynamics(d, b"clVr", w),
-        hue: percent(d, b"H   ", w),
-        saturation: percent(d, b"Strt", w),
-        brightness: percent(d, b"Brgh", w),
-        purity: percent(d, b"purity", w),
-        per_tip: d.bool(b"colorDynamicsPerTip"),
+    let color_dynamics = gated(d, b"useColorDynamics", &COLOR_DYNAMICS_KEYS, w, |d, w| {
+        ColorDynamics {
+            foreground_background: dynamics(d, b"clVr", w),
+            hue: percent(d, b"H   ", w),
+            saturation: percent(d, b"Strt", w),
+            brightness: percent(d, b"Brgh", w),
+            purity: percent(d, b"purity", w),
+            per_tip: d.bool(b"colorDynamicsPerTip"),
+        }
     });
     if color_dynamics.is_some() {
         w.push(AbrWarning::ColorDynamicsUnverified { brush_index: index });
     }
 
-    let transfer = gated(d, b"usePaintDynamics", w, |d, w| Transfer {
+    let transfer = gated(d, b"usePaintDynamics", &TRANSFER_KEYS, w, |d, w| Transfer {
         flow: dynamics(d, b"prVr", w),
         opacity: dynamics(d, b"opVr", w),
         wetness: dynamics(d, b"wtVr", w),
         mix: dynamics(d, b"mxVr", w),
     });
 
-    let brush_pose = gated(d, b"useBrushPose", w, |d, w| BrushPose {
+    let brush_pose = gated(d, b"useBrushPose", &BRUSH_POSE_KEYS, w, |d, w| BrushPose {
         override_angle: d.bool(b"overridePoseAngle"),
         override_tilt_x: d.bool(b"overridePoseTiltX"),
         override_tilt_y: d.bool(b"overridePoseTiltY"),
@@ -1057,16 +1130,40 @@ pub(crate) fn read_brush(d: &Descriptor, index: usize, w: &mut Vec<AbrWarning>) 
 
 /// Read a flattened group only when its gate is true, and report the
 /// (never-observed) case of a group key present while the gate is false.
+///
+/// `group_keys` is the group's own vocabulary — the keys `read` would
+/// consult. It is passed in rather than inferred because a closure
+/// cannot be asked what it read, and it is worth passing: the gate
+/// discipline (spec §6.2 `[OBS]`, 3,215/3,215) is the reason this reader
+/// may skip a whole group on one boolean, so the one observation that
+/// would undermine it deserves a diagnostic rather than silence. The
+/// gate still decides — a stray key never causes the group to be read.
+///
+/// A gate that is **absent** counts as false. That is not a guess: 36 of
+/// 3,215 corpus brushes carry no `useBrushPose` at all (profile
+/// `gate_counts`), and none of them carries a pose key either.
 fn gated<T>(
     d: &Descriptor,
     gate: &[u8],
+    group_keys: &[&[u8]],
     w: &mut Vec<AbrWarning>,
     read: impl FnOnce(&Descriptor, &mut Vec<AbrWarning>) -> T,
 ) -> Option<T> {
-    match d.bool(gate) {
-        Some(true) => Some(read(d, w)),
-        _ => None,
+    if d.bool(gate) == Some(true) {
+        return Some(read(d, w));
     }
+    let stray: Vec<String> = group_keys
+        .iter()
+        .filter(|k| d.contains(k))
+        .map(|k| String::from_utf8_lossy(k).into_owned())
+        .collect();
+    if !stray.is_empty() {
+        w.push(AbrWarning::GatedGroupKeysWithoutGate {
+            gate: String::from_utf8_lossy(gate).into_owned(),
+            keys: stray,
+        });
+    }
+    None
 }
 
 #[cfg(test)]

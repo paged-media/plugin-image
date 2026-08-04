@@ -38,14 +38,20 @@
 //! `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` §10 that
 //! it exists to catch.
 //!
-//! What is NOT tested here, and why: the behaviour spec's own regression
-//! proposal (§14.3) is to wire the 9-file, 3,215-preset licensed corpus
-//! at `plugin-image/references/abr-fixtures/` into this suite — the
-//! zero-bytes-unaccounted self-check across 3,202 records, the 238-way
-//! byte-exact PNG comparison, and the 3,205-way join. That corpus lives
-//! under `references/`, which the clean-room protocol (repo CLAUDE.md
-//! §3.1) forbids an implementer from reading. Those three gates are a
-//! named gap, to be added by whoever may open that directory.
+//! What is tested ELSEWHERE, and why. Revision 2 of the behaviour spec
+//! asked for the 9-file, 3,215-preset licensed corpus at
+//! `plugin-image/references/abr-fixtures/` to be wired into this suite.
+//! That corpus lives under `references/`, which the clean-room protocol
+//! (repo CLAUDE.md §3.1) forbids an implementer from reading, so the
+//! instruction had no owner; §14.3.1 resolves it by splitting the gate.
+//!
+//! * `tests/abr_lane_a.rs` — LANE A: the same checks, driven from the
+//!   ANALYST-published `fixtures/abr/corpus-profile.json` and
+//!   `corpus-record-ledger.tsv` against synthesised fixtures. Always on,
+//!   no corpus needed. Where THIS file is one fixture per named trap,
+//!   Lane A is exhaustive over the published vocabulary.
+//! * `tests/abr_corpus.rs` — LANE B: the real files, `#[ignore]`d and
+//!   opt-in behind `PAGED_ABR_CORPUS=1`, and the analyst's to run.
 
 use image_conformance::abr_builder::*;
 use image_gpu::dab::{SampledTip, StrokeAccumulator};

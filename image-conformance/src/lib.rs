@@ -43,6 +43,7 @@
 //! bench, and the coverage gate.
 
 pub mod abr_builder;
+pub mod abr_corpus;
 pub mod compose_ref;
 pub mod device;
 pub mod harness;

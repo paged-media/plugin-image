@@ -13,7 +13,7 @@
 # PSD's own pattern records all need them).
 #
 # THE SOURCE OF EVERY FACT BELOW is the behaviour spec
-# `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` (rev. 2),
+# `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` (rev. 3),
 # an ANALYST artifact under the clean-room two-role protocol
 # (plugin-image/CLAUDE.md §3.1), verified against 3,215 real brush
 # presets in 9 licensed files. Its confidence tags are carried through
@@ -28,15 +28,31 @@
 # format. Everything about the brush descriptors is reverse-engineered
 # by somebody; these rows record by whom.
 #
-# NAMED GAP — the corpus is not wired in. The behaviour spec's own
-# regression proposal (§14.3) is to run the 9-file corpus at
-# `plugin-image/references/abr-fixtures/` as the gate: the
-# zero-bytes-unaccounted self-check over 3,202 records, the 238-way
-# byte-exact comparison against independently published PNG alpha, and
-# the 3,205-way join. That path is under `references/`, which the
-# clean-room protocol forbids an IMPLEMENTER from reading, so all three
-# gates are open work for whoever may open that directory. Everything
-# below is proved instead against `image-conformance/src/abr_builder`,
+# THE GATE IS IN TWO LANES (spec rev. 3 §14.3.1), because the corpus
+# lives under `references/` and the clean-room protocol forbids an
+# IMPLEMENTER from reading it. Revision 2 asked the implementer to wire
+# that corpus in directly; that instruction had no owner and was reported
+# back as errata item 8. The resolution: an ANALYST reads the mount and
+# publishes FACTS ABOUT BEHAVIOUR — `image-conformance/fixtures/abr/`
+# `corpus-profile.json` and `corpus-record-ledger.tsv`, both
+# implementer-legal — and the gate splits:
+#
+#   LANE A  image-conformance/tests/abr_lane_a.rs — always on, needs NO
+#           corpus. Drives the synthesised-fixture emitter
+#           `image-conformance/src/abr_builder` from those tables, so
+#           every expectation was measured on 3,215 real presets while
+#           every byte fed to the reader is synthetic.
+#   LANE B  image-conformance/tests/abr_corpus.rs — ANALYST-owned,
+#           #[ignore]d, opt-in behind PAGED_ABR_CORPUS=1, and it opens
+#           the real files. Skips loudly wherever the mount is absent,
+#           which is CI and every implementer's machine.
+#
+# OWNERSHIP: only an analyst regenerates the two expectation files. A
+# Lane-B failure therefore means either the reader regressed or the
+# format understanding legitimately changed — never that the ledger
+# needs editing.
+#
+# Everything below is proved against `image-conformance/src/abr_builder`,
 # an INDEPENDENT byte emitter that shares no code with the reader.
 
 - id: image.abr.container
@@ -230,3 +246,31 @@
     rust:
       - "image-gpu/src/dab.rs (unit, all image_abr_engine_bridge_sampled_tip_*: _rejects_a_bitmap_whose_length_disagrees_with_its_bounds, _stored_values_are_coverage_and_are_never_inverted, _defaults_its_diameter_to_the_larger_dimension, _scales_the_bitmap_to_the_preset_diameter, _is_not_transposed_by_a_non_square_bitmap, _roundness_squashes_the_minor_axis, _flips_mirror_the_bitmap, _is_sub_pixel_positionable_like_the_round_tip, _rides_the_same_accumulation_rule_as_the_round_tip, _walks_a_stroke_through_plan_segment_unchanged, _outside_the_field_stamps_nothing)"
       - "image-conformance/tests/abr_reader.rs (image_abr_engine_bridge_sampled_tip_becomes_a_stampable_coverage_field — the end-to-end path: RLE-encoded .abr bytes -> decoded coverage -> SampledTip at the preset's Dmtr -> StrokeAccumulator)"
+
+- id: image.abr.corpus-gate
+  state_row: image.psd.abr
+  tier: parsed
+  oracle: analyst-published-artifacts
+  provenance:
+    - "abr-brush-format-spec.md §14.3.1 — THE REGRESSION GATE, CORRECTED FOR ROLE. Revision 2 told the implementer to wire the licensed 9-file corpus (living inside `references/`) into the test suite. Following it breaks the clean-room rule; honouring the clean-room rule leaves the gate unbuilt. It was a PROCESS defect, not a format one, and it is resolved by an analyst publishing derived artifacts and the gate splitting into two lanes."
+    - "abr-brush-format-spec.md §13.4/§14.3.1 — the artifacts are FACTS ABOUT BEHAVIOUR, not expression, for three independent reasons: they describe Adobe's file format rather than anybody's code; a SHA-256 is one-way, so it pins a decode exactly while carrying none of the artwork and cannot be inverted to reconstruct it; and the measuring parser was written from the behaviour spec, not from the mount. The line that must not be crossed is publishing anything the corpus could be RECONSTRUCTED from — pixel data, RLE payloads, verbatim descriptor byte ranges. Neither file carries any."
+    - "abr-brush-format-spec.md §14.3.1 LANE A — seven always-on gates, driven by corpus-profile.json against SYNTHESISED fixtures: A1 vocabulary coverage (every key x OSType and key x unit pair survives with its type and unit, in BOTH key dialects), A2 class-id dispatch (all 14 observed ids dispatch or degrade with a NAMED diagnostic), A3 ordinals (every observed bVTy/fStp/Shp /dtipsType value parses; out of range degrades instead of indexing), A4 container shapes (both section orders, empty samp/patt, a desc of size = 2 mod 4 followed by phry, both last-section terminations, a present-but-empty hierarchy), A5 gate discipline including the ABSENT gate (useBrushPose is absent on 36 of 3,215 brushes, so absence must read false), A6 the §2.2 self-check identity for all four pad remainders, A7 the join (exact, case-sensitive, many-to-one, reported never guessed)."
+    - "abr-brush-format-spec.md §14.3.1 LANE B — the corpus gate, ANALYST-owned and opt-in: B1 each file's profile row, B2 all 3,202 ledger rows including the SHA-256 of the decoded coverage, B3 the 238-way byte-exact comparison against independently published PNG alpha (the polarity oracle of §2.5, re-run rather than remembered), B4 the corpus aggregates (81,926 descriptor items, 45,706 long-form vs 36,220 4-byte keys, the OSType histogram, 102 distinct keys, the class-id inventory). Skipped, loudly, wherever the mount is absent."
+  # OWNERSHIP RULE, and it is the point of the split: the profile and the
+  # ledger are regenerated ONLY by an ANALYST session with the mount, and
+  # a change to either is a reviewable diff. A Lane-B failure is
+  # therefore unambiguous — either the reader regressed, or the format
+  # understanding legitimately changed and the analyst must re-publish.
+  # An implementer must NEVER "fix" a Lane-B failure by editing an
+  # expectation file; that converts a measurement into a tautology.
+  #
+  # KNOWN GAP, analyst-side: the artifacts do not describe the mount's
+  # internal layout, so B3's path to the 238 published PNGs is a
+  # convention (`<corpus>/png-oracle/`) with a PAGED_ABR_PNG_DIR
+  # override. B3 skips by itself when that directory is absent; B1/B2/B4
+  # are unaffected.
+  tests:
+    rust:
+      - "image-conformance/src/abr_corpus/ (unit: image_abr_corpus_profile_loads_with_its_headline_totals, image_abr_corpus_ledger_loads_one_row_per_record, image_abr_corpus_json_* x4, image_abr_corpus_sha256_* x2 — the loader and its dependency-free JSON/SHA-256 primitives, the latter checked against the published FIPS 180-4 vectors)"
+      - "image-conformance/tests/abr_lane_a.rs (LANE A, always on: image_abr_lane_a1_* x3, _a2_* x4, _a3_* x3, _a4_* x4, _a5_* x3, _a6_* x4, _a7_* x2)"
+      - "image-conformance/tests/abr_corpus.rs (LANE B, #[ignore]d + PAGED_ABR_CORPUS=1: image_abr_corpus_b1_every_file_matches_its_profile_row, _b2_every_record_matches_the_ledger_including_its_digest, _b3_the_published_png_alpha_settles_the_polarity, _b4_the_aggregates_match_the_published_tables)"

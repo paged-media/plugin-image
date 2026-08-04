@@ -39,7 +39,7 @@
 //! # Provenance
 //!
 //! The behaviour spec `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md`
-//! (revision 2), which was written by an ANALYST under the clean-room
+//! (revision 3), which was written by an ANALYST under the clean-room
 //! two-role protocol and then verified against **3,215 real brush
 //! presets in 9 licensed files**. Facts it carries are tagged `[OBS]`
 //! (measured in those files), `[PUB]` (Adobe's own specification or an
@@ -193,6 +193,19 @@ pub enum AbrWarning {
     UnexpectedClassId { context: String, class_id: String },
     /// An ordinal outside its implicit table.
     OrdinalOutOfRange { key: String, value: i32 },
+    /// A gated group's own keys are present while its gate is `false` or
+    /// absent — the one combination the gate discipline says cannot
+    /// happen (spec §6.2 `[OBS]`: on 3,215 of 3,215 brushes a false gate
+    /// means NONE of its group's keys are present).
+    ///
+    /// The group is still **not** read: the gate decides, so a stray key
+    /// changes nothing about the model. What it changes is what we know
+    /// — either a producer exists that does not obey the discipline, or
+    /// this reader's idea of which keys belong to which group is wrong,
+    /// and both are worth hearing about. Never observed; this is the
+    /// diagnostic that says so out loud instead of dropping the keys in
+    /// silence.
+    GatedGroupKeysWithoutGate { gate: String, keys: Vec<String> },
     /// A blend-mode identifier in neither vocabulary. Substituted with
     /// Normal.
     UnrecognisedBlendMode { key: String, value: String },

@@ -156,4 +156,9 @@ cargo build --release --target wasm32-unknown-unknown -p image-js
 # Optional PSD ecosystem oracle (psd-tools): create once, then
 # PAGED_PSD_ORACLE=1 cargo test -p image-conformance -- --ignored
 python3 -m venv .venv && .venv/bin/pip install psd-tools
+
+# Optional .abr corpus gate — LANE B, ANALYST-ONLY (it reads the mount).
+# Skips loudly without it; the always-on LANE A (tests/abr_lane_a.rs)
+# needs no corpus and runs in the ordinary suite.
+PAGED_ABR_CORPUS=1 cargo test -p image-conformance --test abr_corpus -- --ignored --nocapture
 ```
