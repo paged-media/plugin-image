@@ -113,11 +113,27 @@ fn corpus_dir() -> PathBuf {
         .join("abr-fixtures")
 }
 
-/// `<corpus>/png-oracle`, or `PAGED_ABR_PNG_DIR`.
+/// The directory the ANALYST publishes as `png_oracle.dir` in
+/// `fixtures/abr/corpus-profile.json`, resolved against the corpus
+/// directory. `PAGED_ABR_PNG_DIR` overrides it.
+///
+/// This was a hard-coded `<corpus>/png-oracle`, which is not what the
+/// pack unpacks to — so B3 self-skipped on EVERY machine, including the
+/// analyst's, and was the one Lane-B gate that had never run until the
+/// oracle's location was published (2026-08-05).
+///
+/// Kept as a constant rather than parsed out of the profile at runtime:
+/// Lane A already transcribes its published constants the same way and
+/// `image-conformance` carries no JSON reader, so parsing here would add
+/// a dependency to spare one string. The profile remains the authority —
+/// if these disagree, the profile is right and this is stale, which is
+/// what the skip message says.
+const PUBLISHED_PNG_ORACLE_DIR: &str = "mercator-png-oracle";
+
 fn png_dir() -> PathBuf {
     match std::env::var_os("PAGED_ABR_PNG_DIR") {
         Some(dir) => PathBuf::from(dir),
-        None => corpus_dir().join("png-oracle"),
+        None => corpus_dir().join(PUBLISHED_PNG_ORACLE_DIR),
     }
 }
 

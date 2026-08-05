@@ -160,5 +160,10 @@ python3 -m venv .venv && .venv/bin/pip install psd-tools
 # Optional .abr corpus gate — LANE B, ANALYST-ONLY (it reads the mount).
 # Skips loudly without it; the always-on LANE A (tests/abr_lane_a.rs)
 # needs no corpus and runs in the ordinary suite.
+#
+# "Analyst-owned" is a convention about who maintains the EXPECTATIONS,
+# not a barrier — the switch is not a credential. Running it is harmless:
+# it discloses only aggregates the committed artifacts already publish.
+# Do not build a gate that tries to detect who ran it.
 PAGED_ABR_CORPUS=1 cargo test -p image-conformance --test abr_corpus -- --ignored --nocapture
 ```
