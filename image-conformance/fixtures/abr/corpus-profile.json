@@ -1,6 +1,34 @@
 {
  "_provenance": "Derived from the licensed .abr fixture corpus described in thoughts/docs/paged/plugin-image/abr-brush-format-spec.md \u00a713.3, by an ANALYST-role session under the clean-room two-role protocol (plugin-image/CLAUDE.md \u00a73.1). Contains only FACTS ABOUT BEHAVIOUR \u2014 counts, key names, OSTypes, unit codes, dimensions and cryptographic digests. It contains no corpus bytes, no third-party artwork, and nothing derived from the reference implementation mounted at references/ag-psd. IMPLEMENTER-LEGAL: consuming this file is not reading references/.",
- "_spec": "thoughts/docs/paged/plugin-image/abr-brush-format-spec.md (rev. 3)",
+ "_spec": "thoughts/docs/paged/plugin-image/abr-brush-format-spec.md (rev. 4)",
+ "_notes": {
+  "last_section_padded": "UNDECIDABLE WHEN THE LAST SECTION'S SIZE IS A MULTIPLE OF 4, and the flag must not be asserted there. It records whether the file's final section is followed by its 0..3 pad bytes; when size % 4 == 0 that pad is zero bytes long, so the padded and unpadded terminations emit IDENTICAL bytes and no measurement can separate them. A value published for such a file would record how the measuring parser broke the tie, not a fact about the file. It happens not to arise here: across the 9 files the last section's size %4 is {1:4, 2:2, 3:3} \u2014 never 0 \u2014 so every value below IS observable, from the total byte count alone. Nobody should later 'fix' a 4-aligned case: there is nothing there to be right or wrong about.",
+  "descriptor_version": "PER SECTION, SUMMARISED PER FILE. A .abr carries one descriptor version word per descriptor-bearing section \u2014 `desc`, plus `phry` where present \u2014 so these 9 files hold 14 of them (9 desc + 5 phry). All 14 are 16. This field therefore means 'every descriptor section in this file is at this version' and is only well-formed while they agree. RULING 2026-08-05: the reader does not surface the version on AbrFile and SHOULD NOT BE CHANGED TO. It reports any value other than 16 as UnexpectedDescriptorVersion { section, version }, which both names the section and carries the value, so the reader's silence is logically EQUIVALENT to this field being 16 \u2014 not a weaker assertion. And a gate whose job is to check the reader should measure this from the bytes rather than ask the reader for it: read_versioned_descriptor already returns the version, which is how Lane B's B4 obtains it today, and discards it."
+ },
+ "png_oracle": {
+  "_what": "Where the 238-way polarity oracle of spec \u00a72.5 physically lives, and what the ledger's `png_oracle` column is a path into. Published 2026-08-05: the ledger named 238 PNGs but nothing published said where they were, so the gate that consumes them \u2014 Lane B's B3 \u2014 could not open one and self-skipped on every machine including the analyst's. It was the one Lane-B gate that had never run.",
+  "pack": "Mercator Settlement PNG Pack \u2014 the pack's own bundled _ReadMe_.txt self-identifies as Version 1.0",
+  "author": "K. M. Alexander",
+  "source": "https://kmalexander.com/tag/brushes/",
+  "licence": "CC0-1.0, stated verbatim in the pack's own _ReadMe_.txt \u2014 a public-domain dedication, which is why naming and locating it here carries no redistribution question at all",
+  "corresponds_to": "kma-mercator-settlement-brushes.abr (238 presets, 238 sampled tips)",
+  "dir": "mercator-png-oracle",
+  "dir_relative_to": "the corpus directory \u2014 references/abr-fixtures/, or $PAGED_ABR_CORPUS_DIR",
+  "files": 238,
+  "layout": "NESTED, not flat: four top-level folders, most with one further level. A flat join of a bare filename onto this directory opens nothing, which is exactly why the ledger column now carries the folder.",
+  "top_level_counts": {
+   "Settlements": 134,
+   "Landforms": 56,
+   "Flora": 46,
+   "Map Components": 2
+  },
+  "ledger_column_relative_to": "this directory (`dir`) \u2014 NOT the corpus directory, and not a bare basename",
+  "basenames_unique": true,
+  "mapping": "Bijective onto the 238 ledger rows carrying a png_oracle: all 238 names resolve, no pack file is unused, no basename collides. Verified 2026-08-05.",
+  "run": "PAGED_ABR_CORPUS=1 PAGED_ABR_PNG_DIR=references/abr-fixtures/mercator-png-oracle cargo test -p image-conformance --test abr_corpus -- --ignored --nocapture",
+  "verified": "2026-08-05: B3 ran for the first time and passed \u2014 238 of 238 tips byte-identical to the published alpha, 0 matching the inverted reading.",
+  "note_for_the_implementer": "B3's built-in default is <corpus>/png-oracle, which is not this directory's name, so without the environment variable the gate still skips. Reading `dir` from this block would make B3 run with no environment variable at all. That is a one-line change in tests/abr_corpus.rs, reported rather than made in this pass so the artifact change and the code change stay separately reviewable."
+ },
  "totals": {
   "files": 9,
   "brush_presets": 3215,
