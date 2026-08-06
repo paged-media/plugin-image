@@ -107,7 +107,7 @@ fn dabbed(w: u32, h: u32, tip: BrushTip, flow: f32) -> StrokeAccumulator {
     acc
 }
 
-fn paint(color: [f32; 4], blend: &'static KernelDef) -> PaintMode {
+fn paint(color: [f32; 4], blend: &'static KernelDef) -> PaintMode<'static> {
     PaintMode::Paint { blend, color }
 }
 

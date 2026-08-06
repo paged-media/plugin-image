@@ -337,21 +337,6 @@ export function brush_stroke_cancel() {
 }
 
 /**
- * COMMIT the stroke.
- *
- * * **With a layer stack bound** (the normal case): the painted
- *   pixels are written into the ACTIVE LAYER, the tiles the stroke's
- *   bounding box covers are journaled first (so the stroke is
- *   undoable, tile-granularly, within the journal's stated bound),
- *   and the stack is re-composited into the SAME engine-held image.
- *   The returned handle is therefore the handle you started with —
- *   the caller must NOT free it.
- * * **Without one**: the pre-layer behaviour — the painted pixels
- *   are registered as a NEW engine-held image and the caller swaps
- *   handles and frees the old one.
- *
- * Either way the result is the same size, so the caller may carry
- * the selection over with `selection_transfer`.
  * @returns {Promise<DecodedHandle>}
  */
 export function brush_stroke_commit() {
@@ -379,6 +364,42 @@ export function brush_stroke_commit() {
 export function brush_stroke_extend(x, y, pressure) {
     const ret = wasm.brush_stroke_extend(x, y, pressure);
     return ret;
+}
+
+/**
+ * COMMIT the stroke.
+ *
+ * * **With a layer stack bound** (the normal case): the painted
+ *   pixels are written into the ACTIVE LAYER, the tiles the stroke's
+ *   bounding box covers are journaled first (so the stroke is
+ *   undoable, tile-granularly, within the journal's stated bound),
+ *   and the stack is re-composited into the SAME engine-held image.
+ *   The returned handle is therefore the handle you started with —
+ *   the caller must NOT free it.
+ * * **Without one**: the pre-layer behaviour — the painted pixels
+ *   are registered as a NEW engine-held image and the caller swaps
+ *   handles and frees the old one.
+ *
+ * Either way the result is the same size, so the caller may carry
+ * the selection over with `selection_transfer`.
+ * Point the IN-FLIGHT clone/heal stroke at its source (the
+ * alt-click anchor), in image px.
+ *
+ * Must be called between `brush_stroke_begin` and the first
+ * `brush_stroke_extend`: the source offset is fixed at the first
+ * dab, because an offset that moved mid-stroke would smear the copy
+ * instead of translating it. Calling it for a non-sampling tool is
+ * an ERROR rather than a no-op — silently accepting it would let a
+ * caller believe the brush was cloning.
+ * @param {number} x
+ * @param {number} y
+ * @param {boolean} aligned
+ */
+export function brush_stroke_set_source(x, y, aligned) {
+    const ret = wasm.brush_stroke_set_source(x, y, aligned);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
 }
 
 /**
@@ -2307,12 +2328,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 339, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 337, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 374, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 372, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

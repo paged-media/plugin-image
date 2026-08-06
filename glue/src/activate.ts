@@ -46,6 +46,8 @@ const MAGIC_WAND_TOOL_ID = "media.paged.image.tool.magicWand";
 const BRUSH_TOOL_ID = "media.paged.image.tool.brush";
 const PENCIL_TOOL_ID = "media.paged.image.tool.pencil";
 const ERASER_TOOL_ID = "media.paged.image.tool.eraser";
+const CLONE_TOOL_ID = "media.paged.image.tool.clone";
+const HEAL_TOOL_ID = "media.paged.image.tool.heal";
 
 export function activate(host: BundleHost): BundleHandle {
   const session = createImageSession(host);
@@ -239,6 +241,42 @@ export function activate(host: BundleHost): BundleHandle {
     shortcut: "shift+e",
     cursor: PAINT_CURSOR,
     gesture: () => makeBrushGesture(host, session, "eraser"),
+  });
+
+  // ── RETOUCHING: the two tools that paint FROM the image ──
+  //
+  // Same gesture, same tip, same spacing/pressure/selection masking as
+  // the brush — the entire difference is where the paint layer comes
+  // from, which is why the clone stamp needed no new kernel.
+  //
+  // ALT-CLICK sets the source (Photoshop's convention, handled in the
+  // gesture as a separate interaction so the anchor click never paints).
+  // The anchor lives on the SESSION, not the stroke, so it survives
+  // between strokes — repeated retouching is the normal case.
+  //
+  // SHORTCUTS: `shift+t` (sTamp) and `j`, the latter matching
+  // Photoshop's healing-brush key exactly; both verified free against
+  // the editor built-ins and the other plugin manifests at pick time
+  // (INV-REG-1 keeps tool shortcuts globally unique).
+  contributeTool(host, {
+    id: CLONE_TOOL_ID,
+    title: "Clone stamp",
+    icon: "tool-brush",
+    group: CLONE_TOOL_ID,
+    section: "drawType",
+    shortcut: "shift+t",
+    cursor: PAINT_CURSOR,
+    gesture: () => makeBrushGesture(host, session, "clone"),
+  });
+  contributeTool(host, {
+    id: HEAL_TOOL_ID,
+    title: "Healing brush",
+    icon: "tool-brush",
+    group: HEAL_TOOL_ID,
+    section: "drawType",
+    shortcut: "j",
+    cursor: PAINT_CURSOR,
+    gesture: () => makeBrushGesture(host, session, "heal"),
   });
 
   // GENERATE — the `gen.*` family's editor reach. Fills the CURRENT

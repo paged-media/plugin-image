@@ -662,6 +662,66 @@ export function BrushSection({
   );
 }
 
+// ── retouching (clone / heal) ────────────────────────────────────────
+
+/** The RETOUCH section: the clone source, and the honest limit of the
+ *  healing brush. PURE, like the sections around it.
+ *
+ *  There are no sliders here on purpose — clone and heal take the SAME
+ *  size, hardness, opacity, flow and spacing as the brush, because they
+ *  are the brush with a different paint layer. Duplicating those
+ *  controls would imply two independent brushes and would drift. */
+export function RetouchSection({
+  source,
+  onAligned,
+}: {
+  source: { x: number; y: number; aligned: boolean } | null;
+  onAligned: (aligned: boolean) => void;
+}) {
+  return (
+    <>
+      <div style={sectionTitle}>Retouch</div>
+      <div style={row}>
+        <span>Clone source</span>
+        <span style={mono} data-image-clone-source>
+          {source
+            ? `${Math.round(source.x)}, ${Math.round(source.y)}`
+            : "not set"}
+        </span>
+      </div>
+      <div style={row}>
+        <label htmlFor="pg-image-clone-aligned">Aligned</label>
+        <input
+          id="pg-image-clone-aligned"
+          type="checkbox"
+          data-image-clone-aligned
+          checked={source?.aligned ?? true}
+          disabled={!source}
+          onChange={(e) => onAligned(e.target.checked)}
+        />
+      </div>
+      <div style={note}>
+        Alt-click with the Clone stamp or the Healing brush to set the source.
+        The anchor survives between strokes, and aligned keeps a fixed offset
+        from the cursor so the copy translates instead of repeating.
+      </div>
+      <div style={note} data-image-heal-limit>
+        The healing brush matches the source&apos;s MEAN tone to its
+        destination — not a gradient-domain (Poisson) solve. It removes a
+        uniform difference, which is what most blemish retouching is, and
+        leaves a gradient one: healing across a strong luminance ramp still
+        shows a seam. Use the Clone stamp there, or heal in smaller steps.
+      </div>
+      <div style={note}>
+        Content-aware fill is not offered. Filling a selection by synthesising
+        plausible texture is a different algorithm (patch search), not a brush,
+        and a button that produced a blurry smear instead would be worse than
+        its absence.
+      </div>
+    </>
+  );
+}
+
 // ── paths (raster ↔ vector) ──────────────────────────────────────────
 
 /** The PATHS section — the raster↔vector bridge, and only that.
@@ -2220,6 +2280,13 @@ export function makeImagePanel(session: ImageSession) {
           gpu={s.gpu}
           disabled={disabled}
           onChange={(patch) => session.setBrushParams(patch)}
+        />
+
+        {/* RETOUCH — the clone/heal source and the healing brush's
+            honest limit. */}
+        <RetouchSection
+          source={s.cloneSource}
+          onAligned={(a) => session.setCloneAligned(a)}
         />
 
         {/* PATHS — the raster↔vector bridge (the vector side itself is

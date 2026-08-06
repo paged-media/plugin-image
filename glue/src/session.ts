@@ -55,6 +55,7 @@ import {
   type RasterFormat,
   type ResampleFilter,
   type Rgba01,
+  SAMPLING_TOOLS,
   type LevelsParams,
   type SelectionStats,
   type StrokeTool,
@@ -180,6 +181,10 @@ export interface ImageSessionState {
    *  layers, or the honest reason the layered import was DECLINED and
    *  the flattened composite kept. Null for non-PSD sources. */
   layersNote: string | null;
+  /** The clone/heal source anchor in IMAGE px, or null before one is
+   *  set. Session state rather than stroke state: the anchor SURVIVES a
+   *  stroke, which is what makes repeated retouching strokes usable. */
+  cloneSource: { x: number; y: number; aligned: boolean } | null;
   /** The per-channel readout for the ingested source (R/G/B/A + luma),
    *  or null before an ingest. Refreshed alongside the histogram, from
    *  the same buffer, so the two never disagree. */
@@ -325,6 +330,12 @@ export interface ImageSession {
   /** PATH → SELECTION: read the selected vector element's anchors through
    *  the host, flatten its curves, and make it the selection. */
   selectionFromPath(): Promise<boolean>;
+  /** Set the clone/heal anchor (the alt-click). Image px. */
+  setCloneSource(point: [number, number]): void;
+  /** Aligned: the source keeps a fixed offset from the cursor and tracks
+   *  the brush. Unaligned restarts from the anchor on every stroke,
+   *  which is how a motif is stamped repeatedly. */
+  setCloneAligned(aligned: boolean): void;
   setBrushParams(p: Partial<BrushParams>): void;
   /** Load a Photoshop `.abr` brush library. Parses only — nothing about
    *  the current brush changes until `applyBrushPreset`. Resolves false
@@ -515,6 +526,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     layers: EMPTY_LAYER_STACK,
     history: null,
     layersNote: null,
+    cloneSource: null,
     channels: null,
     brushLibrary: null,
     brushLibraryName: null,
@@ -1871,6 +1883,22 @@ export function createImageSession(host: BundleHost): ImageSession {
       return true;
     },
 
+    setCloneSource([x, y]) {
+      const aligned = state.cloneSource?.aligned ?? true;
+      state.cloneSource = { x, y, aligned };
+      setStatus(
+        `Clone source set at ${Math.round(x)}, ${Math.round(y)} — ` +
+          "paint to copy from there.",
+      );
+    },
+
+    setCloneAligned(aligned) {
+      state.cloneSource = state.cloneSource
+        ? { ...state.cloneSource, aligned }
+        : null;
+      emit();
+    },
+
     setBrushParams(p) {
       state.brush = { ...state.brush, ...p };
       // Editing any parameter means the brush is no longer the preset.
@@ -1996,8 +2024,27 @@ export function createImageSession(host: BundleHost): ImageSession {
         return false;
       }
       if (state.strokeActive) return false;
+      // A sampling tool with no anchor would paint NOTHING and look
+      // broken, so it declines with the instruction instead. Photoshop
+      // says the same thing in a modal; this says it in the status line.
+      if (SAMPLING_TOOLS.includes(tool) && !state.cloneSource) {
+        setStatus(
+          "Alt-click to set the clone source first — a clone with no " +
+            "source has nothing to copy.",
+        );
+        return false;
+      }
       try {
         engine.brushBegin(src.handle, tool, state.brush);
+        if (SAMPLING_TOOLS.includes(tool) && state.cloneSource) {
+          // BEFORE the first extend: the offset is fixed at the first
+          // dab, and an anchor arriving later would be ignored silently.
+          engine.brushSetSource(
+            state.cloneSource.x,
+            state.cloneSource.y,
+            state.cloneSource.aligned,
+          );
+        }
       } catch (err) {
         setStatus(`Paint failed: ${err instanceof Error ? err.message : err}`);
         return false;

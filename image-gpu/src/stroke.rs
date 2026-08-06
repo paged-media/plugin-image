@@ -94,6 +94,7 @@
 
 use half::f16;
 
+use image_kernels::families::arithmetic::{MathAddParams, MATH_ADD};
 use image_kernels::families::band::{BandSetAlphaParams, BAND_SET_ALPHA};
 use image_kernels::families::cast::{
     CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
@@ -106,8 +107,12 @@ use crate::execute::{execute_tile_once_async, TileInput};
 use crate::{GpuContext, GpuError};
 
 /// What a stroke deposits.
+///
+/// The lifetime is [`PaintMode::Sample`]'s: a cloning stroke's paint
+/// layer is a WINDOW of the image itself, so unlike a colour it cannot
+/// be carried by value.
 #[derive(Debug, Clone, Copy)]
-pub enum PaintMode {
+pub enum PaintMode<'a> {
     /// Lay down `color` (STRAIGHT RGBA in `[0, 1]`) through `blend` —
     /// any of the 26 `compose.*` kernels.
     Paint {
@@ -116,9 +121,35 @@ pub enum PaintMode {
     },
     /// Take alpha away (destination-out in the straight working space).
     Erase,
+    /// CLONE / HEAL: the paint layer is a window of pixels sampled from
+    /// somewhere ELSE in the image, not a generated colour.
+    ///
+    /// That is the whole of the clone stamp — it needs no new kernel,
+    /// because a dab has never cared where its paint layer came from.
+    /// `gen.solid` is simply replaced by an uploaded window, and the
+    /// existing coverage, spacing, pressure and selection masking all
+    /// apply unchanged.
+    ///
+    /// `correction` is the per-channel additive term applied to the
+    /// source before compositing, and it is the ONLY difference between
+    /// the two tools: zero for CLONE, and the destination−source mean
+    /// for HEAL, which is what makes a healed patch take on the
+    /// surrounding tone instead of pasting a visibly different one.
+    ///
+    /// It runs as `gen.solid` → `math.add` rather than `math.add_const`
+    /// because `add_const` broadcasts ONE scalar to every channel, and a
+    /// heal that could only shift luminance would leave a colour cast
+    /// exactly where the tool is supposed to remove one. Two registered
+    /// dispatches, no new kernel.
+    Sample {
+        blend: &'static KernelDef,
+        /// A STRAIGHT rgba16float window, the same size as the base.
+        source_f16: &'a [u8],
+        correction: [f32; 4],
+    },
 }
 
-impl PaintMode {
+impl PaintMode<'_> {
     /// The kernels this mode dispatches over a window that CARRIES
     /// ALPHA, in order — the honest answer to "what actually runs on the
     /// GPU", and what the conformance suite asserts against. Over a
@@ -134,6 +165,21 @@ impl PaintMode {
                 CAST_UNPREMULTIPLY.id,
             ],
             PaintMode::Erase => vec![BAND_SET_ALPHA.id],
+            PaintMode::Sample {
+                blend, correction, ..
+            } => {
+                let mut ids = Vec::with_capacity(6);
+                if correction.iter().any(|c| *c != 0.0) {
+                    ids.push(GEN_SOLID.id);
+                    ids.push(MATH_ADD.id);
+                }
+                // Both windows enter the blend premultiplied.
+                ids.push(CAST_PREMULTIPLY.id);
+                ids.push(CAST_PREMULTIPLY.id);
+                ids.push(blend.id);
+                ids.push(CAST_UNPREMULTIPLY.id);
+                ids
+            }
         }
     }
 
@@ -142,6 +188,19 @@ impl PaintMode {
     pub fn kernel_ids_for(&self, opaque_window: bool) -> Vec<&'static str> {
         match self {
             PaintMode::Paint { blend, .. } if opaque_window => vec![GEN_SOLID.id, blend.id],
+            PaintMode::Sample {
+                blend, correction, ..
+            } if opaque_window => {
+                // Both windows come from the same opaque image, so the
+                // premultiply bracket is the identity on each.
+                let mut ids = Vec::with_capacity(3);
+                if correction.iter().any(|c| *c != 0.0) {
+                    ids.push(GEN_SOLID.id);
+                    ids.push(MATH_ADD.id);
+                }
+                ids.push(blend.id);
+                ids
+            }
             _ => self.kernel_ids(),
         }
     }
@@ -183,7 +242,7 @@ fn premul(c: [f32; 4]) -> [f32; 4] {
 /// would have produced.
 pub async fn composite_stroke_window(
     ctx: &GpuContext,
-    mode: &PaintMode,
+    mode: &PaintMode<'_>,
     base_f16: &[u8],
     mask_f16: &[u8],
     w: u32,
@@ -225,6 +284,138 @@ pub async fn composite_stroke_window(
                 }],
                 BandSetAlphaParams::new(0.0).as_bytes(),
                 Some(mask_f16),
+                w,
+                h,
+            )
+            .await
+        }
+
+        // ── clone / heal: a WINDOW is the paint layer ────────────────
+        //
+        // Structurally identical to `Paint` — the only change is where
+        // the paint layer comes from, which is the whole reason the
+        // clone stamp needed no new kernel. The correction (zero for
+        // clone) runs first, so heal and clone differ by two dispatches
+        // and nothing else.
+        PaintMode::Sample {
+            blend,
+            source_f16,
+            correction,
+        } => {
+            if source_f16.len() != texels * 8 {
+                return Err(GpuError::Kernel {
+                    kernel: "stroke",
+                    detail: format!(
+                        "clone source window is {} bytes, expected {}",
+                        source_f16.len(),
+                        texels * 8
+                    ),
+                });
+            }
+            let corrected = if correction.iter().any(|c| *c != 0.0) {
+                // `gen.solid` builds the per-channel constant; `math.add`
+                // applies it. Alpha's correction is always 0 — a heal
+                // shifts tone, never transparency.
+                let konst = execute_tile_once_async(
+                    ctx,
+                    &GEN_SOLID,
+                    &[TileInput {
+                        f16_bytes: source_f16,
+                    }],
+                    GenSolidParams::new(0, 0, correction[0], correction[1], correction[2], 0.0)
+                        .as_bytes(),
+                    None,
+                    w,
+                    h,
+                )
+                .await?;
+                Some(
+                    execute_tile_once_async(
+                        ctx,
+                        &MATH_ADD,
+                        &[
+                            TileInput {
+                                f16_bytes: source_f16,
+                            },
+                            TileInput { f16_bytes: &konst },
+                        ],
+                        MathAddParams::new().as_bytes(),
+                        None,
+                        w,
+                        h,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let source = corrected.as_deref().unwrap_or(source_f16);
+
+            // Both windows come from the SAME image, so they are opaque
+            // together or not at all — one test, two brackets skipped.
+            let opaque = window_is_opaque(base_f16) && window_is_opaque(source);
+            let (base_premul, source_premul) = if opaque {
+                (None, None)
+            } else {
+                (
+                    Some(
+                        execute_tile_once_async(
+                            ctx,
+                            &CAST_PREMULTIPLY,
+                            &[TileInput {
+                                f16_bytes: base_f16,
+                            }],
+                            CastPremultiplyParams::new().as_bytes(),
+                            None,
+                            w,
+                            h,
+                        )
+                        .await?,
+                    ),
+                    Some(
+                        execute_tile_once_async(
+                            ctx,
+                            &CAST_PREMULTIPLY,
+                            &[TileInput { f16_bytes: source }],
+                            CastPremultiplyParams::new().as_bytes(),
+                            None,
+                            w,
+                            h,
+                        )
+                        .await?,
+                    ),
+                )
+            };
+
+            let composed = execute_tile_once_async(
+                ctx,
+                blend,
+                &[
+                    TileInput {
+                        f16_bytes: base_premul.as_deref().unwrap_or(base_f16),
+                    },
+                    TileInput {
+                        f16_bytes: source_premul.as_deref().unwrap_or(source),
+                    },
+                ],
+                ComposeParams::new(1.0).as_bytes(),
+                Some(mask_f16),
+                w,
+                h,
+            )
+            .await?;
+
+            if opaque {
+                return Ok(composed);
+            }
+            execute_tile_once_async(
+                ctx,
+                &CAST_UNPREMULTIPLY,
+                &[TileInput {
+                    f16_bytes: &composed,
+                }],
+                CastUnpremultiplyParams::new().as_bytes(),
+                None,
                 w,
                 h,
             )

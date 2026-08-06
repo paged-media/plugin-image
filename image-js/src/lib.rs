@@ -2161,7 +2161,8 @@ mod wasm {
     ) -> Result<(), JsValue> {
         let tool = StrokeTool::from_wire(tool).ok_or_else(|| {
             JsValue::from_str(&format!(
-                "unknown paint tool \"{tool}\" (brush | pencil | eraser)"
+                "unknown paint tool \"{tool}\" \
+                 (brush | pencil | eraser | clone | heal)"
             ))
         })?;
         let blend_kernel = blend_kernel(blend).ok_or_else(|| {
@@ -2300,6 +2301,32 @@ mod wasm {
     ///
     /// Either way the result is the same size, so the caller may carry
     /// the selection over with `selection_transfer`.
+    /// Point the IN-FLIGHT clone/heal stroke at its source (the
+    /// alt-click anchor), in image px.
+    ///
+    /// Must be called between `brush_stroke_begin` and the first
+    /// `brush_stroke_extend`: the source offset is fixed at the first
+    /// dab, because an offset that moved mid-stroke would smear the copy
+    /// instead of translating it. Calling it for a non-sampling tool is
+    /// an ERROR rather than a no-op — silently accepting it would let a
+    /// caller believe the brush was cloning.
+    #[wasm_bindgen]
+    pub fn brush_stroke_set_source(x: f32, y: f32, aligned: bool) -> Result<(), JsValue> {
+        STROKE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let session = slot
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
+            if !session.params().tool.samples_image() {
+                return Err(JsValue::from_str(
+                    "only the clone and heal tools read from a source",
+                ));
+            }
+            session.set_clone_source(crate::stroke::CloneSource { x, y, aligned });
+            Ok(())
+        })
+    }
+
     #[wasm_bindgen]
     pub async fn brush_stroke_commit() -> Result<DecodedHandle, JsValue> {
         let session = STROKE

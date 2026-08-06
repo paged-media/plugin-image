@@ -88,6 +88,9 @@ describe("imageBundle.activate", () => {
       "media.paged.image.tool.brush",
       "media.paged.image.tool.pencil",
       "media.paged.image.tool.eraser",
+      // The retouching pair — the brush with a sampled paint layer.
+      "media.paged.image.tool.clone",
+      "media.paged.image.tool.heal",
     ]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);
   });

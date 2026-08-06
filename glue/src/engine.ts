@@ -484,11 +484,33 @@ export type RasterFormat = "png" | "jpeg";
 
 // ─────────────────────────────── PAINT ───────────────────────────────
 
-/** The three painting tools the engine's `brush_stroke_begin` takes
+/** The painting tools the engine's `brush_stroke_begin` takes
  *  (mirrors the Rust `StrokeTool` wire names). */
-export type StrokeTool = "brush" | "pencil" | "eraser";
+export type StrokeTool =
+  | "brush"
+  | "pencil"
+  | "eraser"
+  /** Copies pixels from a source anchor — same tip, spacing, pressure
+   *  and selection masking as the brush; only the paint layer differs. */
+  | "clone"
+  /** A clone whose source is TONE-MATCHED to its destination. The match
+   *  is a mean offset, not a Poisson solve — it removes a uniform tone
+   *  difference and leaves a gradient one, which is why healing across a
+   *  strong ramp still shows a seam. */
+  | "heal";
 
-export const STROKE_TOOLS: StrokeTool[] = ["brush", "pencil", "eraser"];
+export const STROKE_TOOLS: StrokeTool[] = [
+  "brush",
+  "pencil",
+  "eraser",
+  "clone",
+  "heal",
+];
+
+/** The tools that read their paint from the image rather than from a
+ *  colour, and therefore need a source anchor before they deposit
+ *  anything. */
+export const SAMPLING_TOOLS: readonly StrokeTool[] = ["clone", "heal"];
 
 /** What a pen's pressure drives (mirrors the Rust `PressureTarget`). */
 export type PressureTarget = "none" | "size" | "opacity" | "both";
@@ -913,6 +935,12 @@ export interface ImageEngine {
    *  `brushCancel` throws them away — the source was never mutated.
    *  GPU-only: `brushBegin` rejects without a device. */
   brushBegin(handle: number, tool: StrokeTool, params: BrushParams): void;
+  /** Point the in-flight clone/heal stroke at its source (image px).
+   *  Must be called before the first extend — the offset is fixed at the
+   *  first dab, because one that moved mid-stroke would smear the copy.
+   *  THROWS for a non-sampling tool rather than no-op'ing, so a caller
+   *  cannot believe the brush is cloning when it is not. */
+  brushSetSource(x: number, y: number, aligned: boolean): void;
   brushExtend(x: number, y: number, pressure: number): Promise<Uint8Array>;
   /** CLOSE the stroke. With a layer stack bound the painted pixels go
    *  into the ACTIVE LAYER (journaled — undoable), the stack is
@@ -1225,6 +1253,7 @@ export interface ImageWasmModule {
     y: number,
     pressure: number,
   ): Promise<Uint8Array>;
+  brush_stroke_set_source(x: number, y: number, aligned: boolean): void;
   brush_stroke_commit(): Promise<DecodedHandleWasm>;
   brush_stroke_cancel(): void;
   brush_stroke_active(): boolean;
@@ -1600,6 +1629,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         Float32Array.from(p.color),
         p.pressureTarget,
       ),
+    brushSetSource: (x, y, aligned) =>
+      wasm.brush_stroke_set_source(x, y, aligned),
     brushExtend: (x, y, pressure) => wasm.brush_stroke_extend(x, y, pressure),
     async brushCommit() {
       const h = await wasm.brush_stroke_commit();

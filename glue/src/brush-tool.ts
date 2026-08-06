@@ -50,7 +50,7 @@ import type {
   ToolPreviewPolyline,
 } from "@paged-media/plugin-api";
 
-import type { StrokeTool } from "./engine";
+import { SAMPLING_TOOLS, type StrokeTool } from "./engine";
 import type { ImageSession } from "./session";
 import { tipOutline, type BrushPointerType } from "./brush-machine";
 import {
@@ -157,6 +157,16 @@ export function makeBrushGesture(
       const machine = session.brushMachine();
       if (!machine || !e.pagePoint || !fit) return;
       const point = pageToImage(fit, e.pagePoint);
+
+      // ALT-CLICK SETS THE CLONE SOURCE — Photoshop's convention, and
+      // the only interaction the sampling tools add. It is a SEPARATE
+      // gesture, not the start of a stroke: falling through to `down`
+      // would paint the anchor click, which is the one thing a retoucher
+      // never wants.
+      if (SAMPLING_TOOLS.includes(tool) && e.modifiers?.alt) {
+        session.setCloneSource(point);
+        return;
+      }
       if (!machine.down(point, e.pressure, e.pointerType as BrushPointerType))
         return;
       renderTip(point);

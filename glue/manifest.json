@@ -70,7 +70,9 @@
       "media.paged.image.tool.magicWand",
       "media.paged.image.tool.brush",
       "media.paged.image.tool.pencil",
-      "media.paged.image.tool.eraser"
+      "media.paged.image.tool.eraser",
+      "media.paged.image.tool.clone",
+      "media.paged.image.tool.heal"
     ],
     "importers": [
       "media.paged.image.importer.raster"

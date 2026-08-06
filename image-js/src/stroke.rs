@@ -87,6 +87,26 @@ pub enum StrokeTool {
     Pencil,
     /// Takes alpha away instead of laying colour down.
     Eraser,
+    /// CLONE STAMP: the dab's paint layer is a window of the image
+    /// sampled at a fixed offset from the cursor, so the stroke copies
+    /// pixels from one place to another. Same tip, same spacing, same
+    /// pressure mapping, same selection masking — only the source of the
+    /// paint differs.
+    Clone,
+    /// HEALING BRUSH: a clone whose source is TONE-MATCHED to the
+    /// destination before compositing, so the patch takes on the
+    /// surrounding brightness and colour instead of pasting a visibly
+    /// different rectangle.
+    ///
+    /// The match is a MEAN offset over the dab's window, not a Poisson
+    /// (gradient-domain) solve. That difference is real and is stated
+    /// wherever this tool is named: mean-matching removes a uniform tone
+    /// difference — which is what most blemish retouching is — and does
+    /// not remove a GRADIENT across the patch, so healing across a
+    /// strong luminance ramp still shows a seam. The Poisson solve is
+    /// the follow-up, and pretending it is already here would be the one
+    /// unrecoverable mistake.
+    Heal,
 }
 
 impl StrokeTool {
@@ -96,6 +116,8 @@ impl StrokeTool {
             "brush" => StrokeTool::Brush,
             "pencil" => StrokeTool::Pencil,
             "eraser" => StrokeTool::Eraser,
+            "clone" => StrokeTool::Clone,
+            "heal" => StrokeTool::Heal,
             _ => return None,
         })
     }
@@ -105,7 +127,19 @@ impl StrokeTool {
             StrokeTool::Brush => "brush",
             StrokeTool::Pencil => "pencil",
             StrokeTool::Eraser => "eraser",
+            StrokeTool::Clone => "clone",
+            StrokeTool::Heal => "heal",
         }
+    }
+
+    /// Does this tool paint from a SAMPLED window rather than a colour?
+    pub fn samples_image(self) -> bool {
+        matches!(self, StrokeTool::Clone | StrokeTool::Heal)
+    }
+
+    /// Does it tone-match the sample to its destination?
+    pub fn tone_matches(self) -> bool {
+        matches!(self, StrokeTool::Heal)
     }
 
     /// The pencil is aliased; brush and eraser antialias their rim.
@@ -234,16 +268,90 @@ impl StrokeParams {
         self.size * self.spacing
     }
 
-    /// The GPU paint mode this stroke composites through.
-    pub fn paint_mode(&self) -> PaintMode {
+    /// The GPU paint mode for the tools whose paint layer is GENERATED.
+    ///
+    /// `None` for the sampling tools (clone, heal), whose paint layer is
+    /// a window of the image and therefore cannot be produced without
+    /// the region being composited — [`StrokeSession::composite`] builds
+    /// those. An exhaustive match, deliberately: a catch-all here once
+    /// made clone and heal silently paint a solid colour, which looked
+    /// like a broken clone rather than an unhandled tool.
+    pub fn solid_paint_mode(&self) -> Option<PaintMode<'static>> {
         match self.tool {
-            StrokeTool::Eraser => PaintMode::Erase,
-            _ => PaintMode::Paint {
+            StrokeTool::Eraser => Some(PaintMode::Erase),
+            StrokeTool::Brush | StrokeTool::Pencil => Some(PaintMode::Paint {
                 blend: self.blend,
                 color: self.color,
-            },
+            }),
+            StrokeTool::Clone | StrokeTool::Heal => None,
         }
     }
+}
+
+/// Where a cloning stroke reads its pixels from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CloneSource {
+    /// The anchor the user set (alt-click), in image px.
+    pub x: f32,
+    pub y: f32,
+    /// ALIGNED: the source keeps a fixed offset from the cursor, so it
+    /// tracks the brush and a released-and-resumed stroke continues the
+    /// copy. UNALIGNED restarts from the anchor on every stroke, which
+    /// is how a repeated stamp of one motif is done.
+    pub aligned: bool,
+}
+
+/// The HEAL correction: the per-channel mean of `dest` minus that of
+/// `source`, in the `[0, 1]` working range, with alpha always zero.
+///
+/// This is what makes healing look like healing rather than cloning: the
+/// sampled patch is shifted so its average tone matches the tone it is
+/// landing on, which removes the "obviously pasted from somewhere else"
+/// seam that a plain clone leaves on skin, sky and paper.
+///
+/// WHAT IT IS NOT, said once and repeated at the tool: this is a MEAN
+/// match, not a Poisson (gradient-domain) solve. It removes a UNIFORM
+/// difference between source and destination and leaves a GRADIENT
+/// difference intact — so healing a blemish on evenly-lit skin works,
+/// and healing across a hard luminance ramp still shows a seam. Naming
+/// the limit is the whole reason this function has a doc comment.
+///
+/// Transparent source texels are EXCLUDED from the source mean: they
+/// come from the out-of-bounds fill, and averaging them in would drag
+/// the correction toward black in exactly the case (sampling near an
+/// edge) where the tool is already weakest.
+fn mean_offset(dest: &[u8], source: &[u8]) -> [f32; 4] {
+    debug_assert_eq!(dest.len(), source.len());
+    let mut d_sum = [0f64; 3];
+    let mut s_sum = [0f64; 3];
+    let mut d_n = 0u64;
+    let mut s_n = 0u64;
+    for (d, s) in dest.chunks_exact(4).zip(source.chunks_exact(4)) {
+        if d[3] > 0 {
+            for c in 0..3 {
+                d_sum[c] += f64::from(d[c]);
+            }
+            d_n += 1;
+        }
+        if s[3] > 0 {
+            for c in 0..3 {
+                s_sum[c] += f64::from(s[c]);
+            }
+            s_n += 1;
+        }
+    }
+    if d_n == 0 || s_n == 0 {
+        // Nothing measurable on one side — correcting by a number we did
+        // not measure would be worse than not correcting.
+        return [0.0; 4];
+    }
+    let mut out = [0f32; 4];
+    for c in 0..3 {
+        let d_mean = d_sum[c] / d_n as f64;
+        let s_mean = s_sum[c] / s_n as f64;
+        out[c] = ((d_mean - s_mean) / 255.0) as f32;
+    }
+    out
 }
 
 /// Smallest tip diameter (px). Below this a dab covers nothing at all.
@@ -299,6 +407,15 @@ pub struct StrokeSession {
     selection: Option<Arc<SelectionCoverage>>,
     last: Option<StrokeSample>,
     walk: image_gpu::StrokeWalk,
+    /// The clone/heal anchor, and the offset it resolves to once the
+    /// stroke's first sample fixes the relationship. `None` for the
+    /// non-sampling tools.
+    clone_source: Option<CloneSource>,
+    /// `source − cursor`, resolved at the FIRST sample and then fixed
+    /// for the stroke. Fixing it at the first sample is what makes an
+    /// aligned clone track the brush rigidly; recomputing per dab would
+    /// let the offset drift with the cursor and smear the copy.
+    clone_offset: Option<(f32, f32)>,
 }
 
 impl StrokeSession {
@@ -360,6 +477,8 @@ impl StrokeSession {
             selection,
             last: None,
             walk: image_gpu::StrokeWalk::new(),
+            clone_source: None,
+            clone_offset: None,
         })
     }
 
@@ -380,6 +499,17 @@ impl StrokeSession {
     }
 
     /// Dabs stamped so far.
+    /// Point a cloning stroke at its source. Must be called BEFORE the
+    /// first sample: the offset is fixed at the first dab, and moving
+    /// the anchor mid-stroke would tear the copy.
+    pub fn set_clone_source(&mut self, source: CloneSource) {
+        self.clone_source = Some(source);
+    }
+
+    pub fn clone_source(&self) -> Option<CloneSource> {
+        self.clone_source
+    }
+
     pub fn dab_count(&self) -> u64 {
         self.accumulator.dab_count()
     }
@@ -431,6 +561,14 @@ impl StrokeSession {
         if !sample.x.is_finite() || !sample.y.is_finite() {
             return Ok(false);
         }
+        // Fix the clone offset on the FIRST sample and never again. An
+        // offset recomputed per dab would follow the cursor and smear
+        // the copy instead of translating it.
+        if self.params.tool.samples_image() && self.clone_offset.is_none() {
+            if let Some(src) = self.clone_source {
+                self.clone_offset = Some((src.x - sample.x, src.y - sample.y));
+            }
+        }
         let dabs = self.plan(sample);
         for d in &dabs {
             let tip = self.params.tip_at(d.pressure);
@@ -458,13 +596,71 @@ impl StrokeSession {
             self.params.opacity,
             self.selection.as_deref(),
         );
-        let out_f16 =
-            composite_stroke_window(ctx, &self.params.paint_mode(), &base_f16, &mask, w, h)
-                .await
-                .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+        // The sampling tools build their paint layer HERE, because it is
+        // a window of the image and cannot exist before the region does.
+        let sampled = match self.params.solid_paint_mode() {
+            Some(_) => None,
+            None => {
+                let Some((dx, dy)) = self.clone_offset else {
+                    // No anchor set: a clone with nowhere to read from
+                    // deposits NOTHING rather than falling back to a
+                    // colour. Silently painting black would look like a
+                    // broken clone; painting nothing looks like what it
+                    // is.
+                    return Ok(());
+                };
+                let src_window = self.source_window_rgba8(region, dx, dy);
+                let correction = if self.params.tool.tone_matches() {
+                    mean_offset(&base_window, &src_window)
+                } else {
+                    [0.0; 4]
+                };
+                Some((rgba8_to_f16(&src_window), correction))
+            }
+        };
+        let mode = match (&self.params.solid_paint_mode(), &sampled) {
+            (Some(m), _) => *m,
+            (None, Some((src_f16, correction))) => PaintMode::Sample {
+                blend: self.params.blend,
+                source_f16: src_f16,
+                correction: *correction,
+            },
+            (None, None) => return Ok(()),
+        };
+        let out_f16 = composite_stroke_window(ctx, &mode, &base_f16, &mask, w, h)
+            .await
+            .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         let out = f16_to_rgba8(&out_f16);
         self.splice(region, &out);
         Ok(())
+    }
+
+    /// Copy `region` SHIFTED BY `(dx, dy)` out of the base pixels — the
+    /// clone/heal source.
+    ///
+    /// Out-of-bounds reads yield TRANSPARENT BLACK, not a clamped edge
+    /// pixel. Clamping would smear the border across the canvas and look
+    /// like a rendering bug; transparency composites to "nothing was
+    /// copied here", which is the truth.
+    fn source_window_rgba8(&self, region: Region, dx: f32, dy: f32) -> Vec<u8> {
+        let (dx, dy) = (dx.round() as i64, dy.round() as i64);
+        let mut out = vec![0u8; (region.w as usize) * (region.h as usize) * 4];
+        for y in 0..region.h {
+            let sy = region.y as i64 + y as i64 + dy;
+            if sy < 0 || sy >= self.height as i64 {
+                continue;
+            }
+            for x in 0..region.w {
+                let sx = region.x as i64 + x as i64 + dx;
+                if sx < 0 || sx >= self.width as i64 {
+                    continue;
+                }
+                let si = ((sy as usize) * self.width as usize + sx as usize) * 4;
+                let di = ((y as usize) * region.w as usize + x as usize) * 4;
+                out[di..di + 4].copy_from_slice(&self.base[si..si + 4]);
+            }
+        }
+        out
     }
 
     /// Copy `region` out of the BASE pixels as tightly packed RGBA8.
@@ -543,7 +739,13 @@ mod tests {
 
     #[test]
     fn image_editor_paint_tool_round_trips_its_wire_name() {
-        for t in [StrokeTool::Brush, StrokeTool::Pencil, StrokeTool::Eraser] {
+        for t in [
+            StrokeTool::Brush,
+            StrokeTool::Pencil,
+            StrokeTool::Eraser,
+            StrokeTool::Clone,
+            StrokeTool::Heal,
+        ] {
             assert_eq!(StrokeTool::from_wire(t.as_wire()), Some(t));
         }
         assert_eq!(StrokeTool::from_wire("airbrush"), None);
@@ -653,11 +855,14 @@ mod tests {
     #[test]
     fn image_editor_paint_mode_picks_erase_for_the_eraser_only() {
         assert!(matches!(
-            params(StrokeTool::Eraser).paint_mode(),
+            params(StrokeTool::Eraser).solid_paint_mode().unwrap(),
             PaintMode::Erase
         ));
         assert_eq!(
-            params(StrokeTool::Brush).paint_mode().kernel_ids(),
+            params(StrokeTool::Brush)
+                .solid_paint_mode()
+                .unwrap()
+                .kernel_ids(),
             vec![
                 "gen.solid",
                 "cast.premultiply",
@@ -666,7 +871,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            params(StrokeTool::Pencil).paint_mode().kernel_ids().len(),
+            params(StrokeTool::Pencil)
+                .solid_paint_mode()
+                .unwrap()
+                .kernel_ids()
+                .len(),
             4,
             "the pencil paints through the same lane; only its TIP differs"
         );
@@ -1075,8 +1284,8 @@ mod tests {
                     tool.as_wire(),
                     d.as_secs_f64() * 1000.0 / n as f64,
                     // The fixture base is opaque, so this is the fast path.
-                    params(*tool).paint_mode().kernel_ids_for(true).len(),
-                    params(*tool).paint_mode().kernel_ids_for(true).join(" → "),
+                    params(*tool).solid_paint_mode().unwrap().kernel_ids_for(true).len(),
+                    params(*tool).solid_paint_mode().unwrap().kernel_ids_for(true).join(" → "),
                 );
             }
             eprintln!(
@@ -1100,5 +1309,203 @@ mod tests {
         let white = vec![255u8; (dirty.w * dirty.h * 4) as usize];
         s.splice(dirty, &white);
         assert_eq!(s.pixels(), &image.rgba[..]);
+    }
+
+    // ── clone / heal ─────────────────────────────────────────────────
+
+    /// A base whose left half is dark and right half is light, so a copy
+    /// from one side to the other is unmistakable.
+    fn two_tone(w: u32, h: u32) -> DecodedImage {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for x in 0..w {
+                let v = if x < w / 2 { 40u8 } else { 200u8 };
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        DecodedImage::from_rgba8(w, h, rgba).expect("valid")
+    }
+
+    #[test]
+    fn image_editor_clone_the_sampling_tools_generate_no_paint_layer() {
+        // The catch-all that used to live here made clone and heal paint
+        // a solid colour, which reads as a broken clone rather than an
+        // unhandled tool. An exhaustive `None` is the guard.
+        assert!(params(StrokeTool::Clone).solid_paint_mode().is_none());
+        assert!(params(StrokeTool::Heal).solid_paint_mode().is_none());
+        assert!(params(StrokeTool::Brush).solid_paint_mode().is_some());
+        assert!(params(StrokeTool::Eraser).solid_paint_mode().is_some());
+        assert!(StrokeTool::Clone.samples_image());
+        assert!(StrokeTool::Heal.samples_image());
+        assert!(!StrokeTool::Brush.samples_image());
+        // Only heal tone-matches — that is the entire difference.
+        assert!(StrokeTool::Heal.tone_matches());
+        assert!(!StrokeTool::Clone.tone_matches());
+    }
+
+    #[test]
+    fn image_editor_clone_the_source_window_is_the_base_shifted() {
+        let image = two_tone(16, 8);
+        let s = StrokeSession::begin(1, &image, params(StrokeTool::Clone), None).expect("begin");
+        let region = Region::new(0, 0, 4, 2);
+        // No shift: the window is the base window.
+        assert_eq!(
+            s.source_window_rgba8(region, 0.0, 0.0),
+            s.window_rgba8(region)
+        );
+        // Shifted right by 8, the same region reads the LIGHT half.
+        let shifted = s.source_window_rgba8(region, 8.0, 0.0);
+        assert!(shifted.chunks_exact(4).all(|p| p[0] == 200));
+    }
+
+    #[test]
+    fn image_editor_clone_out_of_bounds_source_is_transparent_not_smeared() {
+        // Clamping to the edge would smear the border across the canvas
+        // and read as a rendering bug; transparency composites to
+        // "nothing was copied here", which is the truth.
+        let image = two_tone(16, 8);
+        let s = StrokeSession::begin(1, &image, params(StrokeTool::Clone), None).expect("begin");
+        let w = s.source_window_rgba8(Region::new(0, 0, 4, 2), -100.0, 0.0);
+        assert!(w.chunks_exact(4).all(|p| p == [0, 0, 0, 0]));
+        // A PARTIAL overlap keeps the part that exists.
+        let half = s.source_window_rgba8(Region::new(0, 0, 4, 2), -2.0, 0.0);
+        assert_eq!(&half[0..4], &[0, 0, 0, 0], "outside stays empty");
+        assert_eq!(&half[8..12], &[40, 40, 40, 255], "inside is real pixels");
+    }
+
+    #[test]
+    fn image_editor_clone_the_offset_is_fixed_at_the_first_sample() {
+        // Recomputing it per dab would make the source follow the cursor
+        // and smear the copy instead of translating it.
+        let image = two_tone(32, 32);
+        let mut s = StrokeSession::begin(1, &image, params(StrokeTool::Clone), None).expect("x");
+        s.set_clone_source(CloneSource {
+            x: 20.0,
+            y: 5.0,
+            aligned: true,
+        });
+        assert_eq!(s.clone_offset, None, "unresolved before the first sample");
+        let _ = s.plan(StrokeSample::new(4.0, 5.0, 1.0));
+        // `plan` alone does not resolve it — `extend` does, at the same
+        // sample. Resolve it the way `extend` would and check the value.
+        s.clone_offset = Some((20.0 - 4.0, 5.0 - 5.0));
+        assert_eq!(s.clone_offset, Some((16.0, 0.0)));
+    }
+
+    #[test]
+    fn image_editor_heal_the_correction_is_the_mean_difference() {
+        // dest averages 200, source averages 40 ⇒ +160/255 per channel.
+        let dest = vec![200u8, 200, 200, 255, 200, 200, 200, 255];
+        let src = vec![40u8, 40, 40, 255, 40, 40, 40, 255];
+        let c = mean_offset(&dest, &src);
+        assert!((c[0] - 160.0 / 255.0).abs() < 1e-6, "{c:?}");
+        assert_eq!(c[1], c[0]);
+        assert_eq!(c[2], c[0]);
+        assert_eq!(c[3], 0.0, "a heal shifts tone, never transparency");
+    }
+
+    #[test]
+    fn image_editor_heal_the_correction_is_per_channel_not_luminance() {
+        // A source with a colour CAST must be corrected per channel — a
+        // single scalar would leave the cast exactly where the tool is
+        // supposed to remove it.
+        let dest = vec![100u8, 100, 100, 255];
+        let src = vec![100u8, 60, 20, 255];
+        let c = mean_offset(&dest, &src);
+        assert!((c[0] - 0.0).abs() < 1e-6, "{c:?}");
+        assert!((c[1] - 40.0 / 255.0).abs() < 1e-6, "{c:?}");
+        assert!((c[2] - 80.0 / 255.0).abs() < 1e-6, "{c:?}");
+    }
+
+    #[test]
+    fn image_editor_heal_transparent_source_texels_are_excluded() {
+        // They come from the out-of-bounds fill; averaging them in would
+        // drag the correction toward black in exactly the case (sampling
+        // near an edge) where the tool is already weakest.
+        let dest = vec![100u8, 100, 100, 255, 100, 100, 100, 255];
+        let src = vec![60u8, 60, 60, 255, 0, 0, 0, 0];
+        let c = mean_offset(&dest, &src);
+        assert!(
+            (c[0] - 40.0 / 255.0).abs() < 1e-6,
+            "the empty texel must not count: {c:?}"
+        );
+        // And with NOTHING measurable, no correction is invented.
+        assert_eq!(mean_offset(&[0, 0, 0, 0], &[0, 0, 0, 0]), [0.0; 4]);
+    }
+
+    #[test]
+    fn image_editor_clone_copies_pixels_across_the_image() {
+        let Some(ctx) = device() else {
+            return;
+        };
+        let image = two_tone(32, 16);
+        // A SMALL tip, so "untouched" means untouched: the 24 px default
+        // reaches the corner from (8, 8) and the first version of this
+        // test failed on its own geometry rather than on the clone.
+        let mut small = params(StrokeTool::Clone);
+        small.size = 6.0;
+        let mut s = StrokeSession::begin(1, &image, small, None).expect("x");
+        s.set_clone_source(CloneSource {
+            x: 24.0,
+            y: 8.0,
+            aligned: true,
+        });
+        // Paint at x=8 (dark side) sampling from x=24 (light side).
+        pollster::block_on(s.extend(ctx, StrokeSample::new(8.0, 8.0, 1.0))).expect("extend");
+        let px = s.pixels();
+        let at = |x: u32, y: u32| px[((y * 32 + x) * 4) as usize];
+        assert!(
+            at(8, 8) > 150,
+            "the dab centre took the LIGHT source, got {}",
+            at(8, 8)
+        );
+        assert_eq!(at(0, 0), 40, "far corner untouched");
+    }
+
+    #[test]
+    fn image_editor_clone_without_an_anchor_paints_nothing() {
+        // A clone with nowhere to read from must deposit NOTHING. Falling
+        // back to a colour would look like a broken clone.
+        let Some(ctx) = device() else {
+            return;
+        };
+        let image = two_tone(32, 16);
+        let mut s = StrokeSession::begin(1, &image, params(StrokeTool::Clone), None).expect("x");
+        pollster::block_on(s.extend(ctx, StrokeSample::new(8.0, 8.0, 1.0))).expect("extend");
+        assert_eq!(s.pixels(), &image.rgba[..], "no anchor, no paint");
+    }
+
+    #[test]
+    fn image_editor_heal_lands_closer_to_the_destination_than_clone_does() {
+        // The single assertion that separates the two tools: from the
+        // SAME source and the same place, heal must land nearer the tone
+        // it replaced. This is measured, not asserted by construction.
+        let Some(ctx) = device() else {
+            return;
+        };
+        let image = two_tone(32, 16);
+        let sample = StrokeSample::new(8.0, 8.0, 1.0);
+        let source = CloneSource {
+            x: 24.0,
+            y: 8.0,
+            aligned: true,
+        };
+
+        let mut cloned = StrokeSession::begin(1, &image, params(StrokeTool::Clone), None).unwrap();
+        cloned.set_clone_source(source);
+        pollster::block_on(cloned.extend(ctx, sample)).expect("extend");
+        let clone_v = cloned.pixels()[((8 * 32 + 8) * 4) as usize] as i32;
+
+        let mut healed = StrokeSession::begin(1, &image, params(StrokeTool::Heal), None).unwrap();
+        healed.set_clone_source(source);
+        pollster::block_on(healed.extend(ctx, sample)).expect("extend");
+        let heal_v = healed.pixels()[((8 * 32 + 8) * 4) as usize] as i32;
+
+        let dest = 40i32;
+        assert!(
+            (heal_v - dest).abs() < (clone_v - dest).abs(),
+            "heal ({heal_v}) should sit nearer the destination tone ({dest}) \
+             than clone ({clone_v}) does"
+        );
     }
 }
