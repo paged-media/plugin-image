@@ -1468,6 +1468,8 @@ mod wasm {
                         layer.mask_enabled,
                         if layer.adjust_params().is_some() {
                             "adjustment"
+                        } else if layer.smart_source().is_some() {
+                            "smart"
                         } else {
                             "pixels"
                         },
@@ -1626,6 +1628,90 @@ mod wasm {
             (doc, result)
         })
         .await
+    }
+
+    /// CONVERT a pixel layer into a smart object, preserving its pixels
+    /// as the source. One-way by design: going back would discard the
+    /// source, which is the destructive move this exists to prevent.
+    #[wasm_bindgen]
+    pub fn layers_make_smart(index: usize) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.make_smart(index).map_err(ingest_err))
+    }
+
+    /// RE-RENDER a smart object at `scale` — from its preserved SOURCE,
+    /// never from the current cache, which is the whole point: scaling
+    /// down and back up loses nothing.
+    ///
+    /// GPU-only (the resample is a kernel dispatch). The rendered result
+    /// is letterboxed into the canvas extent, so the layer keeps its
+    /// place in a stack whose layers are all canvas-sized.
+    #[wasm_bindgen]
+    pub async fn layers_render_smart(index: usize, scale: f32) -> Result<(), JsValue> {
+        use half::f16;
+        use image_kernels::families::resample::{ResampleParams, RESAMPLE_MITCHELL};
+
+        if !(scale > 0.0) || scale > 16.0 {
+            return Err(JsValue::from_str(
+                "smart re-render scale must be in (0, 16]",
+            ));
+        }
+        let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
+            JsValue::from_str("smart re-render is GPU-only — call init_gpu first")
+        })?;
+
+        // Read the SOURCE (not the cached render) and the canvas extent.
+        let (src, cw, ch) = LAYERS
+            .with(|l| {
+                let b = l.borrow();
+                let d = b.as_ref()?;
+                let layer = d.stack.layers().get(index)?;
+                let s = layer.smart_source()?;
+                Some((s.clone(), d.stack.width(), d.stack.height()))
+            })
+            .ok_or_else(|| JsValue::from_str(&format!("layer {index} is not a smart object")))?;
+
+        let out_w = ((src.width as f32) * scale).round().max(1.0) as u32;
+        let out_h = ((src.height as f32) * scale).round().max(1.0) as u32;
+
+        let mut win = Vec::with_capacity(src.rgba.len() * 2);
+        for &b in src.rgba.iter() {
+            win.extend_from_slice(&f16::from_f32(b as f32 / 255.0).to_le_bytes());
+        }
+        let params = ResampleParams::new(
+            src.width as f32 / out_w as f32,
+            src.height as f32 / out_h as f32,
+            0.0,
+            0.0,
+        );
+        let rendered = image_gpu::execute_windowed_once_async(
+            &ctx,
+            &RESAMPLE_MITCHELL,
+            &win,
+            src.width,
+            src.height,
+            params.as_bytes(),
+            None,
+            out_w,
+            out_h,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        // f16 window -> straight RGBA8, then letterbox into the canvas.
+        let small = crate::fill::f16_to_rgba8(&rendered);
+        let mut canvas = vec![0u8; (cw as usize) * (ch as usize) * 4];
+        for y in 0..out_h.min(ch) {
+            let srow = (y as usize) * (out_w as usize) * 4;
+            let drow = (y as usize) * (cw as usize) * 4;
+            let n = (out_w.min(cw) as usize) * 4;
+            canvas[drow..drow + n].copy_from_slice(&small[srow..srow + n]);
+        }
+
+        with_stack(|d| {
+            d.stack
+                .set_smart_render(index, Arc::from(canvas.into_boxed_slice()), scale)
+                .map_err(ingest_err)
+        })
     }
 
     /// Insert an ADJUSTMENT LAYER carrying the panel's current chain.

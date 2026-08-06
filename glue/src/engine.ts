@@ -566,9 +566,11 @@ export interface LayerInfo {
   opacity: number;
   /** A `compose.*` wire name (the prefix dropped). */
   blend: string;
-  /** `"pixels"` or `"adjustment"` — an adjustment layer carries no
-   *  pixels of its own and transforms everything beneath it. */
-  kind: "pixels" | "adjustment";
+  /** What the layer contributes. An `adjustment` carries no pixels and
+   *  transforms everything beneath it; a `smart` layer's pixels are a
+   *  cached RENDER of preserved source bytes, so rescaling it is
+   *  lossless. */
+  kind: "pixels" | "adjustment" | "smart";
   /** Whether a layer mask is attached at all. */
   hasMask: boolean;
   /** Whether that mask APPLIES. Disabled keeps the coverage — the two
@@ -869,6 +871,13 @@ export interface ImageEngine {
    *  non-destructive, unlike `layersBakeAdjust`. Returns its index.
    *  Throws at identity rather than adding a row that does nothing. */
   layersAddAdjustment(name: string, params: AdjustParams): number;
+  /** Convert a pixel layer into a smart object, preserving its pixels
+   *  as the source. One-way: going back would discard the source. */
+  layerMakeSmart(index: number): void;
+  /** Re-render a smart object at `scale` FROM ITS SOURCE, never from the
+   *  current cache — which is what makes scaling down and back up
+   *  lossless. GPU-only. */
+  layerRenderSmart(index: number, scale: number): Promise<void>;
   /** Make the current selection this layer's mask — the natural
    *  authoring path (a selection and a mask are the same coverage). */
   layerMaskFromSelection(index: number): void;
@@ -1147,6 +1156,8 @@ export interface ImageWasmModule {
     invert: boolean,
     ext: Float32Array,
   ): number;
+  layers_make_smart(index: number): void;
+  layers_render_smart(index: number, scale: number): Promise<void>;
   layers_mask_from_selection(index: number): void;
   layers_clear_mask(index: number): void;
   layers_set_mask_enabled(index: number, enabled: boolean): void;
@@ -1504,6 +1515,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       wasm.layers_set_opacity(index, opacity),
     layerSetName: (index, name) => wasm.layers_set_name(index, name),
     layerSetBlend: (index, blend) => wasm.layers_set_blend(index, blend),
+    layerMakeSmart: (index) => wasm.layers_make_smart(index),
+    layerRenderSmart: (index, scale) => wasm.layers_render_smart(index, scale),
     layerMaskFromSelection: (index) => wasm.layers_mask_from_selection(index),
     layerClearMask: (index) => wasm.layers_clear_mask(index),
     layerSetMaskEnabled: (index, enabled) =>

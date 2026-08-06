@@ -160,6 +160,34 @@ pub enum LayerKind {
     /// Boxed because `AdjustParams` is much larger than a discriminant
     /// and every pixel layer would otherwise pay for it.
     Adjustment(Box<AdjustParams>),
+    /// A SMART OBJECT: the layer's pixels are a cached RENDER of
+    /// preserved source bytes at a scale, not the source itself.
+    ///
+    /// The distinction is the entire point. A pixel layer scaled to 25%
+    /// and back to 100% has lost three quarters of its information for
+    /// good; a smart object re-renders from `source` at the new scale,
+    /// so the round trip is lossless and the original survives every
+    /// edit. §32 decision 5 warns to add this model "before many
+    /// destructive features, or later migration becomes expensive" —
+    /// which is why it is a layer KIND rather than a wrapper: order,
+    /// opacity, blend, visibility and the mask keep meaning exactly what
+    /// they mean for every other layer.
+    Smart(Box<SmartSource>),
+}
+
+/// The preserved original behind a smart object, plus the scale its
+/// cached pixels were rendered at.
+#[derive(Debug, Clone)]
+pub struct SmartSource {
+    /// The ORIGINAL, at its own resolution. Never resampled in place —
+    /// every re-render reads this.
+    pub rgba: Arc<[u8]>,
+    pub width: u32,
+    pub height: u32,
+    /// The scale the layer's current `rgba` was rendered at (1.0 = the
+    /// source's own size). Kept so a re-render knows what changed and a
+    /// UI can show it.
+    pub scale: f32,
 }
 
 /// One pixel layer: canvas-extent straight RGBA8 plus the four
@@ -230,14 +258,27 @@ impl Layer {
 
     /// Does this layer carry pixels of its own?
     pub fn is_pixels(&self) -> bool {
-        matches!(self.kind, LayerKind::Pixels)
+        // A smart object's CACHED RENDER is pixels as far as the fold is
+        // concerned; what makes it smart is where those pixels came from
+        // and that they can be regenerated, not how they composite.
+        matches!(self.kind, LayerKind::Pixels | LayerKind::Smart(_))
+    }
+
+    /// The preserved source behind a smart object.
+    pub fn smart_source(&self) -> Option<&SmartSource> {
+        match &self.kind {
+            LayerKind::Smart(s) => Some(s),
+            _ => None,
+        }
     }
 
     /// The adjust parameters when this is an adjustment layer.
     pub fn adjust_params(&self) -> Option<&AdjustParams> {
         match &self.kind {
             LayerKind::Adjustment(p) => Some(p),
-            LayerKind::Pixels => None,
+            // A smart object contributes PIXELS (its cached render), not
+            // a transform of the backdrop — so it has no adjust params.
+            LayerKind::Pixels | LayerKind::Smart(_) => None,
         }
     }
 
@@ -456,6 +497,74 @@ impl LayerStack {
         at
     }
 
+    /// CONVERT a pixel layer into a smart object, preserving its current
+    /// pixels as the source. From here a rescale is lossless: the render
+    /// comes from `source`, never from the previous render.
+    ///
+    /// Converting is one-way by design. Going back would mean discarding
+    /// the source, and a "convert to pixels" that silently threw away
+    /// the original is exactly the destructive move this rung exists to
+    /// prevent — rasterize by baking into a NEW pixel layer instead.
+    pub fn make_smart(&mut self, index: usize) -> Result<(), IngestError> {
+        let (w, h) = (self.width, self.height);
+        let layer = self.layer_mut(index)?;
+        if matches!(layer.kind, LayerKind::Adjustment(_)) {
+            return Err(IngestError::Unsupported(format!(
+                "layer {index} is an adjustment layer, which has no pixels to preserve"
+            )));
+        }
+        if layer.smart_source().is_some() {
+            return Ok(()); // already smart — idempotent, not an error
+        }
+        layer.kind = LayerKind::Smart(Box::new(SmartSource {
+            rgba: Arc::clone(&layer.rgba),
+            width: w,
+            height: h,
+            scale: 1.0,
+        }));
+        Ok(())
+    }
+
+    /// Record a re-render of a smart object at `scale`.
+    ///
+    /// The CALLER does the resampling (it is a GPU kernel dispatch and
+    /// this module holds no device), but the invariant lives here: the
+    /// source is never replaced, only the cached render is. That is what
+    /// makes scaling down and back up lossless, and it is asserted
+    /// directly in the tests.
+    pub fn set_smart_render(
+        &mut self,
+        index: usize,
+        rendered: Arc<[u8]>,
+        scale: f32,
+    ) -> Result<(), IngestError> {
+        let want = (self.width as usize) * (self.height as usize) * 4;
+        if rendered.len() != want {
+            return Err(IngestError::Unsupported(format!(
+                "smart render is {} bytes but the canvas needs {want}",
+                rendered.len()
+            )));
+        }
+        let layer = self.layer_mut(index)?;
+        match &mut layer.kind {
+            LayerKind::Smart(src) => {
+                src.scale = scale;
+                layer.rgba = rendered;
+                Ok(())
+            }
+            _ => Err(IngestError::Unsupported(format!(
+                "layer {index} is not a smart object"
+            ))),
+        }
+    }
+
+    /// Whether `index` is a smart object.
+    pub fn is_smart(&self, index: usize) -> bool {
+        self.layers
+            .get(index)
+            .is_some_and(|l| l.smart_source().is_some())
+    }
+
     /// Retune an existing adjustment layer. Errors on a pixel layer
     /// rather than silently converting it — a conversion would discard
     /// pixels, which is the one thing this whole feature exists to avoid.
@@ -470,7 +579,7 @@ impl LayerStack {
                 **p = params;
                 Ok(())
             }
-            LayerKind::Pixels => Err(IngestError::Unsupported(format!(
+            LayerKind::Pixels | LayerKind::Smart(_) => Err(IngestError::Unsupported(format!(
                 "layer {index} holds pixels, not an adjustment"
             ))),
         }
@@ -1122,6 +1231,111 @@ mod tests {
                 }
             })
             .as_ref()
+    }
+
+    // ── smart objects ────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_converting_to_smart_preserves_the_pixels_as_source() {
+        let mut s = stack(4, 4);
+        let before = s.active().rgba.to_vec();
+        s.make_smart(0).expect("convert");
+        assert!(s.is_smart(0));
+        let src = s.layers[0].smart_source().expect("source");
+        assert_eq!(src.rgba.to_vec(), before, "the source IS the pixels it had");
+        assert_eq!(src.scale, 1.0);
+        assert!(
+            s.layers[0].is_pixels(),
+            "and it still contributes pixels to the fold"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_making_smart_twice_is_idempotent() {
+        // Not an error, and — critically — it must not re-capture the
+        // CURRENT render as the new source, which would quietly bake in
+        // whatever scaling had happened.
+        let mut s = stack(4, 4);
+        s.make_smart(0).expect("first");
+        s.set_smart_render(0, px(4, 4, 200), 0.25).expect("render");
+        s.make_smart(0).expect("second is a no-op");
+        let src = s.layers[0].smart_source().expect("source");
+        assert_eq!(src.scale, 0.25, "the recorded scale survived");
+        assert!(
+            src.rgba.iter().all(|&b| b == 128),
+            "and the source is still the ORIGINAL, not the 0.25 render"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_an_adjustment_layer_cannot_become_smart() {
+        // It has no pixels to preserve, so the conversion would invent a
+        // source out of a transparent placeholder.
+        let mut s = stack(4, 4);
+        let at = s.add_adjustment("Brighten", bright(0.2));
+        let err = s.make_smart(at).expect_err("refused");
+        assert!(err.to_string().contains("no pixels to preserve"));
+    }
+
+    #[test]
+    fn image_editor_layers_rescaling_a_smart_object_is_lossless() {
+        // THE property, stated as a test. Scale down hard, then back up:
+        // a pixel layer would have lost the information for good, but the
+        // smart object re-renders FROM SOURCE, so what the caller renders
+        // at 1.0 is derived from the original bytes — not from the 0.1
+        // render. The stack's job is to never replace the source, and
+        // that is what this asserts.
+        let mut s = stack(8, 8);
+        let original = s.active().rgba.to_vec();
+        s.make_smart(0).expect("convert");
+
+        // A brutal round trip through the cache.
+        s.set_smart_render(0, px(8, 8, 3), 0.1).expect("down");
+        s.set_smart_render(0, px(8, 8, 250), 1.0).expect("back up");
+
+        let src = s.layers[0].smart_source().expect("source");
+        assert_eq!(
+            src.rgba.to_vec(),
+            original,
+            "the source survived both renders untouched — this is what makes \
+             the round trip lossless, since the next render reads it and not \
+             the 0.1 cache"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_smart_render_must_match_the_canvas() {
+        let mut s = stack(4, 4);
+        s.make_smart(0).expect("convert");
+        let err = s
+            .set_smart_render(0, px(2, 2, 0), 0.5)
+            .expect_err("size mismatch refused");
+        assert!(err.to_string().contains("canvas needs"));
+    }
+
+    #[test]
+    fn image_editor_layers_only_a_smart_object_takes_a_smart_render() {
+        let mut s = stack(4, 4);
+        let err = s
+            .set_smart_render(0, px(4, 4, 1), 0.5)
+            .expect_err("a plain pixel layer refuses");
+        assert!(err.to_string().contains("not a smart object"));
+    }
+
+    #[test]
+    fn image_editor_layers_a_smart_object_composites_like_any_other() {
+        // Being smart changes where its pixels COME FROM, not how they
+        // blend — so the fold must treat it exactly like a pixel layer.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let plain = pollster::block_on(s.composite(Some(ctx), None)).expect("plain");
+        s.make_smart(0).expect("convert");
+        let smart = pollster::block_on(s.composite(Some(ctx), None)).expect("smart");
+        assert_eq!(
+            smart.to_vec(),
+            plain.to_vec(),
+            "conversion alone changes no pixel"
+        );
     }
 
     // ── adjustment layers ────────────────────────────────────────────

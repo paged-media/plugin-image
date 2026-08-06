@@ -304,6 +304,11 @@ export interface ImageSession {
   setLayerMaskEnabled(index: number, enabled: boolean): Promise<boolean>;
   /** Delete the mask outright. */
   clearLayerMask(index: number): Promise<boolean>;
+  /** Convert a pixel layer into a smart object (one-way — the source is
+   *  preserved and going back would discard it). */
+  makeLayerSmart(index: number): Promise<boolean>;
+  /** Re-render a smart object at `scale` from its preserved source. */
+  renderLayerSmart(index: number, scale: number): Promise<boolean>;
   setLayerName(index: number, name: string): boolean;
   /** BAKE the panel's adjustment chain destructively into the ACTIVE
    *  layer (journaled, so undoable). The chain is otherwise a
@@ -1680,6 +1685,48 @@ export function createImageSession(host: BundleHost): ImageSession {
         return false;
       }
       return finishMaskEdit();
+    },
+
+    async makeLayerSmart(index) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerMakeSmart(index);
+      } catch (err) {
+        setStatus(
+          `Convert to smart object failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      refreshLayers();
+      emit();
+      // Converting alone changes no pixel, so there is nothing to
+      // re-composite — unlike a mask edit.
+      return true;
+    },
+
+    async renderLayerSmart(index, scale) {
+      if (!engine || !state.source) return false;
+      state.busy = true;
+      emit();
+      try {
+        await engine.layerRenderSmart(index, scale);
+      } catch (err) {
+        setStatus(
+          `Smart re-render failed: ${err instanceof Error ? err.message : err}`,
+        );
+        state.busy = false;
+        emit();
+        return false;
+      }
+      state.busy = false;
+      const ok = await finishMaskEdit();
+      if (ok) {
+        setStatus(
+          `Re-rendered from the preserved source at ${Math.round(scale * 100)}% — ` +
+            "scaling a smart object never loses the original.",
+        );
+      }
+      return ok;
     },
 
     async clearLayerMask(index) {
