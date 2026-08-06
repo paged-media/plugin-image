@@ -256,7 +256,10 @@ export function isIdentity(p: AdjustParams): boolean {
 
 function filtersIdentity(p: AdjustParams): boolean {
   return (
-    p.blurSigma === 0 && p.sharpenAmount === 0 && p.hueDegrees === 0 && !p.invert
+    p.blurSigma === 0 &&
+    p.sharpenAmount === 0 &&
+    p.hueDegrees === 0 &&
+    !p.invert
   );
 }
 
@@ -434,7 +437,11 @@ export type DisplayTreatment = "managed" | "assumed-srgb" | "profile-rejected";
 
 /** Map the wasm discriminant (image-js `display_code`) to the name. */
 export function displayTreatmentOf(code: number | undefined): DisplayTreatment {
-  return code === 0 ? "managed" : code === 2 ? "profile-rejected" : "assumed-srgb";
+  return code === 0
+    ? "managed"
+    : code === 2
+      ? "profile-rejected"
+      : "assumed-srgb";
 }
 
 /** A short phrase for the panel's colour row. */
@@ -454,11 +461,7 @@ export type ResampleFilter = "nearest" | "mitchell" | "lanczos3";
 /** Which `gen.*` gradient the fill door dispatches (the wire names the
  *  Rust `GradientKind::from_wire` decodes). */
 export type GradientKind =
-  | "linear"
-  | "radial"
-  | "angular"
-  | "reflected"
-  | "diamond";
+  "linear" | "radial" | "angular" | "reflected" | "diamond";
 
 export const GRADIENT_KINDS: GradientKind[] = [
   "linear",
@@ -563,6 +566,11 @@ export interface LayerInfo {
   opacity: number;
   /** A `compose.*` wire name (the prefix dropped). */
   blend: string;
+  /** Whether a layer mask is attached at all. */
+  hasMask: boolean;
+  /** Whether that mask APPLIES. Disabled keeps the coverage — the two
+   *  are different states and the panel shows both. */
+  maskEnabled: boolean;
 }
 
 export interface LayerStackInfo {
@@ -653,7 +661,11 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** Hit-test the crop chrome (the nearest grip within `tol`, else Move
    *  inside the body, else -1). Pure geometry from `image_core::crop`. */
-  cropHitHandle(rect: CropRect, point: [number, number], tol: number): CropHandle;
+  cropHitHandle(
+    rect: CropRect,
+    point: [number, number],
+    tol: number,
+  ): CropHandle;
   /** Apply a pointer drag at `handle` to the crop rect, with the aspect
    *  lock + image-extent clamp. Returns the new rect. */
   cropApplyDrag(
@@ -739,11 +751,26 @@ export interface ImageEngine {
    *  automatically masks when a non-trivial selection exists. */
   selectionBind(handle: number): void;
   /** Marquee rect `[x, x+w) × [y, y+h)` (image px, fractional = AA edge). */
-  selectionSetRect(x: number, y: number, w: number, h: number, mode: SelectionMode): void;
+  selectionSetRect(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    mode: SelectionMode,
+  ): void;
   /** Marquee ellipse: center + radii (image px), AA edge. */
-  selectionSetEllipse(cx: number, cy: number, rx: number, ry: number, mode: SelectionMode): void;
+  selectionSetEllipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    mode: SelectionMode,
+  ): void;
   /** Lasso: a closed polygon of `[x, y]` image-px vertices (≥ 3). */
-  selectionSetPolygon(points: Array<[number, number]>, mode: SelectionMode): void;
+  selectionSetPolygon(
+    points: Array<[number, number]>,
+    mode: SelectionMode,
+  ): void;
   /** Magic wand at an integer image-px seed. `tolerance` is per-channel
    *  0–255 (Chebyshev over RGBA); `contiguous` = 4-connected flood. */
   selectionMagicWand(
@@ -835,6 +862,13 @@ export interface ImageEngine {
   /** Set the blend by `compose.*` wire name; an unregistered name
    *  THROWS rather than silently becoming normal. */
   layerSetBlend(index: number, blend: string): void;
+  /** Make the current selection this layer's mask — the natural
+   *  authoring path (a selection and a mask are the same coverage). */
+  layerMaskFromSelection(index: number): void;
+  /** DELETE the mask; distinct from disabling it. */
+  layerClearMask(index: number): void;
+  /** Toggle whether the mask applies, retaining the coverage. */
+  layerSetMaskEnabled(index: number, enabled: boolean): void;
   /** Fold the stack and write the result into the bound image; returns
    *  the straight RGBA8. GPU-only whenever there is anything to blend; a
    *  single plain visible layer needs no device at all. */
@@ -873,7 +907,11 @@ export interface ImageWasmModule {
   init_gpu(): Promise<void>;
   gpu_ready(): boolean;
   decode_image(bytes: Uint8Array): DecodedHandleWasm;
-  ingest_rgba8(width: number, height: number, bytes: Uint8Array): DecodedHandleWasm;
+  ingest_rgba8(
+    width: number,
+    height: number,
+    bytes: Uint8Array,
+  ): DecodedHandleWasm;
   adjust_image(
     handle: number,
     exposure_ev: number,
@@ -926,7 +964,11 @@ export interface ImageWasmModule {
     c0: Float32Array,
     c1: Float32Array,
   ): Promise<DecodedHandleWasm>;
-  fill_noise(handle: number, amount: number, seed: number): Promise<DecodedHandleWasm>;
+  fill_noise(
+    handle: number,
+    amount: number,
+    seed: number,
+  ): Promise<DecodedHandleWasm>;
   encode_image(
     rgba: Uint8Array,
     width: number,
@@ -1003,8 +1045,20 @@ export interface ImageWasmModule {
     filter: string,
   ): Promise<DecodedHandleWasm>;
   selection_bind(handle: number): void;
-  selection_set_rect(x: number, y: number, w: number, h: number, mode: number): void;
-  selection_set_ellipse(cx: number, cy: number, rx: number, ry: number, mode: number): void;
+  selection_set_rect(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    mode: number,
+  ): void;
+  selection_set_ellipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    mode: number,
+  ): void;
   selection_set_polygon(points_flat: Float32Array, mode: number): void;
   selection_magic_wand(
     x: number,
@@ -1033,7 +1087,11 @@ export interface ImageWasmModule {
     color: Float32Array,
     pressure_target: string,
   ): void;
-  brush_stroke_extend(x: number, y: number, pressure: number): Promise<Uint8Array>;
+  brush_stroke_extend(
+    x: number,
+    y: number,
+    pressure: number,
+  ): Promise<Uint8Array>;
   brush_stroke_commit(): Promise<DecodedHandleWasm>;
   brush_stroke_cancel(): void;
   brush_stroke_active(): boolean;
@@ -1062,6 +1120,9 @@ export interface ImageWasmModule {
   layers_set_opacity(index: number, opacity: number): void;
   layers_set_name(index: number, name: string): void;
   layers_set_blend(index: number, blend: string): void;
+  layers_mask_from_selection(index: number): void;
+  layers_clear_mask(index: number): void;
+  layers_set_mask_enabled(index: number, enabled: boolean): void;
   layers_composite(): Promise<Uint8Array>;
   layers_bake_adjust(
     exposure_ev: number,
@@ -1132,7 +1193,13 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       // the FULL panel set (WB / levels / curves) routes to the extended
       // surface, passing the curve LUT (empty = no curve).
       if (isBaseOnly(p)) {
-        return wasm.adjust_image(handle, p.exposureEv, p.brightness, p.contrast, p.saturation);
+        return wasm.adjust_image(
+          handle,
+          p.exposureEv,
+          p.brightness,
+          p.contrast,
+          p.saturation,
+        );
       }
       // One extended door for the whole panel set — the flat ext block
       // carries the kernel-breadth stages so the boundary does not grow
@@ -1201,10 +1268,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       return info;
     },
     psdOpen: (bytes) => wasm.psd_open(bytes),
-    psdLayers: (handle) => JSON.parse(wasm.psd_layer_list(handle)) as PsdLayerInfo[],
+    psdLayers: (handle) =>
+      JSON.parse(wasm.psd_layer_list(handle)) as PsdLayerInfo[],
     psdSetLayerOpacity: (handle, layer, opacity) =>
       wasm.psd_set_layer_opacity(handle, layer, opacity),
-    psdSetLayerName: (handle, layer, name) => wasm.psd_set_layer_name(handle, layer, name),
+    psdSetLayerName: (handle, layer, name) =>
+      wasm.psd_set_layer_name(handle, layer, name),
     psdRemoveLayer: (handle, layer) => wasm.psd_remove_layer(handle, layer),
     psdSave: (handle) => wasm.psd_save(handle),
     psdClose: (handle) => wasm.psd_close(handle),
@@ -1252,7 +1321,15 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       return info;
     },
     cropHitHandle: (rect, point, tol) =>
-      wasm.crop_hit_handle(rect.x, rect.y, rect.w, rect.h, point[0], point[1], tol),
+      wasm.crop_hit_handle(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        point[0],
+        point[1],
+        tol,
+      ),
     cropApplyDrag(rect, handle, start, point, aspect, imageW, imageH) {
       const out = wasm.crop_apply_drag(
         rect.x,
@@ -1272,7 +1349,13 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       return { x: out[0], y: out[1], w: out[2], h: out[3] };
     },
     cropFrameCorners(rect, degrees) {
-      const f = wasm.crop_frame_corners(rect.x, rect.y, rect.w, rect.h, degrees);
+      const f = wasm.crop_frame_corners(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        degrees,
+      );
       return [
         [f[0], f[1]],
         [f[2], f[3]],
@@ -1304,7 +1387,13 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       wasm.selection_set_polygon(flat, selectionModeCode(mode));
     },
     selectionMagicWand: (x, y, tolerance, contiguous, mode) =>
-      wasm.selection_magic_wand(x, y, tolerance, contiguous, selectionModeCode(mode)),
+      wasm.selection_magic_wand(
+        x,
+        y,
+        tolerance,
+        contiguous,
+        selectionModeCode(mode),
+      ),
     selectionFeather: (sigma) => wasm.selection_feather(sigma),
     selectionSelectAll: () => wasm.selection_select_all(),
     selectionClear: () => wasm.selection_clear(),
@@ -1313,7 +1402,14 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       // Rust returns [has, x, y, w, h, fraction, revision] (7 f32s).
       const s = wasm.selection_stats();
       if (s.length < 7 || s[0] === 0) return null;
-      return { x: s[1], y: s[2], w: s[3], h: s[4], coverage: s[5], revision: s[6] };
+      return {
+        x: s[1],
+        y: s[2],
+        w: s[3],
+        h: s[4],
+        coverage: s[5],
+        revision: s[6],
+      };
     },
     selectionCoverageBytes: () => wasm.selection_coverage_bytes(),
     selectionTransfer: (handle) => wasm.selection_transfer(handle),
@@ -1374,11 +1470,17 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layerRemove: (index) => wasm.layers_remove(index),
     layerReorder: (from, to) => wasm.layers_reorder(from, to),
     layerSetActive: (index) => wasm.layers_set_active(index),
-    layerSetVisible: (index, visible) => wasm.layers_set_visible(index, visible),
+    layerSetVisible: (index, visible) =>
+      wasm.layers_set_visible(index, visible),
     layerSetLocked: (index, locked) => wasm.layers_set_locked(index, locked),
-    layerSetOpacity: (index, opacity) => wasm.layers_set_opacity(index, opacity),
+    layerSetOpacity: (index, opacity) =>
+      wasm.layers_set_opacity(index, opacity),
     layerSetName: (index, name) => wasm.layers_set_name(index, name),
     layerSetBlend: (index, blend) => wasm.layers_set_blend(index, blend),
+    layerMaskFromSelection: (index) => wasm.layers_mask_from_selection(index),
+    layerClearMask: (index) => wasm.layers_clear_mask(index),
+    layerSetMaskEnabled: (index, enabled) =>
+      wasm.layers_set_mask_enabled(index, enabled),
     layersComposite: () => wasm.layers_composite(),
     layersBakeAdjust: (p) =>
       // The SAME wire the preview chain uses (`adjust_image_ext` minus
@@ -1443,9 +1545,7 @@ async function loadModule(): Promise<ImageWasmModule> {
     // Resolve through the manifest package's exports map (the artifact
     // lives in a SIBLING workspace package, unlike sheets' ../bin).
     const require = createRequire(import.meta.url);
-    const wasmPath = require.resolve(
-      "../wasm/image_js_bg.wasm",
-    );
+    const wasmPath = require.resolve("../wasm/image_js_bg.wasm");
     const bytes = await readFile(
       wasmPath.startsWith("file:") ? fileURLToPath(wasmPath) : wasmPath,
     );

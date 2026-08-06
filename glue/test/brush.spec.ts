@@ -47,10 +47,20 @@ import {
   type BrushSample,
 } from "../src/brush-machine";
 import { makeBrushGesture } from "../src/brush-tool";
-import { DEFAULT_BRUSH_PARAMS, wrapEngine, type ImageWasmModule } from "../src/engine";
+import {
+  DEFAULT_BRUSH_PARAMS,
+  wrapEngine,
+  type ImageWasmModule,
+} from "../src/engine";
 import { createImageSession, type ImageSession } from "../src/session";
 import { BRUSH_SCOPE_NOTE, BrushSection } from "../src/panels/image-panel";
-import { makeFakeEditor, mapBacking, psdBytes, shellStub, silentConsole } from "./helpers";
+import {
+  makeFakeEditor,
+  mapBacking,
+  psdBytes,
+  shellStub,
+  silentConsole,
+} from "./helpers";
 
 function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
   return createBundleHost(() => fake.editor, manifestJson as PluginManifest, {
@@ -60,7 +70,10 @@ function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
   });
 }
 
-function geomFor(id: string, bounds: [number, number, number, number]): ElementGeometryItem {
+function geomFor(
+  id: string,
+  bounds: [number, number, number, number],
+): ElementGeometryItem {
   return { id: { kind: "rectangle", id } as never, pageId: "pg1", bounds };
 }
 
@@ -112,7 +125,12 @@ describe("the brush machine (pure — no engine, no host)", () => {
     const m = createBrushMachine();
     expect(m.state().drawing).toBe(false);
     expect(m.down([4, 5], 0.5, "mouse")).toBe(true);
-    expect(m.state()).toEqual({ drawing: true, ended: false, sampleCount: 1, queued: 1 });
+    expect(m.state()).toEqual({
+      drawing: true,
+      ended: false,
+      sampleCount: 1,
+      queued: 1,
+    });
     expect(m.next()).toEqual({ x: 4, y: 5, pressure: 1 });
     expect(m.next()).toBeNull();
   });
@@ -189,7 +207,12 @@ describe("the brush machine (pure — no engine, no host)", () => {
     m.down([0, 0], 0.5, "mouse");
     m.move([5, 5], 0.5, "mouse");
     m.cancel();
-    expect(m.state()).toEqual({ drawing: false, ended: false, sampleCount: 0, queued: 0 });
+    expect(m.state()).toEqual({
+      drawing: false,
+      ended: false,
+      sampleCount: 0,
+      queued: 0,
+    });
     expect(m.next()).toBeNull();
     expect(m.drained()).toBe(false);
     // …and the machine is reusable for the next stroke.
@@ -239,7 +262,12 @@ describe("the engine facade's brush doors", () => {
       },
       // Async since the layer lane: the commit writes into the active
       // layer and re-composites the stack before it answers.
-      brush_stroke_commit: async () => ({ handle: 9, width: 4, height: 2, free() {} }),
+      brush_stroke_commit: async () => ({
+        handle: 9,
+        width: 4,
+        height: 2,
+        free() {},
+      }),
       brush_stroke_cancel: () => {
         calls.push({ fn: "cancel", args: [] });
       },
@@ -270,25 +298,37 @@ describe("the engine facade's brush doors", () => {
       pressureTarget: "size",
     });
     expect(calls[0].fn).toBe("begin");
-    const [handle, tool, size, hardness, opacity, flow, spacing, blend, color, target] =
-      calls[0].args;
-    expect([handle, tool, size, hardness, opacity, flow, spacing, blend, target]).toEqual([
-      3,
-      "pencil",
-      12,
-      0.25,
-      0.8,
-      0.6,
-      0.1,
-      "multiply",
-      "size",
-    ]);
+    const [
+      handle,
+      tool,
+      size,
+      hardness,
+      opacity,
+      flow,
+      spacing,
+      blend,
+      color,
+      target,
+    ] = calls[0].args;
+    expect([
+      handle,
+      tool,
+      size,
+      hardness,
+      opacity,
+      flow,
+      spacing,
+      blend,
+      target,
+    ]).toEqual([3, "pencil", 12, 0.25, 0.8, 0.6, 0.1, "multiply", "size"]);
     expect(Array.from(color as Float32Array)).toEqual([1, 0, 0.5, 1]);
   });
 
   it("commit hands back the engine handle and frees the wrapper", async () => {
     const { engine } = fakeWasm();
-    expect(await engine.brushExtend(1, 2, 0.5)).toEqual(new Uint8Array([1, 2, 3, 4]));
+    expect(await engine.brushExtend(1, 2, 0.5)).toEqual(
+      new Uint8Array([1, 2, 3, 4]),
+    );
     // `display` joined DecodedInfo with CMS rung 1. The fake wasm handle
     // carries no `display` field, which is exactly an older engine build —
     // so this also pins the fallback: unknown reads as "sRGB assumed",
@@ -407,7 +447,9 @@ describe("the paint gesture", () => {
     const { handle, gesture, calls } = await gestureFixture();
     gesture.onPointerDown(ev([0, 0], { pointerType: "pen", pressure: 0.25 }));
     await tick();
-    gesture.onPointerMove(ev([100, 100], { pointerType: "pen", pressure: 0.75 }));
+    gesture.onPointerMove(
+      ev([100, 100], { pointerType: "pen", pressure: 0.75 }),
+    );
     await tick();
     gesture.onPointerUp(ev([100, 100], { pointerType: "pen", pressure: 0.75 }));
     await tick();
@@ -421,7 +463,9 @@ describe("the paint gesture", () => {
   });
 
   it("a refused begin (no GPU, nothing ingested) paints nothing at all", async () => {
-    const { handle, gesture, calls, machine } = await gestureFixture(async () => false);
+    const { handle, gesture, calls, machine } = await gestureFixture(
+      async () => false,
+    );
     gesture.onPointerDown(ev([0, 0]));
     await tick();
     gesture.onPointerMove(ev([100, 100]));
@@ -545,7 +589,8 @@ describe("the paint session (real engine wasm, no GPU in Node)", () => {
 /** Render a pure element tree to its text, executing the (hook-free)
  *  function components it contains. No react-dom needed. */
 function textOf(node: unknown, out: string[] = []): string[] {
-  if (node === null || node === undefined || typeof node === "boolean") return out;
+  if (node === null || node === undefined || typeof node === "boolean")
+    return out;
   if (typeof node === "string" || typeof node === "number") {
     out.push(String(node));
     return out;
@@ -595,7 +640,9 @@ describe("the panel's Brush section", () => {
   });
 
   it("populates the blend picker from the engine list it is handed", () => {
-    expect(render({ blendModes: ["normal", "vivid-light"] })).toContain("vivid-light");
+    expect(render({ blendModes: ["normal", "vivid-light"] })).toContain(
+      "vivid-light",
+    );
     // …and says so honestly when the engine has not booted, rather than
     // showing a plausible-looking hardcoded list.
     expect(render({ blendModes: [] })).toContain("engine not booted");
@@ -604,7 +651,10 @@ describe("the panel's Brush section", () => {
   it("names the selection clip and the in-flight stroke readout", () => {
     expect(render({ masked: true })).toContain("clipped to the selection");
     expect(
-      render({ strokeActive: true, strokeStats: { dabs: 12, x: 3, y: 4, w: 20, h: 30 } }),
+      render({
+        strokeActive: true,
+        strokeStats: { dabs: 12, x: 3, y: 4, w: 20, h: 30 },
+      }),
     ).toContain("12 dabs · 3,4 20×30");
   });
 
@@ -641,7 +691,9 @@ describe("the panel's Brush section", () => {
     expect(BRUSH_SCOPE_NOTE).toContain("can be abandoned");
     // The live preview's honest seam — now the whole stack, not one buffer.
     expect(BRUSH_SCOPE_NOTE).toContain("the whole stack");
-    expect(BRUSH_SCOPE_NOTE).toContain("the adjustment chain re-runs on release");
+    expect(BRUSH_SCOPE_NOTE).toContain(
+      "the adjustment chain re-runs on release",
+    );
     // Words that would make it a nicer lie: undo is bounded and layer
     // pixels are still overwritten, so neither of these may appear.
     expect(BRUSH_SCOPE_NOTE).not.toContain("non-destructive");

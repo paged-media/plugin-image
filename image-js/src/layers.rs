@@ -126,6 +126,8 @@
 use std::sync::Arc;
 
 use image_core::Region;
+use image_gpu::coverage::SelectionCoverage;
+use image_gpu::selection::SelectionMask;
 use image_gpu::stroke::window_is_opaque;
 use image_gpu::{GpuContext, TileInput};
 use image_graph::journal::{FlatImage, RecordOutcome, TileJournal};
@@ -160,6 +162,22 @@ pub struct Layer {
     /// Canvas-extent, tightly packed straight RGBA8. `Arc` so a layer
     /// can share the ingest's allocation and a snapshot is a pointer.
     pub rgba: Arc<[u8]>,
+    /// The layer MASK — a canvas-extent grayscale coverage field, or
+    /// `None` for "fully opaque everywhere" (the overwhelming default,
+    /// and cheaper than materializing a constant-one field per layer).
+    ///
+    /// This is deliberately the SAME `SelectionCoverage` the selection
+    /// tools already author: a layer mask and a selection are the same
+    /// object with a different owner, so masking a layer needs no new
+    /// authoring surface — "make selection into mask" is a move, not a
+    /// conversion. It lowers to the ABI's `@group(2)` r16float mask that
+    /// every dispatch already takes.
+    pub mask: Option<Arc<SelectionCoverage>>,
+    /// A DISABLED mask is retained, not discarded — Photoshop's
+    /// shift-click. Toggling it off must not lose the painted coverage,
+    /// which is the whole reason it is a separate flag rather than
+    /// setting `mask` to `None`.
+    pub mask_enabled: bool,
 }
 
 impl Layer {
@@ -184,7 +202,22 @@ impl Layer {
     /// Is this layer a plain, unmodified pass-through — the shape that
     /// makes a one-layer composite the identity?
     fn is_plain(&self) -> bool {
-        self.opacity >= 1.0 && std::ptr::eq(self.blend, &COMPOSE_NORMAL)
+        self.opacity >= 1.0
+            && std::ptr::eq(self.blend, &COMPOSE_NORMAL)
+            && self.live_mask().is_none()
+    }
+
+    /// The mask that actually applies: `None` when there is none or it is
+    /// disabled, and `None` too when it is all-one (which is the identity
+    /// — materializing it would cost an upload to change nothing).
+    pub fn live_mask(&self) -> Option<&Arc<SelectionCoverage>> {
+        if !self.mask_enabled {
+            return None;
+        }
+        match self.mask.as_ref() {
+            Some(m) if !m.is_all_one() => Some(m),
+            _ => None,
+        }
     }
 }
 
@@ -251,6 +284,9 @@ impl LayerStack {
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
                 rgba,
+                // A new layer is unmasked; the mask is authored later.
+                mask: None,
+                mask_enabled: true,
             }],
             active: 0,
             next_id: 2,
@@ -292,6 +328,9 @@ impl LayerStack {
                 opacity: plate.opacity as f32 / 255.0,
                 blend: psd_blend_kernel(&plate.blend_key),
                 rgba: Arc::from(plate.rgba.clone().into_boxed_slice()),
+                // A new layer is unmasked; the mask is authored later.
+                mask: None,
+                mask_enabled: true,
             });
         }
         let next_id = layers.len() as u32 + 1;
@@ -364,6 +403,9 @@ impl LayerStack {
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
                 rgba: pixels,
+                // A new layer is unmasked; the mask is authored later.
+                mask: None,
+                mask_enabled: true,
             },
         );
         self.active = at;
@@ -381,6 +423,9 @@ impl LayerStack {
             Layer {
                 id,
                 name: format!("{} copy", src.name),
+                // `..src` carries the mask too: duplicating a masked
+                // layer must duplicate its mask, or the copy would
+                // silently reveal what the original hides.
                 ..src
             },
         );
@@ -462,6 +507,57 @@ impl LayerStack {
     pub fn set_opacity(&mut self, index: usize, opacity: f32) -> Result<(), IngestError> {
         self.layer_mut(index)?.opacity = opacity.clamp(0.0, 1.0);
         Ok(())
+    }
+
+    // ------------------------------------------------- layer masks
+    //
+    // A mask is the same `SelectionCoverage` the marquee / lasso / wand
+    // already produce, so the authoring surface needed no new engine:
+    // "make the selection a layer mask" is a MOVE. What is new is that
+    // the compose fold finally passes something into the `@group(2)`
+    // argument it always took.
+
+    /// Attach `coverage` as `index`'s mask. Rejects a size mismatch
+    /// rather than resampling: a mask that silently stretched would hide
+    /// a caller bug behind plausible-looking pixels.
+    pub fn set_mask(
+        &mut self,
+        index: usize,
+        coverage: Arc<SelectionCoverage>,
+    ) -> Result<(), IngestError> {
+        let (w, h) = (self.width, self.height);
+        if coverage.width() != w || coverage.height() != h {
+            return Err(IngestError::Unsupported(format!(
+                "layer mask is {}×{} but the canvas is {w}×{h} (no implicit resample)",
+                coverage.width(),
+                coverage.height()
+            )));
+        }
+        let layer = self.layer_mut(index)?;
+        layer.mask = Some(coverage);
+        layer.mask_enabled = true;
+        Ok(())
+    }
+
+    /// DELETE the mask — the coverage is gone. Distinct from disabling,
+    /// which keeps it; both exist because Photoshop's users rely on the
+    /// difference and losing painted coverage to a toggle is a real loss.
+    pub fn clear_mask(&mut self, index: usize) -> Result<(), IngestError> {
+        let layer = self.layer_mut(index)?;
+        layer.mask = None;
+        layer.mask_enabled = true;
+        Ok(())
+    }
+
+    /// Toggle whether an attached mask applies, RETAINING it either way.
+    pub fn set_mask_enabled(&mut self, index: usize, enabled: bool) -> Result<(), IngestError> {
+        self.layer_mut(index)?.mask_enabled = enabled;
+        Ok(())
+    }
+
+    /// Whether `index` has a mask attached at all (enabled or not).
+    pub fn has_mask(&self, index: usize) -> bool {
+        self.layers.get(index).is_some_and(|l| l.mask.is_some())
     }
 
     pub fn set_name(&mut self, index: usize, name: &str) -> Result<(), IngestError> {
@@ -713,6 +809,13 @@ impl LayerStack {
                 )
                 .await?
             };
+            // Lower the layer's coverage to the ABI mask. `None` keeps
+            // the constant-1 fast path, so an unmasked layer pays nothing.
+            let mask_bytes: Option<Vec<u8>> = layer.live_mask().map(|cov| {
+                SelectionMask::from_fn(w, h, |x, y| f32::from(cov.coverage_at(x, y)) / 255.0)
+                    .bytes()
+                    .to_vec()
+            });
             acc = image_gpu::execute_tile_once_async(
                 ctx,
                 layer.blend,
@@ -723,7 +826,11 @@ impl LayerStack {
                 // The layer's opacity IS the compose family's α: the
                 // spine computes `over(a, b·α)`.
                 ComposeParams::new(layer.opacity).as_bytes(),
-                None,
+                // THE LAYER MASK. The compose spine already took a mask
+                // here and every caller passed `None`; a masked layer is
+                // that argument finally carrying something. Lowered to
+                // r16float per dispatch, exactly like a selection.
+                mask_bytes.as_deref(),
                 w,
                 h,
             )
@@ -842,6 +949,115 @@ mod tests {
                 }
             })
             .as_ref()
+    }
+
+    // ── layer masks ──────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_a_new_layer_has_no_mask() {
+        let s = stack(4, 4);
+        assert!(!s.has_mask(0), "a fresh layer is unmasked");
+        assert!(
+            s.layers[0].live_mask().is_none(),
+            "and nothing is lowered for it"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_mask_must_match_the_canvas() {
+        let mut s = stack(4, 4);
+        let wrong = Arc::new(SelectionCoverage::full(2, 2));
+        let err = s.set_mask(0, wrong).expect_err("size mismatch is rejected");
+        // The message must name both extents — a resample would be the
+        // silent alternative and is exactly what this refuses.
+        let msg = err.to_string();
+        assert!(msg.contains("2×2"), "names the mask extent: {msg}");
+        assert!(msg.contains("4×4"), "names the canvas extent: {msg}");
+        assert!(!s.has_mask(0), "and nothing was attached");
+    }
+
+    #[test]
+    fn image_editor_layers_disabling_a_mask_retains_it() {
+        let mut s = stack(4, 4);
+        s.set_mask(0, Arc::new(SelectionCoverage::empty(4, 4)))
+            .expect("attach");
+        assert!(s.has_mask(0));
+        assert!(s.layers[0].live_mask().is_some(), "an empty mask applies");
+
+        s.set_mask_enabled(0, false).expect("disable");
+        assert!(
+            s.has_mask(0),
+            "DISABLED is not DELETED — the coverage stays"
+        );
+        assert!(
+            s.layers[0].live_mask().is_none(),
+            "but it does not apply while disabled"
+        );
+
+        s.set_mask_enabled(0, true).expect("re-enable");
+        assert!(
+            s.layers[0].live_mask().is_some(),
+            "and re-enabling restores the same coverage"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_clearing_a_mask_deletes_it() {
+        let mut s = stack(4, 4);
+        s.set_mask(0, Arc::new(SelectionCoverage::empty(4, 4)))
+            .expect("attach");
+        s.clear_mask(0).expect("clear");
+        assert!(!s.has_mask(0), "cleared means gone, not disabled");
+    }
+
+    #[test]
+    fn image_editor_layers_an_all_one_mask_is_the_identity() {
+        // Materializing a constant-one mask would cost an upload to
+        // change nothing, so it must not count as "masked" — and the
+        // layer must stay eligible for the plain-fold fast path.
+        let mut s = stack(4, 4);
+        s.set_mask(0, Arc::new(SelectionCoverage::full(4, 4)))
+            .expect("attach");
+        assert!(s.has_mask(0), "it IS attached");
+        assert!(
+            s.layers[0].live_mask().is_none(),
+            "but an all-one mask lowers to nothing"
+        );
+        assert!(
+            s.layers[0].is_plain(),
+            "so the identity short-circuit still applies"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_real_mask_defeats_the_plain_fast_path() {
+        // The inverse of the test above, and the one that matters: a
+        // layer with a live mask must NOT be treated as plain, or the
+        // fold would hand back its pixels verbatim and drop the mask.
+        let mut s = stack(4, 4);
+        assert!(s.layers[0].is_plain(), "unmasked and default: plain");
+        s.set_mask(0, Arc::new(SelectionCoverage::empty(4, 4)))
+            .expect("attach");
+        assert!(
+            !s.layers[0].is_plain(),
+            "a masked layer is never plain, whatever its opacity and blend"
+        );
+        assert!(
+            !s.composite_is_trivial(),
+            "and the whole composite stops being trivial"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_duplicating_carries_the_mask() {
+        // A duplicate that lost its mask would reveal what the original
+        // hides — a silent content leak, not a cosmetic difference.
+        let mut s = stack(4, 4);
+        s.set_mask(0, Arc::new(SelectionCoverage::empty(4, 4)))
+            .expect("attach");
+        s.duplicate(0).expect("duplicate");
+        assert_eq!(s.len(), 2);
+        assert!(s.has_mask(0) && s.has_mask(1), "both carry the mask");
     }
 
     // ── the model ────────────────────────────────────────────────────
@@ -1072,6 +1288,77 @@ mod tests {
             out.to_vec(),
             base,
             "source-over with a fully transparent source is the identity"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_zero_mask_hides_the_layer_it_masks() {
+        // The load-bearing claim: an opaque white layer that WOULD cover
+        // the backdrop is fully suppressed by an all-zero mask. Same
+        // stack as the test below, one call different, opposite result.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = s.active().rgba.to_vec();
+        s.add("Cover");
+        let white: Arc<[u8]> = px(16, 16, 255);
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+            .expect("unlocked");
+        s.set_mask(1, Arc::new(SelectionCoverage::empty(16, 16)))
+            .expect("attach a zero mask");
+
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert_eq!(
+            out.to_vec(),
+            base,
+            "a zero-coverage mask makes the layer contribute nothing"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_disabled_mask_stops_hiding_it() {
+        // Proves the enable flag reaches the GPU, not just the model: the
+        // same zero mask, disabled, lets the cover layer through again.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        s.add("Cover");
+        let white: Arc<[u8]> = px(16, 16, 255);
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+            .expect("unlocked");
+        s.set_mask(1, Arc::new(SelectionCoverage::empty(16, 16)))
+            .expect("attach");
+        s.set_mask_enabled(1, false).expect("disable");
+
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert!(
+            out.iter().all(|&b| b == 255),
+            "with the mask disabled the opaque layer covers again"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_half_mask_covers_half_the_canvas() {
+        // A partial mask is the real case, and the one a boolean
+        // "masked/unmasked" implementation would pass the two tests above
+        // while failing: the left half must be covered and the right half
+        // must be the backdrop.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = s.active().rgba.to_vec();
+        s.add("Cover");
+        let white: Arc<[u8]> = px(16, 16, 255);
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+            .expect("unlocked");
+        // Left half selected, right half not.
+        let half = SelectionCoverage::rasterize_rect(16, 16, 0.0, 0.0, 8.0, 16.0);
+        s.set_mask(1, Arc::new(half)).expect("attach");
+
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        let at = |x: usize, y: usize| out[(y * 16 + x) * 4];
+        assert_eq!(at(2, 8), 255, "inside the mask the cover layer shows");
+        assert_eq!(
+            at(13, 8),
+            base[(8 * 16 + 13) * 4],
+            "outside it the backdrop survives untouched"
         );
     }
 

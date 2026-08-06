@@ -297,6 +297,13 @@ export interface ImageSession {
   setLayerOpacity(index: number, opacity: number): Promise<boolean>;
   setLayerBlend(index: number, blend: string): Promise<boolean>;
   setLayerLocked(index: number, locked: boolean): boolean;
+  /** Make the current selection this layer's mask, then re-composite —
+   *  a mask changes what the page shows, unlike a lock. */
+  layerMaskFromSelection(index: number): Promise<boolean>;
+  /** Toggle whether the mask applies; the coverage is retained. */
+  setLayerMaskEnabled(index: number, enabled: boolean): Promise<boolean>;
+  /** Delete the mask outright. */
+  clearLayerMask(index: number): Promise<boolean>;
   setLayerName(index: number, name: string): boolean;
   /** BAKE the panel's adjustment chain destructively into the ACTIVE
    *  layer (journaled, so undoable). The chain is otherwise a
@@ -342,7 +349,8 @@ export function createImageSession(host: BundleHost): ImageSession {
   let bootPromise: Promise<ImageEngine | null> | null = null;
   let sceneSurface: ReturnType<typeof host.contribute.sceneLayer> | null = null;
   // C-6 — the active tile-resource claim (null when nothing is claimed).
-  let tileClaim: { elementId: string; dispose(): void; bump(): void } | null = null;
+  let tileClaim: { elementId: string; dispose(): void; bump(): void } | null =
+    null;
   // K-3 — the decode worker pool (null when the host wires no workers /
   // grants none → the session decodes on the main thread instead).
   let decodePool: DecodePool | null = null;
@@ -534,7 +542,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       // The stack DID change even though the fold could not run (no
       // device); show the truth rather than a stale palette.
       refreshLayers();
-      setStatus(`Composite failed: ${err instanceof Error ? err.message : err}`);
+      setStatus(
+        `Composite failed: ${err instanceof Error ? err.message : err}`,
+      );
       emit();
       return false;
     }
@@ -570,7 +580,10 @@ export function createImageSession(host: BundleHost): ImageSession {
   /** The layer-mutation sandwich: run `mutate` engine-side, then
    *  re-composite. A refusal (locked layer, last layer, unknown blend)
    *  becomes the panel's status verbatim — the engine owns the reason. */
-  const layerOp = async (what: string, mutate: () => void): Promise<boolean> => {
+  const layerOp = async (
+    what: string,
+    mutate: () => void,
+  ): Promise<boolean> => {
     if (!engine || !state.source) {
       setStatus("Nothing ingested — ingest a placed image first.");
       return false;
@@ -583,6 +596,14 @@ export function createImageSession(host: BundleHost): ImageSession {
       emit();
       return false;
     }
+    return recomposite();
+  };
+
+  /** After a mask edit: the stack changed what it SHOWS, so re-read the
+   *  rows and re-composite. A mask is unlike a lock in exactly this way —
+   *  it changes pixels on the page without changing any layer's pixels. */
+  const finishMaskEdit = async (): Promise<boolean> => {
+    refreshLayers();
     return recomposite();
   };
 
@@ -681,7 +702,12 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  Unknown containers fall to PNG — the lossless default. */
   const sniffFormat = (bytes: Uint8Array): RasterFormat | "psd" => {
     if (isPsd(bytes)) return "psd";
-    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    if (
+      bytes.length >= 3 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes[2] === 0xff
+    )
       return "jpeg";
     return "png";
   };
@@ -769,7 +795,11 @@ export function createImageSession(host: BundleHost): ImageSession {
       host.log.debug("layer stack open failed", err);
     }
     refreshLayers();
-    cropMachineRef = createCropMachine(engine, state.source.width, state.source.height);
+    cropMachineRef = createCropMachine(
+      engine,
+      state.source.width,
+      state.source.height,
+    );
     // Bind the engine selection to the LIVE handle (a crop/resize swap
     // is a different handle, so the old selection drops engine-side —
     // honest: a selection is meaningless across resolutions) and rebuild
@@ -779,7 +809,9 @@ export function createImageSession(host: BundleHost): ImageSession {
     } catch (err) {
       host.log.debug("selection bind failed", err);
     }
-    selectionMachineRef = createSelectionMachine(engine, () => api.refreshSelection());
+    selectionMachineRef = createSelectionMachine(engine, () =>
+      api.refreshSelection(),
+    );
     state.selection = engine.selectionStats();
     // The paint machine is pure pointer bookkeeping, but it is rebuilt
     // with the source so a stale sample queue can never leak across a
@@ -790,7 +822,9 @@ export function createImageSession(host: BundleHost): ImageSession {
   /** The frame's content box in page pt (falls back to the image's own
    *  extent when the geometry read misses — an honest 1:1 rather than a
    *  throw). */
-  const frameBox = async (target: string): Promise<{ w: number; h: number }> => {
+  const frameBox = async (
+    target: string,
+  ): Promise<{ w: number; h: number }> => {
     const src = state.source;
     const fallback = { w: src?.width ?? 1, h: src?.height ?? 1 };
     try {
@@ -935,7 +969,9 @@ export function createImageSession(host: BundleHost): ImageSession {
         return false;
       }
       if (!host.supports("assets.images@1")) {
-        setStatus("Host serves no placed-image bytes (assets.images@1 is false).");
+        setStatus(
+          "Host serves no placed-image bytes (assets.images@1 is false).",
+        );
         return false;
       }
       if (!(await ensureEngine())) {
@@ -947,10 +983,17 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         const asset = await host.assets.getPlacedImage(id);
         if (!asset) {
-          setStatus("No placed image on this frame (or the link is unresolved).");
+          setStatus(
+            "No placed image on this frame (or the link is unresolved).",
+          );
           return false;
         }
-        return await decodeInto(asset.uri || "placed image", asset.bytes, "selection", id);
+        return await decodeInto(
+          asset.uri || "placed image",
+          asset.bytes,
+          "selection",
+          id,
+        );
       } finally {
         state.busy = false;
         emit();
@@ -1006,12 +1049,18 @@ export function createImageSession(host: BundleHost): ImageSession {
     psdSetLayerOpacity(index, opacity) {
       if (psdHandle === null || !engine) return false;
       try {
-        engine.psdSetLayerOpacity(psdHandle, index, Math.max(0, Math.min(255, Math.round(opacity))));
+        engine.psdSetLayerOpacity(
+          psdHandle,
+          index,
+          Math.max(0, Math.min(255, Math.round(opacity))),
+        );
         refreshPsdLayers();
         emit();
         return true;
       } catch (err) {
-        setStatus(`PSD edit failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `PSD edit failed: ${err instanceof Error ? err.message : err}`,
+        );
         emit();
         return false;
       }
@@ -1025,7 +1074,9 @@ export function createImageSession(host: BundleHost): ImageSession {
         emit();
         return true;
       } catch (err) {
-        setStatus(`PSD rename failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `PSD rename failed: ${err instanceof Error ? err.message : err}`,
+        );
         emit();
         return false;
       }
@@ -1039,7 +1090,9 @@ export function createImageSession(host: BundleHost): ImageSession {
         emit();
         return true;
       } catch (err) {
-        setStatus(`PSD remove failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `PSD remove failed: ${err instanceof Error ? err.message : err}`,
+        );
         emit();
         return false;
       }
@@ -1050,7 +1103,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         return { bytes: engine.psdSave(psdHandle), fileName: state.psd.name };
       } catch (err) {
-        setStatus(`PSD save failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `PSD save failed: ${err instanceof Error ? err.message : err}`,
+        );
         emit();
         return null;
       }
@@ -1063,7 +1118,9 @@ export function createImageSession(host: BundleHost): ImageSession {
         return null;
       }
       if (!state.gpu && !isIdentity(state.params)) {
-        setStatus("WebGPU unavailable — the adjusted save-back needs a device.");
+        setStatus(
+          "WebGPU unavailable — the adjusted save-back needs a device.",
+        );
         return null;
       }
       state.busy = true;
@@ -1076,7 +1133,12 @@ export function createImageSession(host: BundleHost): ImageSession {
         const stem = baseName(src.name);
         let result: SaveBackResult;
         if (sourceFormat === "psd" && psdHandle !== null) {
-          const shape = engine.psdApplyAdjusted(psdHandle, src.width, src.height, rgba);
+          const shape = engine.psdApplyAdjusted(
+            psdHandle,
+            src.width,
+            src.height,
+            rgba,
+          );
           refreshPsdLayers();
           result = {
             bytes: engine.psdSave(psdHandle),
@@ -1111,7 +1173,9 @@ export function createImageSession(host: BundleHost): ImageSession {
         );
         return result;
       } catch (err) {
-        setStatus(`Save-back failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Save-back failed: ${err instanceof Error ? err.message : err}`,
+        );
         return null;
       } finally {
         state.busy = false;
@@ -1171,7 +1235,12 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         filled =
           req.kind === "gradient"
-            ? await engine.fillGradient(src.handle, req.gradient, req.c0, req.c1)
+            ? await engine.fillGradient(
+                src.handle,
+                req.gradient,
+                req.c0,
+                req.c1,
+              )
             : await engine.fillNoise(
                 src.handle,
                 req.amount,
@@ -1255,7 +1324,11 @@ export function createImageSession(host: BundleHost): ImageSession {
           ...state.params,
           temp: a.temp,
           tint: a.tint,
-          levels: { ...state.params.levels, inBlack: a.inBlack, inWhite: a.inWhite },
+          levels: {
+            ...state.params.levels,
+            inBlack: a.inBlack,
+            inWhite: a.inWhite,
+          },
         };
         emit();
         setStatus(
@@ -1263,7 +1336,9 @@ export function createImageSession(host: BundleHost): ImageSession {
             "(document unchanged).",
         );
       } catch (err) {
-        setStatus(`Auto-enhance failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Auto-enhance failed: ${err instanceof Error ? err.message : err}`,
+        );
       }
     },
 
@@ -1289,7 +1364,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         engine.selectionSelectAll();
       } catch (err) {
-        setStatus(`Select all failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Select all failed: ${err instanceof Error ? err.message : err}`,
+        );
         return false;
       }
       api.refreshSelection();
@@ -1313,7 +1390,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         engine.selectionInvert();
       } catch (err) {
-        setStatus(`Invert selection failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Invert selection failed: ${err instanceof Error ? err.message : err}`,
+        );
         return false;
       }
       api.refreshSelection();
@@ -1330,7 +1409,9 @@ export function createImageSession(host: BundleHost): ImageSession {
         engine.selectionFeather(sigma);
       } catch (err) {
         // The honest miss: feather needs an explicit selection.
-        setStatus(`Feather failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Feather failed: ${err instanceof Error ? err.message : err}`,
+        );
         return false;
       }
       api.refreshSelection();
@@ -1453,7 +1534,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         painted = await engine.brushCommit();
       } catch (err) {
-        setStatus(`Paint commit failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Paint commit failed: ${err instanceof Error ? err.message : err}`,
+        );
         discardStroke();
         emit();
         return false;
@@ -1519,7 +1602,9 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     async removeLayer(index) {
       const name = state.layers.layers[index]?.name ?? `layer ${index}`;
-      const ok = await layerOp("Remove layer", () => engine!.layerRemove(index));
+      const ok = await layerOp("Remove layer", () =>
+        engine!.layerRemove(index),
+      );
       if (ok) {
         setStatus(
           `Removed “${name}”. Layer structure is not journaled, and a removed ` +
@@ -1539,7 +1624,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         engine.layerSetActive(index);
       } catch (err) {
-        setStatus(`Select layer failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Select layer failed: ${err instanceof Error ? err.message : err}`,
+        );
         return false;
       }
       refreshLayers();
@@ -1548,15 +1635,60 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
 
     setLayerVisible(index, visible) {
-      return layerOp("Layer visibility", () => engine!.layerSetVisible(index, visible));
+      return layerOp("Layer visibility", () =>
+        engine!.layerSetVisible(index, visible),
+      );
     },
 
     setLayerOpacity(index, opacity) {
-      return layerOp("Layer opacity", () => engine!.layerSetOpacity(index, opacity));
+      return layerOp("Layer opacity", () =>
+        engine!.layerSetOpacity(index, opacity),
+      );
     },
 
     setLayerBlend(index, blend) {
       return layerOp("Layer blend", () => engine!.layerSetBlend(index, blend));
+    },
+
+    async layerMaskFromSelection(index) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerMaskFromSelection(index);
+      } catch (err) {
+        // The engine refuses with no selection rather than attaching an
+        // all-one mask that would look like success and mask nothing.
+        setStatus(
+          `Layer mask failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      return finishMaskEdit();
+    },
+
+    async setLayerMaskEnabled(index, enabled) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerSetMaskEnabled(index, enabled);
+      } catch (err) {
+        setStatus(
+          `Layer mask toggle failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      return finishMaskEdit();
+    },
+
+    async clearLayerMask(index) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerClearMask(index);
+      } catch (err) {
+        setStatus(
+          `Layer mask clear failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      return finishMaskEdit();
     },
 
     setLayerLocked(index, locked) {
@@ -1565,7 +1697,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       try {
         engine.layerSetLocked(index, locked);
       } catch (err) {
-        setStatus(`Layer lock failed: ${err instanceof Error ? err.message : err}`);
+        setStatus(
+          `Layer lock failed: ${err instanceof Error ? err.message : err}`,
+        );
         return false;
       }
       refreshLayers();
@@ -1602,7 +1736,8 @@ export function createImageSession(host: BundleHost): ImageSession {
         emit();
         return false;
       }
-      const name = state.layers.layers[state.layers.active]?.name ?? "the active layer";
+      const name =
+        state.layers.layers[state.layers.active]?.name ?? "the active layer";
       state.busy = false;
       // The chain is now IN the pixels, so the panel returns to identity
       // — leaving the sliders up would apply it a second time on Apply.
@@ -1629,7 +1764,9 @@ export function createImageSession(host: BundleHost): ImageSession {
     brushCancel() {
       if (!state.strokeActive) return;
       discardStroke();
-      setStatus("Stroke cancelled — the engine pixels are exactly as they were.");
+      setStatus(
+        "Stroke cancelled — the engine pixels are exactly as they were.",
+      );
       // The frame is still showing the abandoned preview; put the
       // committed composite back.
       if (state.compositedFrame && state.source?.elementId) void api.apply();
@@ -1705,10 +1842,18 @@ export function createImageSession(host: BundleHost): ImageSession {
       setStatus("Adjusting…");
       try {
         const rgba = await engine.adjust(src.handle, state.params);
-        await submitLayer(target, rgba, src.width, src.height, await frameBox(target));
+        await submitLayer(
+          target,
+          rgba,
+          src.width,
+          src.height,
+          await frameBox(target),
+        );
         // The engine masked the chain by the bound selection (if any) —
         // say so, honestly.
-        const sel = state.selection ? " (adjustments masked to the selection)" : "";
+        const sel = state.selection
+          ? " (adjustments masked to the selection)"
+          : "";
         setStatus(
           `Composited ${src.width}×${src.height} into the frame` +
             `${sel} (document unchanged — preview layer only).`,
@@ -1752,15 +1897,20 @@ export function createImageSession(host: BundleHost): ImageSession {
       // the same frame is picked up without re-claiming.
       const claim = claimImageTiles(
         host,
-        { elementId: target, handle: src.handle, width: src.width, height: src.height },
+        {
+          elementId: target,
+          handle: src.handle,
+          width: src.width,
+          height: src.height,
+        },
         engine,
         () => (state.source ? state.source.handle : null),
       );
       tileClaim = {
-      elementId: target,
-      dispose: () => claim.dispose(),
-      bump: () => claim.bump(),
-    };
+        elementId: target,
+        dispose: () => claim.dispose(),
+        bump: () => claim.bump(),
+      };
       setStatus(
         `Claimed tile resource for the frame (level-0 lane; ${src.width}×${src.height}). ` +
           "The renderer pulls tiles at its current scale.",
@@ -1775,7 +1925,10 @@ export function createImageSession(host: BundleHost): ImageSession {
     async reset() {
       state.params = freshIdentityParams();
       state.saveBack = null;
-      cropMachineRef?.reset(state.source?.width ?? 0, state.source?.height ?? 0);
+      cropMachineRef?.reset(
+        state.source?.width ?? 0,
+        state.source?.height ?? 0,
+      );
       await clearLayer();
       setStatus("Reset — in-frame preview cleared.");
     },

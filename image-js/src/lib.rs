@@ -1457,13 +1457,15 @@ mod wasm {
                 .enumerate()
                 .map(|(index, layer)| {
                     format!(
-                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\"}}",
+                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\",\"hasMask\":{},\"maskEnabled\":{}}}",
                         layer.id,
                         json_escape(&layer.name),
                         layer.visible,
                         layer.locked,
                         layer.opacity,
                         layer.blend_name(),
+                        layer.mask.is_some(),
+                        layer.mask_enabled,
                     )
                 })
                 .collect();
@@ -1570,6 +1572,36 @@ mod wasm {
     #[wasm_bindgen]
     pub fn layers_set_blend(index: usize, blend: &str) -> Result<(), JsValue> {
         with_stack(|d| d.stack.set_blend(index, blend).map_err(ingest_err))
+    }
+
+    /// Make the CURRENT SELECTION this layer's mask. The natural
+    /// authoring path, and the reason layer masks needed no new
+    /// authoring engine: the marquee / lasso / wand already produce
+    /// exactly the coverage a mask is. Errors when nothing is selected —
+    /// silently attaching an all-one mask would look like success and
+    /// mask nothing.
+    #[wasm_bindgen]
+    pub fn layers_mask_from_selection(index: usize) -> Result<(), JsValue> {
+        let coverage = SELECTION
+            .with(|s| s.borrow().coverage().cloned())
+            .ok_or_else(|| {
+                JsValue::from_str("no selection to make a mask from — select an area first")
+            })?;
+        with_stack(|d| d.stack.set_mask(index, coverage).map_err(ingest_err))
+    }
+
+    /// DELETE the mask (the coverage is gone), as distinct from
+    /// disabling it.
+    #[wasm_bindgen]
+    pub fn layers_clear_mask(index: usize) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.clear_mask(index).map_err(ingest_err))
+    }
+
+    /// Toggle whether the attached mask applies, RETAINING it either way
+    /// — losing painted coverage to a toggle would be a real loss.
+    #[wasm_bindgen]
+    pub fn layers_set_mask_enabled(index: usize, enabled: bool) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_mask_enabled(index, enabled).map_err(ingest_err))
     }
 
     /// COMPOSITE the stack bottom-up and write the result back into the

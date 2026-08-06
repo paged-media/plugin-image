@@ -30,10 +30,20 @@ import type { PluginManifest } from "@paged-media/plugin-api";
 
 import manifestJson from "@paged-media/image-manifest/manifest.json";
 
-import { EMPTY_LAYER_STACK, wrapEngine, type ImageWasmModule } from "../src/engine";
+import {
+  EMPTY_LAYER_STACK,
+  wrapEngine,
+  type ImageWasmModule,
+} from "../src/engine";
 import { createImageSession } from "../src/session";
 import { LAYERS_SCOPE_NOTE, LayersSection } from "../src/panels/image-panel";
-import { makeFakeEditor, mapBacking, psdBytes, shellStub, silentConsole } from "./helpers";
+import {
+  makeFakeEditor,
+  mapBacking,
+  psdBytes,
+  shellStub,
+  silentConsole,
+} from "./helpers";
 
 function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
   return createBundleHost(() => fake.editor, manifestJson as PluginManifest, {
@@ -62,7 +72,8 @@ describe("the engine facade's layer doors", () => {
         calls.push({ fn: "add", args });
         return 1;
       },
-      layers_set_blend: (...args: unknown[]) => calls.push({ fn: "blend", args }),
+      layers_set_blend: (...args: unknown[]) =>
+        calls.push({ fn: "blend", args }),
       layers_undo: async () => "Paint",
     } as unknown as ImageWasmModule);
     return {
@@ -93,7 +104,11 @@ describe("the engine facade's layer doors", () => {
     });
     // The engine escapes names into the JSON; a quote survives intact.
     expect(s.layers[1].name).toBe('Pa"int');
-    expect(s.layers[1]).toMatchObject({ visible: false, locked: true, opacity: 0.5 });
+    expect(s.layers[1]).toMatchObject({
+      visible: false,
+      locked: true,
+      opacity: 0.5,
+    });
   });
 
   it("an empty stack reads as the shared EMPTY constant, never undefined", () => {
@@ -145,7 +160,11 @@ describe("the layer session (real engine wasm, no GPU in Node)", () => {
   async function ingest() {
     const fake = makeFakeEditor();
     fake.placed.set("u1", psdBytes());
-    fake.geometry.set("u1", { id: { kind: "rectangle", id: "u1" } as never, pageId: "pg1", bounds: [0, 0, 100, 200] });
+    fake.geometry.set("u1", {
+      id: { kind: "rectangle", id: "u1" } as never,
+      pageId: "pg1",
+      bounds: [0, 0, 100, 200],
+    });
     fake.emitSelection([{ kind: "rectangle", id: "u1" }]);
     const handle = makeHost(fake);
     const session = createImageSession(handle.host);
@@ -273,7 +292,8 @@ describe("the layer session (real engine wasm, no GPU in Node)", () => {
  *  disabled-because note lives there and is still something the UI
  *  says). Pure components only; hooks are not run. */
 function textOf(node: unknown, out: string[] = []): string[] {
-  if (node === null || node === undefined || typeof node === "boolean") return out;
+  if (node === null || node === undefined || typeof node === "boolean")
+    return out;
   if (typeof node === "string" || typeof node === "number") {
     out.push(String(node));
     return out;
@@ -302,10 +322,14 @@ describe("the panel's Layers section", () => {
     locked: false,
     opacity: 1,
     blend: "normal",
+    hasMask: false,
+    maskEnabled: true,
     ...over,
   });
 
-  const history = (over: Partial<import("../src/engine").LayerHistory> = {}) => ({
+  const history = (
+    over: Partial<import("../src/engine").LayerHistory> = {},
+  ) => ({
     canUndo: true,
     canRedo: false,
     depth: 2,
@@ -323,7 +347,16 @@ describe("the panel's Layers section", () => {
   const render = (over: Partial<Parameters<typeof LayersSection>[0]> = {}) =>
     textOf(
       LayersSection({
-        layers: [layer(), layer({ index: 1, id: 2, name: "Paint", blend: "multiply", opacity: 0.5 })],
+        layers: [
+          layer(),
+          layer({
+            index: 1,
+            id: 2,
+            name: "Paint",
+            blend: "multiply",
+            opacity: 0.5,
+          }),
+        ],
         active: 1,
         history: history(),
         blendModes: ["normal", "multiply", "screen"],
@@ -339,6 +372,9 @@ describe("the panel's Layers section", () => {
         onOpacity: () => {},
         onBlend: () => {},
         onLock: () => {},
+        onMaskFromSelection: () => {},
+        onMaskToggle: () => {},
+        onMaskClear: () => {},
         onBake: () => {},
         onUndo: () => {},
         onRedo: () => {},
@@ -387,16 +423,18 @@ describe("the panel's Layers section", () => {
   });
 
   it("states the GPU-only rule for a multi-layer composite", () => {
-    expect(render({ gpu: false })).toContain("Compositing more than one layer is GPU-only");
+    expect(render({ gpu: false })).toContain(
+      "Compositing more than one layer is GPU-only",
+    );
     expect(render({ gpu: false, layers: [layer()] })).not.toContain(
       "Compositing more than one layer is GPU-only",
     );
   });
 
   it("surfaces how the stack was opened (the PSD lane's honest one-liner)", () => {
-    expect(render({ layersNote: "Layered PSD import declined — groups" })).toContain(
-      "Layered PSD import declined",
-    );
+    expect(
+      render({ layersNote: "Layered PSD import declined — groups" }),
+    ).toContain("Layered PSD import declined");
   });
 
   it("RENDERS the scope note (an honesty note nobody reads is not one)", () => {
