@@ -435,6 +435,11 @@ export interface DecodedInfo {
  *  working sRGB space; the other two are honest pass-throughs. */
 export type DisplayTreatment = "managed" | "assumed-srgb" | "profile-rejected";
 
+/** The distortion kinds `geom.warp_backward` carries. Order matches the
+ *  kernel's `kind` discriminant. */
+export const WARP_KINDS = ["pinch", "spherize", "twirl", "wave"] as const;
+export type WarpKindName = (typeof WARP_KINDS)[number];
+
 /** Map the wasm discriminant (image-js `display_code`) to the name. */
 export function displayTreatmentOf(code: number | undefined): DisplayTreatment {
   return code === 0
@@ -878,6 +883,21 @@ export interface ImageEngine {
    *  non-destructive, unlike `layersBakeAdjust`. Returns its index.
    *  Throws at identity rather than adding a row that does nothing. */
   layersAddAdjustment(name: string, params: AdjustParams): number;
+  /** Apply a gradient map (luminance through a two-stop ramp) as a
+   *  journaled, selection-masked pixel edit. */
+  applyGradientMap(
+    handle: number,
+    shadow: readonly [number, number, number],
+    highlight: readonly [number, number, number],
+  ): Promise<DecodedInfo>;
+  /** Apply a parametric distortion. `amount === 0` is the identity for
+   *  every kind, so a slider needs no special cases. */
+  applyWarp(
+    handle: number,
+    kind: WarpKindName,
+    amount: number,
+    frequency?: number,
+  ): Promise<DecodedInfo>;
   /** Convert a pixel layer into a smart object, preserving its pixels
    *  as the source. One-way: going back would discard the source. */
   layerMakeSmart(index: number): void;
@@ -1163,6 +1183,17 @@ export interface ImageWasmModule {
     invert: boolean,
     ext: Float32Array,
   ): number;
+  apply_gradient_map(
+    handle: number,
+    shadow: Float32Array,
+    highlight: Float32Array,
+  ): Promise<DecodedHandleWasm>;
+  apply_warp(
+    handle: number,
+    kind: number,
+    amount: number,
+    frequency: number,
+  ): Promise<DecodedHandleWasm>;
   layers_make_smart(index: number): void;
   layers_render_smart(index: number, scale: number): Promise<void>;
   layers_mask_from_selection(index: number): void;
@@ -1522,6 +1553,33 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       wasm.layers_set_opacity(index, opacity),
     layerSetName: (index, name) => wasm.layers_set_name(index, name),
     layerSetBlend: (index, blend) => wasm.layers_set_blend(index, blend),
+    async applyGradientMap(handle, shadow, highlight) {
+      const h = await wasm.apply_gradient_map(
+        handle,
+        Float32Array.from(shadow),
+        Float32Array.from(highlight),
+      );
+      return {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
+    },
+    async applyWarp(handle, kind, amount, frequency = 1) {
+      const h = await wasm.apply_warp(
+        handle,
+        WARP_KINDS.indexOf(kind),
+        amount,
+        frequency,
+      );
+      return {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
+    },
     layerMakeSmart: (index) => wasm.layers_make_smart(index),
     layerRenderSmart: (index, scale) => wasm.layers_render_smart(index, scale),
     layerMaskFromSelection: (index) => wasm.layers_mask_from_selection(index),

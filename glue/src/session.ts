@@ -42,6 +42,7 @@ import {
   type BrushStats,
   type DecodedInfo,
   type DisplayTreatment,
+  type WarpKindName,
   displayTreatmentOf,
   type GradientKind,
   type ImageEngine,
@@ -224,6 +225,22 @@ export interface ImageSession {
    *  swaps the engine-held source like a crop commit (the document and
    *  the placed file are still untouched; re-ingest restores). */
   fillSelection(req: FillRequest): Promise<boolean>;
+  /** Run a whole-image effect kernel and land it like a fill. */
+  applyEffect(
+    label: string,
+    run: (handle: number) => Promise<DecodedInfo>,
+  ): Promise<boolean>;
+  /** Luminance through a two-stop colour ramp (adjust.gradient_map). */
+  applyGradientMap(
+    shadow: readonly [number, number, number],
+    highlight: readonly [number, number, number],
+  ): Promise<boolean>;
+  /** A parametric distortion (geom.warp_backward). */
+  applyWarp(
+    kind: WarpKindName,
+    amount: number,
+    frequency?: number,
+  ): Promise<boolean>;
   setParams(p: Partial<AdjustParams>): void;
   /** Set the composite levels (merged into params.levels). */
   setLevels(l: Partial<LevelsParams>): void;
@@ -1233,6 +1250,62 @@ export function createImageSession(host: BundleHost): ImageSession {
         emit();
         return null;
       }
+    },
+
+    /** Apply a whole-image EFFECT kernel and land it exactly the way a
+     *  fill lands: into the active layer when a stack is bound (journaled
+     *  and re-composited into the same handle), destructively otherwise.
+     *  Sharing this is what stops a new effect from quietly acquiring
+     *  different semantics from the fills. */
+    async applyEffect(label, run) {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      if (!state.gpu) {
+        setStatus(`WebGPU unavailable — ${label} is a GPU-only kernel.`);
+        return false;
+      }
+      state.busy = true;
+      emit();
+      let out: DecodedInfo;
+      try {
+        out = await run(src.handle);
+      } catch (err) {
+        setStatus(
+          `${label} failed: ${err instanceof Error ? err.message : err}`,
+        );
+        state.busy = false;
+        emit();
+        return false;
+      }
+      const layered = out.handle === src.handle;
+      swapSource(src, out);
+      state.saveBack = null;
+      if (!layered) {
+        try {
+          engine.selectionTransfer(out.handle);
+        } catch (err) {
+          host.log.debug("selection transfer failed", err);
+        }
+      }
+      state.busy = false;
+      const ok = await recomposite();
+      if (ok) setStatus(`${label} applied.`);
+      return ok;
+    },
+
+    async applyGradientMap(shadow, highlight) {
+      return this.applyEffect("Gradient map", (h) =>
+        engine!.applyGradientMap(h, shadow, highlight),
+      );
+    },
+
+    async applyWarp(kind, amount, frequency = 1) {
+      return this.applyEffect(`Distort (${kind})`, (h) =>
+        engine!.applyWarp(h, kind, amount, frequency),
+      );
     },
 
     async fillSelection(req) {

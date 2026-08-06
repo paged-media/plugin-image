@@ -1279,6 +1279,99 @@ mod wasm {
         land_fill(img.width, img.height, out, layered).await
     }
 
+    /// APPLY a gradient map — luminance through a two-stop colour ramp.
+    /// A pixel edit into the active layer, journaled and selection-masked
+    /// exactly like a fill, because that is what it is.
+    #[wasm_bindgen]
+    pub async fn apply_gradient_map(
+        handle: u32,
+        shadow: &[f32],
+        highlight: &[f32],
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::adjust::{AdjustGradientMapParams, ADJUST_GRADIENT_MAP};
+        if shadow.len() != 3 || highlight.len() != 3 {
+            return Err(JsValue::from_str(
+                "gradient map endpoints must be 3 floats each (rgb in 0..1)",
+            ));
+        }
+        let params = AdjustGradientMapParams::two_stop(
+            [shadow[0], shadow[1], shadow[2]],
+            [highlight[0], highlight[1], highlight[2]],
+        );
+        apply_point_kernel(handle, &ADJUST_GRADIENT_MAP, params.as_bytes()).await
+    }
+
+    /// APPLY a parametric distortion (`geom.warp_backward`). `kind` is
+    /// 0 pinch / 1 spherize / 2 twirl / 3 wave; `amount == 0` is the
+    /// identity for every kind, so a UI slider needs no special cases.
+    #[wasm_bindgen]
+    pub async fn apply_warp(
+        handle: u32,
+        kind: u32,
+        amount: f32,
+        frequency: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::geom::{WarpBackwardParams, WarpKind, GEOM_WARP_BACKWARD};
+        let k = match kind {
+            0 => WarpKind::Pinch,
+            1 => WarpKind::Spherize,
+            2 => WarpKind::Twirl,
+            3 => WarpKind::Wave,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "unknown warp kind {other} (0 pinch | 1 spherize | 2 twirl | 3 wave)"
+                )))
+            }
+        };
+        let (img, _, _, _) = fill_prelude(handle)?;
+        let (cx, cy) = (img.width as f32 / 2.0, img.height as f32 / 2.0);
+        let radius = (img.width.min(img.height) as f32) / 2.0;
+        let params = WarpBackwardParams::new(k, amount, cx, cy, radius).with_frequency(frequency);
+        apply_point_kernel(handle, &GEOM_WARP_BACKWARD, params.as_bytes()).await
+    }
+
+    /// Shared body for "run ONE kernel over the whole image and land the
+    /// result like a fill" — the same prelude, mask, journal and
+    /// layered-vs-flat landing every fill already goes through, so a new
+    /// effect cannot accidentally acquire different semantics.
+    async fn apply_point_kernel(
+        handle: u32,
+        def: &'static image_kernels::KernelDef,
+        params: &[u8],
+    ) -> Result<DecodedHandle, JsValue> {
+        use half::f16;
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        let mask = sel.as_ref().map(|cov| {
+            image_gpu::selection::SelectionMask::from_fn(img.width, img.height, |x, y| {
+                f32::from(cov.coverage_at(x, y)) / 255.0
+            })
+            .bytes()
+            .to_vec()
+        });
+        let mut win = Vec::with_capacity(img.rgba.len() * 2);
+        for &b in img.rgba.iter() {
+            win.extend_from_slice(&f16::from_f32(b as f32 / 255.0).to_le_bytes());
+        }
+        let out = image_gpu::execute_tile_once_async(
+            &ctx,
+            def,
+            &[image_gpu::TileInput { f16_bytes: &win }],
+            params,
+            mask.as_deref(),
+            img.width,
+            img.height,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        land_fill(
+            img.width,
+            img.height,
+            crate::fill::f16_to_rgba8(&out),
+            layered,
+        )
+        .await
+    }
+
     // ─────────────────────── LAYER doors (§6.2) ──────────────────────
     //
     // THE LAYER GRAPH. One stack per wasm realm, BOUND to an engine-held
@@ -1294,8 +1387,10 @@ mod wasm {
     // ACTIVE layer and are journaled tile-granularly (`layers_undo`).
     //
     // HONEST SCOPE, in the code as well as in the panel:
-    //   * Layers are canvas-extent PIXEL layers. No groups, no clipping,
-    //     no adjustment layers, no per-layer masks.
+    //   * Layers are canvas-extent layers. Per-layer MASKS, ADJUSTMENT
+    //     layers and SMART objects all ship (2026-08-06); what is still
+    //     absent is groups, clipping layers and smart FILTERS (which need
+    //     clipping).
     //   * The journal is a PIXEL log: add / remove / reorder / rename /
     //     opacity / blend / visibility are NOT undoable.
     //   * A crop, resize or straighten changes the EXTENT, so it

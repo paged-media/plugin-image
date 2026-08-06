@@ -47,6 +47,7 @@ import type {
 } from "../engine";
 import {
   DEFAULT_BW_WEIGHTS,
+  WARP_KINDS,
   displayTreatmentLabel,
   GRADIENT_KINDS,
   PRESSURE_TARGETS,
@@ -1849,6 +1850,53 @@ export function makeImagePanel(session: ImageSession) {
           />
           Invert colors
         </label>
+
+        {/* EFFECTS over the new kernel classes — Gradient Map
+            (adjust.gradient_map) and the parametric distortions
+            (geom.warp_backward). Both land exactly like a fill: into the
+            active layer when a stack is bound, journaled and
+            selection-masked, so they are undoable and confinable without
+            any special casing. */}
+        <div style={sectionTitle}>Gradient map &amp; distort</div>
+        <div
+          style={{
+            display: "flex",
+            gap: "var(--space-2, 8px)",
+            flexWrap: "wrap",
+          }}
+        >
+          <button
+            type="button"
+            data-image-gradient-map
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Map luminance through a two-stop colour ramp (shadows to highlights)"
+            onClick={() =>
+              void session.applyGradientMap(
+                [0.05, 0.1, 0.25],
+                [1.0, 0.85, 0.55],
+              )
+            }
+          >
+            Gradient map
+          </button>
+          {WARP_KINDS.map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              data-image-warp={kind}
+              disabled={s.busy || !s.gpu || !s.source}
+              title={`Apply the ${kind} distortion (amount 0 is the identity)`}
+              onClick={() => void session.applyWarp(kind, 0.4)}
+            >
+              {kind}
+            </button>
+          ))}
+        </div>
+        <div style={note}>
+          A gradient map replaces colour with a ramp read from luminance; the
+          distortions resample through one backward map, so they share a
+          reconstruction filter and edge rule with the crop straighten.
+        </div>
 
         {/* LAYERS — the layer graph itself: order, visibility, opacity,
             blend and the active-layer choice paint/fill/bake land in,
