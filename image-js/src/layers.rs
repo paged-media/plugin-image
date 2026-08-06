@@ -226,6 +226,17 @@ pub struct Layer {
     /// which is the whole reason it is a separate flag rather than
     /// setting `mask` to `None`.
     pub mask_enabled: bool,
+    /// CLIPPED to the layer beneath: this layer contributes only where
+    /// its clip BASE is opaque, so an adjustment can be confined to one
+    /// object without painting a mask around it.
+    ///
+    /// It is expressed as an extra MASK factor rather than as a new
+    /// compositing path, which is the point — the base's alpha and a
+    /// painted mask are the same kind of thing, so clipping needed no
+    /// new kernel and no second fold. This is also what "smart filters"
+    /// wanted: an adjustment layer clipped to a smart object IS a smart
+    /// filter.
+    pub clipped: bool,
 }
 
 impl Layer {
@@ -302,6 +313,50 @@ impl Layer {
 /// the compose spine leaves the backdrop untouched for every blend mode
 /// — so it is skipped. That is not a micro-optimization: "add a layer"
 /// is the first thing anyone does, and skipping the empty one keeps the
+/// A plate's alpha channel, one byte per pixel — the clip base.
+///
+/// A clipping base IS its alpha: "show this layer only where the one
+/// below is opaque" is exactly what a coverage field says, which is why
+/// clipping folds into the existing mask path rather than needing a
+/// second compositing mode.
+fn alpha_of(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4).map(|p| p[3]).collect()
+}
+
+/// A layer's own coverage AND its clip base, multiplied.
+///
+/// Two coverages MULTIPLY — they do not override one another — so a
+/// layer that is both masked and clipped is confined by both. Returning
+/// `None` when neither exists keeps the constant-one fast path, so an
+/// ordinary layer still pays nothing for a feature it does not use.
+fn effective_coverage(
+    own: Option<&Arc<SelectionCoverage>>,
+    clip: Option<&[u8]>,
+    w: u32,
+    h: u32,
+) -> Option<Arc<SelectionCoverage>> {
+    match (own, clip) {
+        (None, None) => None,
+        (Some(cov), None) => Some(Arc::clone(cov)),
+        (None, Some(base)) => SelectionCoverage::from_data(w, h, base.to_vec()).map(Arc::new),
+        (Some(cov), Some(base)) => {
+            let data: Vec<u8> = (0..(w as usize) * (h as usize))
+                .map(|i| {
+                    let x = (i % w as usize) as u32;
+                    let y = (i / w as usize) as u32;
+                    let a = u32::from(cov.coverage_at(x, y));
+                    let b = u32::from(base[i]);
+                    // Round-half-up on the /255, so full × full stays
+                    // full — a clipped, fully-masked layer must not lose
+                    // a level to integer truncation on every composite.
+                    ((a * b + 127) / 255) as u8
+                })
+                .collect();
+            SelectionCoverage::from_data(w, h, data).map(Arc::new)
+        }
+    }
+}
+
 /// composite trivial (and therefore GPU-free) until something is
 /// actually painted into it.
 fn is_fully_transparent(rgba: &[u8]) -> bool {
@@ -363,6 +418,7 @@ impl LayerStack {
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
+                clipped: false,
             }],
             active: 0,
             next_id: 2,
@@ -408,6 +464,7 @@ impl LayerStack {
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
+                clipped: false,
             });
         }
         let next_id = layers.len() as u32 + 1;
@@ -491,6 +548,7 @@ impl LayerStack {
                 rgba: pixels,
                 mask: None,
                 mask_enabled: true,
+                clipped: false,
             },
         );
         self.active = at;
@@ -614,6 +672,7 @@ impl LayerStack {
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
+                clipped: false,
             },
         );
         self.active = at;
@@ -760,6 +819,12 @@ impl LayerStack {
     /// Toggle whether an attached mask applies, RETAINING it either way.
     pub fn set_mask_enabled(&mut self, index: usize, enabled: bool) -> Result<(), IngestError> {
         self.layer_mut(index)?.mask_enabled = enabled;
+        Ok(())
+    }
+
+    /// Clip `index` to the layer beneath it (or release it).
+    pub fn set_clipped(&mut self, index: usize, clipped: bool) -> Result<(), IngestError> {
+        self.layer_mut(index)?.clipped = clipped;
         Ok(())
     }
 
@@ -1016,7 +1081,23 @@ impl LayerStack {
         // The accumulator is PREMULTIPLIED rgba16float, starting at
         // transparent black — the compose family's `in0` contract.
         let mut acc = vec![0u8; (w as usize) * (h as usize) * 8];
+        // CLIPPING: the alpha of the most recent UNCLIPPED plate, which
+        // is the clip base for every clipped layer stacked directly on
+        // top of it. Kept as one byte per pixel, because that is already
+        // the coverage representation everything else here speaks.
+        let mut clip_base: Option<Vec<u8>> = None;
         for (layer, px) in plates {
+            if layer.clipped {
+                // A clipped layer with NOTHING to clip to contributes
+                // nothing. Compositing it unclipped would be the one
+                // behaviour a designer cannot recover from — the whole
+                // reason they clipped it was to confine it.
+                if clip_base.is_none() {
+                    continue;
+                }
+            } else if layer.is_pixels() {
+                clip_base = Some(alpha_of(px));
+            }
             // AN ADJUSTMENT LAYER transforms the backdrop instead of
             // blending over it. The accumulator is the backdrop, so the
             // chain runs on THAT and replaces it — which is precisely
@@ -1028,6 +1109,14 @@ impl LayerStack {
             // chain has always taken one, so a masked adjustment layer
             // needed no new plumbing — the mask a designer paints and the
             // selection a marquee makes are the same object again.
+            // The clip base multiplies into the layer's own coverage,
+            // so a clipped-AND-masked layer is confined by both. Two
+            // coverages multiply; they do not override each other.
+            let clip = if layer.clipped {
+                clip_base.as_deref()
+            } else {
+                None
+            };
             if let Some(params) = layer.adjust_params() {
                 let straight8 = f16_to_rgba8(&unpremultiply(ctx, &acc, w, h).await?);
                 let image = DecodedImage {
@@ -1037,8 +1126,13 @@ impl LayerStack {
                     // Post-ingest pixels: the display transform already ran.
                     display: crate::display::DisplayTreatment::AssumedSrgb,
                 };
-                let adjusted =
-                    adjust_rgba8(ctx, &image, params, layer.live_mask().cloned()).await?;
+                let adjusted = adjust_rgba8(
+                    ctx,
+                    &image,
+                    params,
+                    effective_coverage(layer.live_mask(), clip, w, h),
+                )
+                .await?;
                 acc = premultiply(ctx, &rgba8_to_f16(&adjusted), w, h).await?;
                 continue;
             }
@@ -1061,11 +1155,12 @@ impl LayerStack {
             };
             // Lower the layer's coverage to the ABI mask. `None` keeps
             // the constant-1 fast path, so an unmasked layer pays nothing.
-            let mask_bytes: Option<Vec<u8>> = layer.live_mask().map(|cov| {
-                SelectionMask::from_fn(w, h, |x, y| f32::from(cov.coverage_at(x, y)) / 255.0)
-                    .bytes()
-                    .to_vec()
-            });
+            let mask_bytes: Option<Vec<u8>> = effective_coverage(layer.live_mask(), clip, w, h)
+                .map(|cov| {
+                    SelectionMask::from_fn(w, h, |x, y| f32::from(cov.coverage_at(x, y)) / 255.0)
+                        .bytes()
+                        .to_vec()
+                });
             acc = image_gpu::execute_tile_once_async(
                 ctx,
                 layer.blend,
@@ -2142,5 +2237,122 @@ mod tests {
             .expect("unlocked");
         assert_eq!(out, RecordOutcome::NoChange);
         assert!(!s.history().can_undo);
+    }
+
+    // ── clipping ─────────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_clipping_defaults_off_and_toggles() {
+        let mut s = stack(8, 8);
+        let at = s.add_adjustment("Brighten", bright(0.3));
+        assert!(!s.layers()[at].clipped, "clipping is opt-in");
+        s.set_clipped(at, true).expect("clip");
+        assert!(s.layers()[at].clipped);
+        s.set_clipped(at, false).expect("release");
+        assert!(!s.layers()[at].clipped);
+        assert!(s.set_clipped(99, true).is_err(), "out of range is an error");
+    }
+
+    #[test]
+    fn image_editor_layers_two_coverages_multiply_rather_than_override() {
+        // A layer that is BOTH masked and clipped must be confined by
+        // both. Letting one win would silently widen or narrow the
+        // effect, which is the failure a designer cannot see coming.
+        let half = vec![255u8, 128, 0, 255];
+        let base = vec![255u8, 255, 255, 0];
+        let cov = Arc::new(SelectionCoverage::from_data(4, 1, half).expect("cov"));
+        let out = effective_coverage(Some(&cov), Some(&base), 4, 1).expect("combined");
+        assert_eq!(out.coverage_at(0, 0), 255, "full × full stays full");
+        assert_eq!(out.coverage_at(1, 0), 128, "half × full is half");
+        assert_eq!(out.coverage_at(2, 0), 0);
+        assert_eq!(out.coverage_at(3, 0), 0, "full × none is none");
+    }
+
+    #[test]
+    fn image_editor_layers_neither_mask_nor_clip_keeps_the_fast_path() {
+        // `None` is the constant-one fast path, so an ordinary layer must
+        // pay nothing for a feature it does not use.
+        assert!(effective_coverage(None, None, 4, 4).is_none());
+    }
+
+    /// Bottom: fully opaque grey. Middle: opaque on the LEFT half only —
+    /// the clip base. The backdrop is therefore opaque EVERYWHERE, which
+    /// is what makes the confinement visible: without an opaque backdrop
+    /// beneath, both the clipped and the unclipped adjustment read back
+    /// as zero on the transparent side and the test proves nothing. (It
+    /// did exactly that on the first attempt.)
+    fn clip_fixture(w: u32, h: u32) -> (LayerStack, usize) {
+        let mut s = stack(w, h);
+        let base = s.add("Base");
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for x in 0..w {
+                let a = if x < w / 2 { 255u8 } else { 0u8 };
+                rgba.extend_from_slice(&[200, 200, 200, a]);
+            }
+        }
+        s.layer_mut(base).expect("base").rgba = Arc::from(rgba.into_boxed_slice());
+        (s, base)
+    }
+
+    #[test]
+    fn image_editor_layers_a_clipped_adjustment_is_confined_to_its_base() {
+        let Some(ctx) = device() else { return };
+
+        let (mut unclipped, _) = clip_fixture(16, 8);
+        unclipped.add_adjustment("Brighten", bright(0.5));
+        let free = pollster::block_on(unclipped.composite(Some(ctx), None)).expect("free");
+
+        let (mut s, _) = clip_fixture(16, 8);
+        let at = s.add_adjustment("Brighten", bright(0.5));
+        s.set_clipped(at, true).expect("clip");
+        let clipped = pollster::block_on(s.composite(Some(ctx), None)).expect("clipped");
+
+        let px = |v: &[u8], x: usize| v[x * 4] as i32;
+        // LEFT — inside the base: both brighten, so the clip changes
+        // nothing there.
+        assert!(
+            (px(&clipped, 2) - px(&free, 2)).abs() <= 2,
+            "inside the base: {} vs {}",
+            px(&clipped, 2),
+            px(&free, 2)
+        );
+        // RIGHT — outside the base, over an OPAQUE backdrop: the
+        // unclipped adjustment brightens it and the clipped one must
+        // not.
+        assert!(
+            px(&free, 12) > px(&clipped, 12) + 5,
+            "outside the base the clip must confine the adjustment: \
+             clipped {} should stay below free {}",
+            px(&clipped, 12),
+            px(&free, 12)
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_clipped_layer_with_no_base_contributes_nothing() {
+        // Compositing it unclipped instead would be the one behaviour a
+        // designer cannot recover from — confining it was the point.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 8);
+        // Clip the BOTTOM layer, which has nothing beneath it.
+        s.set_clipped(0, true).expect("clip");
+        let at = s.add_adjustment("Brighten", bright(0.5));
+        s.set_clipped(at, true).expect("clip the adjustment too");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert!(
+            out.chunks_exact(4).all(|p| p[3] == 0),
+            "everything was clipped to nothing, so nothing shows"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_the_clip_flag_reaches_the_json_readout() {
+        let mut s = stack(8, 8);
+        let at = s.add_adjustment("Brighten", bright(0.3));
+        s.set_clipped(at, true).expect("clip");
+        // The panel keys its toggle off this; a missing field would make
+        // the row render as released while the engine clips.
+        assert!(s.layers()[at].clipped);
     }
 }

@@ -65,6 +65,7 @@ export const layers_render_smart: (a: number, b: number) => any;
 export const layers_reorder: (a: number, b: number) => [number, number];
 export const layers_set_active: (a: number) => [number, number];
 export const layers_set_blend: (a: number, b: number, c: number) => [number, number];
+export const layers_set_clipped: (a: number, b: number) => [number, number];
 export const layers_set_locked: (a: number, b: number) => [number, number];
 export const layers_set_mask_enabled: (a: number, b: number) => [number, number];
 export const layers_set_name: (a: number, b: number, c: number) => [number, number];

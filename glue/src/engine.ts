@@ -603,6 +603,10 @@ export interface LayerInfo {
   /** Whether that mask APPLIES. Disabled keeps the coverage — the two
    *  are different states and the panel shows both. */
   maskEnabled: boolean;
+  /** CLIPPED to the layer beneath: contributes only where its clip base
+   *  is opaque. Multiplies with the layer's own mask rather than
+   *  replacing it, so a clipped-and-masked layer is confined by both. */
+  clipped: boolean;
 }
 
 export interface LayerStackInfo {
@@ -1027,6 +1031,9 @@ export interface ImageEngine {
   layerClearMask(index: number): void;
   /** Toggle whether the mask applies, retaining the coverage. */
   layerSetMaskEnabled(index: number, enabled: boolean): void;
+  /** Clip a layer to the one beneath it — the mechanism smart filters
+   *  wanted: an adjustment clipped to a smart object IS a smart filter. */
+  layerSetClipped(index: number, clipped: boolean): void;
   /** Fold the stack and write the result into the bound image; returns
    *  the straight RGBA8. GPU-only whenever there is anything to blend; a
    *  single plain visible layer needs no device at all. */
@@ -1319,6 +1326,7 @@ export interface ImageWasmModule {
   layers_mask_from_selection(index: number): void;
   layers_clear_mask(index: number): void;
   layers_set_mask_enabled(index: number, enabled: boolean): void;
+  layers_set_clipped(index: number, clipped: boolean): void;
   layers_composite(): Promise<Uint8Array>;
   layers_bake_adjust(
     exposure_ev: number,
@@ -1715,6 +1723,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layerClearMask: (index) => wasm.layers_clear_mask(index),
     layerSetMaskEnabled: (index, enabled) =>
       wasm.layers_set_mask_enabled(index, enabled),
+    layerSetClipped: (index, clipped) => wasm.layers_set_clipped(index, clipped),
     layersComposite: () => wasm.layers_composite(),
     layersAddAdjustment: (name, p) =>
       // The SAME wire block the bake and the preview use — one decode,

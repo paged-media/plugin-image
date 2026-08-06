@@ -1025,6 +1025,7 @@ export function LayersSection({
   onAddAdjustment,
   onMaskFromSelection,
   onMaskToggle,
+  onClip,
   onMaskClear,
   onBake,
   onUndoTo,
@@ -1056,6 +1057,7 @@ export function LayersSection({
   onMaskFromSelection: (index: number) => void;
   /** Toggle whether the mask applies (the coverage is retained). */
   onMaskToggle: (index: number, enabled: boolean) => void;
+  onClip: (index: number, clipped: boolean) => void;
   /** Delete the mask outright. */
   onMaskClear: (index: number) => void;
   /** Walk BACK `n` journal steps (n undos — the journal is a stack). */
@@ -1202,6 +1204,20 @@ export function LayersSection({
                 ⬚
               </button>
             )}
+            <button
+              type="button"
+              title={
+                l.clipped
+                  ? "Clipped to the layer below — click to release"
+                  : "Clip to the layer below (an adjustment clipped to a smart object is a smart filter)"
+              }
+              data-image-layer-clip={l.index}
+              disabled={disabled || l.index === 0}
+              onClick={() => onClip(l.index, !l.clipped)}
+              style={{ fontWeight: l.clipped ? 700 : undefined }}
+            >
+              ⌐
+            </button>
             <button
               type="button"
               title="Move up"
@@ -2259,6 +2275,7 @@ export function makeImagePanel(session: ImageSession) {
           onAddAdjustment={() => void session.addAdjustmentLayer()}
           onMaskFromSelection={(i) => void session.layerMaskFromSelection(i)}
           onMaskToggle={(i, v) => void session.setLayerMaskEnabled(i, v)}
+          onClip={(i, v) => void session.setLayerClipped(i, v)}
           onMaskClear={(i) => void session.clearLayerMask(i)}
           onUndoTo={(n) => void session.undoSteps(n)}
           onRedoTo={(n) => void session.redoSteps(n)}

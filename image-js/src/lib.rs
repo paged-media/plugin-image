@@ -1634,7 +1634,7 @@ mod wasm {
                 .enumerate()
                 .map(|(index, layer)| {
                     format!(
-                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\",\"hasMask\":{},\"maskEnabled\":{},\"kind\":\"{}\"}}",
+                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\",\"hasMask\":{},\"maskEnabled\":{},\"clipped\":{},\"kind\":\"{}\"}}",
                         layer.id,
                         json_escape(&layer.name),
                         layer.visible,
@@ -1643,6 +1643,7 @@ mod wasm {
                         layer.blend_name(),
                         layer.mask.is_some(),
                         layer.mask_enabled,
+                        layer.clipped,
                         if layer.adjust_params().is_some() {
                             "adjustment"
                         } else if layer.smart_source().is_some() {
@@ -1795,6 +1796,15 @@ mod wasm {
 
     /// Toggle whether the attached mask applies, RETAINING it either way
     /// — losing painted coverage to a toggle would be a real loss.
+    /// Clip a layer to the one beneath it — the mechanism "smart
+    /// filters" wanted: an adjustment layer clipped to a smart object IS
+    /// a smart filter. Confines the layer to its base's ALPHA, and
+    /// multiplies with any mask it already has rather than replacing it.
+    #[wasm_bindgen]
+    pub fn layers_set_clipped(index: usize, clipped: bool) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_clipped(index, clipped).map_err(ingest_err))
+    }
+
     #[wasm_bindgen]
     pub fn layers_set_mask_enabled(index: usize, enabled: bool) -> Result<(), JsValue> {
         with_stack(|d| d.stack.set_mask_enabled(index, enabled).map_err(ingest_err))

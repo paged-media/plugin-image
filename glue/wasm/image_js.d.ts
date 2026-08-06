@@ -509,15 +509,21 @@ export function layers_set_active(index: number): void;
 export function layers_set_blend(index: number, blend: string): void;
 
 /**
+ * Toggle whether the attached mask applies, RETAINING it either way
+ * — losing painted coverage to a toggle would be a real loss.
+ * Clip a layer to the one beneath it — the mechanism "smart
+ * filters" wanted: an adjustment layer clipped to a smart object IS
+ * a smart filter. Confines the layer to its base's ALPHA, and
+ * multiplies with any mask it already has rather than replacing it.
+ */
+export function layers_set_clipped(index: number, clipped: boolean): void;
+
+/**
  * Lock a layer's PIXELS: paint / fill / bake refuse on it. Its
  * properties stay editable — that is what the lock means.
  */
 export function layers_set_locked(index: number, locked: boolean): void;
 
-/**
- * Toggle whether the attached mask applies, RETAINING it either way
- * — losing painted coverage to a toggle would be a real loss.
- */
 export function layers_set_mask_enabled(index: number, enabled: boolean): void;
 
 export function layers_set_name(index: number, name: string): void;
@@ -813,6 +819,7 @@ export interface InitOutput {
     readonly layers_reorder: (a: number, b: number) => [number, number];
     readonly layers_set_active: (a: number) => [number, number];
     readonly layers_set_blend: (a: number, b: number, c: number) => [number, number];
+    readonly layers_set_clipped: (a: number, b: number) => [number, number];
     readonly layers_set_locked: (a: number, b: number) => [number, number];
     readonly layers_set_mask_enabled: (a: number, b: number) => [number, number];
     readonly layers_set_name: (a: number, b: number, c: number) => [number, number];

@@ -1125,6 +1125,23 @@ export function layers_set_blend(index, blend) {
 }
 
 /**
+ * Toggle whether the attached mask applies, RETAINING it either way
+ * — losing painted coverage to a toggle would be a real loss.
+ * Clip a layer to the one beneath it — the mechanism "smart
+ * filters" wanted: an adjustment layer clipped to a smart object IS
+ * a smart filter. Confines the layer to its base's ALPHA, and
+ * multiplies with any mask it already has rather than replacing it.
+ * @param {number} index
+ * @param {boolean} clipped
+ */
+export function layers_set_clipped(index, clipped) {
+    const ret = wasm.layers_set_clipped(index, clipped);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * Lock a layer's PIXELS: paint / fill / bake refuse on it. Its
  * properties stay editable — that is what the lock means.
  * @param {number} index
@@ -1138,8 +1155,6 @@ export function layers_set_locked(index, locked) {
 }
 
 /**
- * Toggle whether the attached mask applies, RETAINING it either way
- * — losing painted coverage to a toggle would be a real loss.
  * @param {number} index
  * @param {boolean} enabled
  */
@@ -2328,12 +2343,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 337, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 338, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 372, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 373, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

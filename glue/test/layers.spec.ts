@@ -325,6 +325,7 @@ describe("the panel's Layers section", () => {
     kind: "pixels" as const,
     hasMask: false,
     maskEnabled: true,
+    clipped: false,
     ...over,
   });
 
@@ -380,6 +381,7 @@ describe("the panel's Layers section", () => {
         onAddAdjustment: () => {},
         onMaskFromSelection: () => {},
         onMaskToggle: () => {},
+        onClip: () => {},
         onMaskClear: () => {},
         onBake: () => {},
         onUndo: () => {},
@@ -469,3 +471,132 @@ describe("the panel's Layers section", () => {
     expect(LAYERS_SCOPE_NOTE).toContain("says why");
   });
 });
+
+// ── clipping (2026-08-06) ────────────────────────────────────────────
+
+describe("the layer row's clip toggle", () => {
+  const layer = (over: Partial<import("../src/engine").LayerInfo> = {}) => ({
+    index: 0,
+    id: 1,
+    name: "Background",
+    visible: true,
+    locked: false,
+    opacity: 1,
+    blend: "normal",
+    kind: "pixels" as const,
+    hasMask: false,
+    maskEnabled: true,
+    clipped: false,
+    ...over,
+  });
+  const history = () => ({
+    canUndo: false,
+    canRedo: false,
+    depth: 0,
+    redoDepth: 0,
+    bytes: 0,
+    maxBytes: 1024,
+    maxEntries: 8,
+    dropped: 0,
+    generation: 0,
+    undoLabel: null,
+    redoLabel: null,
+    undoSteps: [],
+    redoSteps: [],
+  });
+  const render = (over: Partial<Parameters<typeof LayersSection>[0]> = {}) =>
+    textOf(
+      LayersSection({
+        layers: [layer(), layer({ index: 1, id: 2, name: "Adjust" })],
+        active: 1,
+        history: history(),
+        blendModes: ["normal"],
+        layersNote: null,
+        gpu: true,
+        disabled: false,
+        onSelect: () => {},
+        onAdd: () => {},
+        onDuplicate: () => {},
+        onRemove: () => {},
+        onMove: () => {},
+        onVisible: () => {},
+        onOpacity: () => {},
+        onBlend: () => {},
+        onLock: () => {},
+        onUndoTo: () => {},
+        onRedoTo: () => {},
+        onAddAdjustment: () => {},
+        onMaskFromSelection: () => {},
+        onMaskToggle: () => {},
+        onClip: () => {},
+        onMaskClear: () => {},
+        onBake: () => {},
+        onUndo: () => {},
+        onRedo: () => {},
+        ...over,
+      }),
+    )
+      .join(" ")
+      .replace(/\s+/g, " ");
+
+  it("renders a clip control on every row", () => {
+    // The glyph is the affordance; its presence is what a spec can see
+    // without a DOM.
+    expect(render()).toContain("⌐");
+  });
+
+  it("explains what clipping IS in the row's own title", () => {
+    // A designer meeting this control for the first time should not have
+    // to know Photoshop to understand it — and the smart-filter framing
+    // is the reason it exists at all.
+    const tree = LayersSection({
+      layers: [layer(), layer({ index: 1, id: 2, name: "Adjust" })],
+      active: 1,
+      history: history(),
+      blendModes: ["normal"],
+      layersNote: null,
+      gpu: true,
+      disabled: false,
+      onSelect: () => {},
+      onAdd: () => {},
+      onDuplicate: () => {},
+      onRemove: () => {},
+      onMove: () => {},
+      onVisible: () => {},
+      onOpacity: () => {},
+      onBlend: () => {},
+      onLock: () => {},
+      onUndoTo: () => {},
+      onRedoTo: () => {},
+      onAddAdjustment: () => {},
+      onMaskFromSelection: () => {},
+      onMaskToggle: () => {},
+      onClip: () => {},
+      onMaskClear: () => {},
+      onBake: () => {},
+      onUndo: () => {},
+      onRedo: () => {},
+    });
+    const titles = collectTitles(tree);
+    expect(titles.some((t) => t.includes("smart filter"))).toBe(true);
+    expect(titles.some((t) => t.includes("Clip to the layer below"))).toBe(
+      true,
+    );
+  });
+});
+
+/** Every `title` prop in a pure element tree. */
+function collectTitles(node: unknown, out: string[] = []): string[] {
+  if (!node || typeof node !== "object") return out;
+  if (Array.isArray(node)) {
+    for (const n of node) collectTitles(n, out);
+    return out;
+  }
+  const el = node as { type?: unknown; props?: Record<string, unknown> };
+  if (typeof el.type === "function") {
+    return collectTitles((el.type as (p: unknown) => unknown)(el.props), out);
+  }
+  if (typeof el.props?.title === "string") out.push(el.props.title);
+  if (el.props) collectTitles(el.props.children, out);
+  return out;
+}

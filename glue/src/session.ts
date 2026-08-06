@@ -398,6 +398,9 @@ export interface ImageSession {
   layerMaskFromSelection(index: number): Promise<boolean>;
   /** Toggle whether the mask applies; the coverage is retained. */
   setLayerMaskEnabled(index: number, enabled: boolean): Promise<boolean>;
+  /** Clip a layer to the one beneath it (or release it). Confines it to
+   *  the base's ALPHA, multiplied with any mask it already has. */
+  setLayerClipped(index: number, clipped: boolean): Promise<boolean>;
   /** Delete the mask outright. */
   clearLayerMask(index: number): Promise<boolean>;
   /** Convert a pixel layer into a smart object (one-way — the source is
@@ -2244,6 +2247,19 @@ export function createImageSession(host: BundleHost): ImageSession {
       } catch (err) {
         setStatus(
           `Layer mask toggle failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      return finishMaskEdit();
+    },
+
+    async setLayerClipped(index, clipped) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerSetClipped(index, clipped);
+      } catch (err) {
+        setStatus(
+          `Clip failed: ${err instanceof Error ? err.message : err}`,
         );
         return false;
       }
