@@ -629,6 +629,47 @@ export interface PsdLayerInfo {
   right: number;
 }
 
+/** One `.abr` preset, projected onto the parameters the brush machine
+ *  actually takes (`abr_presets`). Every optional field is `null` when
+ *  the FILE does not carry it — a sampled (bitmap) tip has no hardness,
+ *  and a substituted default would be a fabrication, so the panel shows
+ *  the row as unavailable instead. */
+export interface BrushPresetInfo {
+  /** Position in the file's preset list — load-bearing, and the id. */
+  index: number;
+  name: string;
+  /** `computed` | `sampled` | `bristle` | `erodible` | `unsupported` |
+   *  `missing`. Which parameters exist depends on it. */
+  kind: string;
+  /** In `diameterUnit`, which is `#Pxl` in every observed file but is
+   *  carried anyway — a percentage diameter must not be applied as px. */
+  diameter: number | null;
+  diameterUnit: string | null;
+  /** 0–1, where the tip has one at all. */
+  hardness: number | null;
+  /** A fraction of the diameter. */
+  spacing: number | null;
+  /** When false the source disabled spacing (Photoshop then spaces by
+   *  cursor movement), so applying `spacing` would not match. */
+  spacingEnabled: boolean | null;
+  roundness: number | null;
+  angle: number | null;
+}
+
+/** A parsed `.abr` library. `warnings` is the reader's own diagnostic
+ *  list — a file that parsed WITH complaints is a different state from
+ *  one that parsed cleanly, and the panel says which. */
+export interface BrushLibraryInfo {
+  version: number;
+  minorVersion: number;
+  presetCount: number;
+  /** Sampled (bitmap) tips in the file. The engine does not render them
+   *  yet — its tip is parametric — so this is reported, not consumed. */
+  sampleCount: number;
+  warnings: readonly string[];
+  presets: readonly BrushPresetInfo[];
+}
+
 export interface ImageEngine {
   abiVersion(): number;
   kernelCount(): number;
@@ -719,6 +760,11 @@ export interface ImageEngine {
   psdRemoveLayer(handle: number, layer: number): void;
   psdSave(handle: number): Uint8Array;
   psdClose(handle: number): void;
+  /** Read a Photoshop `.abr` brush library. Stateless — the presets are
+   *  parameters, not pixels, so there is no handle to free. Throws with
+   *  the reader's own message on bytes that are not an `.abr` (which is
+   *  a different answer from a library that contains no presets). */
+  abrPresets(bytes: Uint8Array): BrushLibraryInfo;
   /** PSD SAVE-BACK: write the ADJUSTED full-resolution RGBA8 into the
    *  retained parse (the merged composite is always rewritten) and
    *  answer the HONEST description of what happened to the layer
@@ -1147,6 +1193,7 @@ export interface ImageWasmModule {
   psd_remove_layer(handle: number, layer: number): void;
   psd_save(handle: number): Uint8Array;
   psd_close(handle: number): void;
+  abr_presets(bytes: Uint8Array): string;
   layers_open(handle: number): void;
   layers_open_from_psd(image_handle: number, psd_handle: number): number;
   layers_close(): void;
@@ -1353,6 +1400,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     psdRemoveLayer: (handle, layer) => wasm.psd_remove_layer(handle, layer),
     psdSave: (handle) => wasm.psd_save(handle),
     psdClose: (handle) => wasm.psd_close(handle),
+    abrPresets: (bytes) => JSON.parse(wasm.abr_presets(bytes)) as BrushLibraryInfo,
     histogram(handle) {
       const flat = wasm.image_histogram(handle);
       return {

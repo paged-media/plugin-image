@@ -34,7 +34,9 @@ import manifest from "../../manifest.json";
 import type { ImageSession } from "../session";
 import type {
   AdjustParams,
+  BrushLibraryInfo,
   BrushParams,
+  BrushPresetInfo,
   BrushStats,
   GradientKind,
   ImageHistogram,
@@ -655,6 +657,137 @@ export function BrushSection({
         Parameters are frozen into each stroke at pointer-down — a stroke whose
         size changed halfway through would not replay.
       </div>
+    </>
+  );
+}
+
+// ── brush presets (.abr) ─────────────────────────────────────────────
+
+/** What a preset row says it will and will NOT bring across, in the
+ *  panel's words. The engine's tip is a parametric circle, so an
+ *  elliptical or angled preset is applied in part — and the row says so
+ *  rather than letting the designer discover it mid-stroke. */
+function presetSummary(p: BrushPresetInfo): string {
+  const bits: string[] = [];
+  if (p.diameter !== null) {
+    bits.push(
+      p.diameterUnit === "#Pxl"
+        ? `${Math.round(p.diameter)} px`
+        : `${Math.round(p.diameter)} ${p.diameterUnit ?? "?"}`,
+    );
+  }
+  if (p.hardness !== null) bits.push(`hardness ${p.hardness.toFixed(2)}`);
+  if (p.spacing !== null) {
+    bits.push(
+      p.spacingEnabled === false
+        ? "spacing off"
+        : `spacing ${p.spacing.toFixed(2)}`,
+    );
+  }
+  if (bits.length === 0) bits.push(p.kind);
+  return bits.join(" · ");
+}
+
+/** The BRUSHES palette — a Photoshop `.abr` library, projected onto the
+ *  parameters this engine's tip actually has. PURE (props in, elements
+ *  out) like `LayersSection`, so a spec can assert what it says without
+ *  a DOM.
+ *
+ *  The honest framing this section is built around: `.abr` is a
+ *  PARAMETER format, and only some of its parameters have a home here.
+ *  A sampled (bitmap) tip is listed with its size but cannot be stamped
+ *  — the engine's tip is parametric — and the row says which kind it is
+ *  so that "why does this look different from Photoshop" has an answer
+ *  on screen rather than in a changelog. */
+export function BrushPresetsSection({
+  library,
+  libraryName,
+  activePreset,
+  disabled,
+  onLoad,
+  onApply,
+  onClose,
+}: {
+  library: BrushLibraryInfo | null;
+  libraryName: string | null;
+  activePreset: number | null;
+  disabled: boolean;
+  onLoad: () => void;
+  onApply: (index: number) => void;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      <div style={sectionTitle}>Brush presets</div>
+      <div style={row}>
+        <button type="button" data-image-abr-load onClick={onLoad} disabled={disabled}>
+          Load .abr…
+        </button>
+        {library ? (
+          <button type="button" data-image-abr-close onClick={onClose}>
+            Close
+          </button>
+        ) : null}
+      </div>
+      {library ? (
+        <>
+          <div style={row}>
+            <span>{libraryName ?? "library"}</span>
+            <span style={mono} data-image-abr-summary>
+              v{library.version}.{library.minorVersion} · {library.presetCount}{" "}
+              preset{library.presetCount === 1 ? "" : "s"}
+              {library.sampleCount > 0 ? ` · ${library.sampleCount} bitmap` : ""}
+            </span>
+          </div>
+          {library.presetCount === 0 ? (
+            <div style={note}>
+              The library parsed and contains no presets — a real state, and
+              not the same as a file that failed to read.
+            </div>
+          ) : null}
+          <div data-image-abr-presets>
+            {library.presets.map((p) => (
+              <div
+                key={p.index}
+                style={{
+                  ...row,
+                  fontWeight: p.index === activePreset ? 600 : undefined,
+                }}
+              >
+                <button
+                  type="button"
+                  data-image-abr-preset={p.index}
+                  onClick={() => onApply(p.index)}
+                  disabled={p.kind === "unsupported" || p.kind === "missing"}
+                  title={`${p.kind} tip`}
+                >
+                  {p.name || `(unnamed ${p.index})`}
+                </button>
+                <span style={mono}>{presetSummary(p)}</span>
+              </div>
+            ))}
+          </div>
+          {library.warnings.length > 0 ? (
+            <div style={note} data-image-abr-warnings>
+              The reader parsed this file with {library.warnings.length} warning
+              {library.warnings.length === 1 ? "" : "s"}:{" "}
+              {library.warnings.join("; ")}
+            </div>
+          ) : null}
+          <div style={note}>
+            `.abr` is a parameter format, and only size, hardness and spacing
+            have a home in this engine&apos;s tip. Roundness and angle are shown
+            but not applied — the tip is circular — and a sampled (bitmap) tip
+            contributes its size only, because stamping a bitmap is a different
+            engine from the parametric dab that ships.
+          </div>
+        </>
+      ) : (
+        <div style={note}>
+          No library loaded. Photoshop `.abr` files carry brush parameters,
+          not pixels — loading one changes nothing until a preset is applied.
+        </div>
+      )}
     </>
   );
 }
@@ -1942,6 +2075,24 @@ export function makeImagePanel(session: ImageSession) {
           gpu={s.gpu}
           disabled={disabled}
           onChange={(patch) => session.setBrushParams(patch)}
+        />
+
+        {/* BRUSH PRESETS — the `.abr` reader, finally reachable. Until
+            this section existed the parser was dead-code-eliminated from
+            the shipped wasm: a capability in the repository and not in
+            the artifact. */}
+        <BrushPresetsSection
+          library={s.brushLibrary}
+          libraryName={s.brushLibraryName}
+          activePreset={s.brushPreset}
+          /* Never gated on an ingest: presets are parameters, and the
+             engine boots on demand when one is loaded. */
+          disabled={false}
+          onLoad={() => {
+            void session.pickBrushLibrary();
+          }}
+          onApply={(index) => session.applyBrushPreset(index)}
+          onClose={() => session.closeBrushLibrary()}
         />
 
         {/* Resize — the T1 resample kernels (GPU-only; the button says so

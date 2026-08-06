@@ -38,6 +38,7 @@ import {
   freshIdentityParams,
   isIdentity,
   type AdjustParams,
+  type BrushLibraryInfo,
   type BrushParams,
   type BrushStats,
   type DecodedInfo,
@@ -173,6 +174,17 @@ export interface ImageSessionState {
    *  layers, or the honest reason the layered import was DECLINED and
    *  the flattened composite kept. Null for non-PSD sources. */
   layersNote: string | null;
+  /** A loaded `.abr` brush library, or null before one is opened. The
+   *  presets are PARAMETERS, not pixels — loading one changes nothing
+   *  until the designer applies a row. */
+  brushLibrary: BrushLibraryInfo | null;
+  /** The library file's name, for the panel's header. */
+  brushLibraryName: string | null;
+  /** The applied preset's index, so the panel can mark the active row.
+   *  Cleared the moment a slider moves — the brush no longer IS the
+   *  preset once it is edited, and pretending otherwise would mislabel
+   *  a stroke's provenance. */
+  brushPreset: number | null;
 }
 
 export interface ImageSession {
@@ -280,6 +292,28 @@ export interface ImageSession {
   /** Merge into the brush parameters (the panel's Brush section). Takes
    *  effect on the NEXT stroke — the in-flight one is frozen. */
   setBrushParams(p: Partial<BrushParams>): void;
+  /** Load a Photoshop `.abr` brush library. Parses only — nothing about
+   *  the current brush changes until `applyBrushPreset`. Resolves false
+   *  (with the reader's own reason in `status`) when the bytes are not
+   *  an `.abr`.
+   *
+   *  ASYNC because it BOOTS the engine if needed: presets are
+   *  parameters, so a designer can pick a brush library before there is
+   *  any image to paint on, and refusing until after an ingest would be
+   *  an implementation detail leaking into the workflow. */
+  loadBrushLibrary(name: string, bytes: Uint8Array): Promise<boolean>;
+  /** Open the host picker for a `.abr` and load what comes back. Resolves
+   *  false when the user cancels OR no picker is wired — `pickFile`
+   *  answers `[]` for both, so the two are reported apart by probing
+   *  `shell.pickFile@1`. */
+  pickBrushLibrary(): Promise<boolean>;
+  /** Adopt a preset's parameters into the live brush. Applies ONLY what
+   *  the engine's tip has — size, hardness, spacing — and says in
+   *  `status` what the preset carried that could not be applied
+   *  (roundness/angle: the tip is circular; a non-pixel diameter). */
+  applyBrushPreset(index: number): boolean;
+  /** Forget the loaded library (the panel's Close). */
+  closeBrushLibrary(): void;
   /** OPEN a stroke on the engine-held source with the current brush
    *  params + the bound selection (both frozen for its duration).
    *  GPU-only: false with an honest status when there is no device,
@@ -423,6 +457,9 @@ export function createImageSession(host: BundleHost): ImageSession {
     layers: EMPTY_LAYER_STACK,
     history: null,
     layersNote: null,
+    brushLibrary: null,
+    brushLibraryName: null,
+    brushPreset: null,
   };
   /** The retained PSD parse handle (wasm-side), when state.psd is set. */
   let psdHandle: number | null = null;
@@ -1544,6 +1581,113 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     setBrushParams(p) {
       state.brush = { ...state.brush, ...p };
+      // Editing any parameter means the brush is no longer the preset.
+      // Keeping the row highlighted would claim a provenance the stroke
+      // does not have.
+      state.brushPreset = null;
+      emit();
+    },
+
+    async loadBrushLibrary(name, bytes) {
+      const eng = await ensureEngine();
+      if (!eng) {
+        setStatus("The image engine could not start.");
+        return false;
+      }
+      let library: BrushLibraryInfo;
+      try {
+        library = eng.abrPresets(bytes);
+      } catch (e) {
+        // The reader's message names WHAT it refused (legacy version,
+        // bad signature); a generic "could not load" would throw that
+        // away. "Not an .abr" and "an .abr with no presets" are
+        // different answers and the panel shows both.
+        setStatus(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+        return false;
+      }
+      state.brushLibrary = library;
+      state.brushLibraryName = name;
+      state.brushPreset = null;
+      const warned = library.warnings.length;
+      setStatus(
+        `${name}: ${library.presetCount} brush preset${
+          library.presetCount === 1 ? "" : "s"
+        }` +
+          (library.sampleCount > 0
+            ? `, ${library.sampleCount} sampled tip${
+                library.sampleCount === 1 ? "" : "s"
+              } (bitmap tips are not painted — the engine's tip is parametric)`
+            : "") +
+          (warned > 0 ? `, ${warned} reader warning${warned === 1 ? "" : "s"}` : ""),
+      );
+      return true;
+    },
+
+    async pickBrushLibrary() {
+      if (!host.supports("shell.pickFile@1")) {
+        // `pickFile` resolves `[]` both when the user cancels and when no
+        // picker is wired at all. Probing keeps "you cancelled" from
+        // masquerading as "this host cannot open files".
+        setStatus("This host wires no file picker (shell.pickFile@1).");
+        return false;
+      }
+      const picked = await host.shell.pickFile({ accept: [".abr"] });
+      const file = picked[0];
+      if (!file) {
+        setStatus("No brush library chosen.");
+        return false;
+      }
+      return await this.loadBrushLibrary(file.name, file.bytes);
+    },
+
+    applyBrushPreset(index) {
+      const preset = state.brushLibrary?.presets.find((p) => p.index === index);
+      if (!preset) {
+        setStatus("No such brush preset.");
+        return false;
+      }
+      // Apply only what the engine's tip HAS. Everything else is
+      // reported rather than silently dropped — a designer who picks a
+      // 45°-angled elliptical brush and gets a circle should be told.
+      const patch: Partial<BrushParams> = {};
+      const unapplied: string[] = [];
+      if (preset.diameter !== null && preset.diameterUnit === "#Pxl") {
+        patch.size = Math.max(1, Math.round(preset.diameter));
+      } else if (preset.diameter !== null) {
+        unapplied.push(`diameter in ${preset.diameterUnit ?? "an unknown unit"}`);
+      }
+      if (preset.hardness !== null) {
+        patch.hardness = Math.min(1, Math.max(0, preset.hardness));
+      } else {
+        // A sampled tip's softness lives in its BITMAP, which this
+        // engine does not stamp; saying so beats leaving the previous
+        // brush's hardness silently in force.
+        unapplied.push("hardness (the file carries none for this tip kind)");
+      }
+      if (preset.spacing !== null && preset.spacingEnabled !== false) {
+        patch.spacing = Math.max(0.01, preset.spacing);
+      } else if (preset.spacing !== null) {
+        unapplied.push("spacing (disabled in the preset)");
+      }
+      if (preset.roundness !== null && Math.abs(preset.roundness - 1) > 0.001) {
+        unapplied.push("roundness — the tip is circular");
+      }
+      if (preset.angle !== null && Math.abs(preset.angle) > 0.001) {
+        unapplied.push("angle — the tip is circular");
+      }
+      state.brush = { ...state.brush, ...patch };
+      state.brushPreset = index;
+      setStatus(
+        `Brush: ${preset.name}` +
+          (unapplied.length > 0 ? ` — not applied: ${unapplied.join("; ")}` : ""),
+      );
+      return true;
+    },
+
+    closeBrushLibrary() {
+      state.brushLibrary = null;
+      state.brushLibraryName = null;
+      state.brushPreset = null;
       emit();
     },
 

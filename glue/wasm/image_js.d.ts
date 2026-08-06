@@ -9,12 +9,34 @@ export class DecodedHandle {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * CMS rung 1 — what the RGB display transform did at decode, as a
+     * discriminant the bundle maps to a label: 0 = ICC managed,
+     * 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
+     * because an embedded profile was rejected. Surfaced so the panel
+     * can STATE the colour treatment instead of leaving the user to
+     * guess which numbers they are looking at.
+     */
+    display: number;
     handle: number;
     height: number;
     width: number;
 }
 
 export function abi_version(): number;
+
+/**
+ * Read a Photoshop `.abr` brush library and return its presets as
+ * JSON — the door that makes the `.abr` reader REACHABLE.
+ *
+ * Without a caller a wasm32 release build eliminates the whole
+ * parser, so this is the difference between a capability that
+ * exists in the repository and one that exists in the artifact.
+ * The projection (which parameters, and why the absent ones stay
+ * absent) lives in [`crate::brushes`], which is host-testable —
+ * `mod wasm` is `#[cfg(target_arch = "wasm32")]` and never is.
+ */
+export function abr_presets(bytes: Uint8Array): string;
 
 /**
  * Run the M4 adjustments chain on a decoded image and return the
@@ -49,6 +71,20 @@ export function adjust_image_ext(handle: number, exposure_ev: number, brightness
  * RGBA8 (the C-1 Stage-A scene payload).
  */
 export function adjust_image_full(handle: number, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean): Promise<Uint8Array>;
+
+/**
+ * APPLY a gradient map — luminance through a two-stop colour ramp.
+ * A pixel edit into the active layer, journaled and selection-masked
+ * exactly like a fill, because that is what it is.
+ */
+export function apply_gradient_map(handle: number, shadow: Float32Array, highlight: Float32Array): Promise<DecodedHandle>;
+
+/**
+ * APPLY a parametric distortion (`geom.warp_backward`). `kind` is
+ * 0 pinch / 1 spherize / 2 twirl / 3 wave; `amount == 0` is the
+ * identity for every kind, so a UI slider needs no special cases.
+ */
+export function apply_warp(handle: number, kind: number, amount: number, frequency: number): Promise<DecodedHandle>;
 
 /**
  * Every blend mode a stroke can paint through, newline-separated —
@@ -306,6 +342,21 @@ export function kernel_count(): number;
 export function layers_add(name: string): number;
 
 /**
+ * Insert an ADJUSTMENT LAYER carrying the panel's current chain.
+ *
+ * The non-destructive counterpart of `layers_bake_adjust` below: the
+ * bake writes the chain into the active layer's pixels and journals
+ * it; this stacks the chain ABOVE and touches no pixel at all, so
+ * deleting the layer restores the original exactly. Same wire block
+ * so the two can never disagree about what the panel meant.
+ *
+ * Refuses at identity — an adjustment layer that adjusts nothing is
+ * a row that does nothing, and adding one silently is worse than
+ * saying so.
+ */
+export function layers_add_adjustment(name: string, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean, ext: Float32Array): number;
+
+/**
  * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
  * per-layer adjustment (the panel's chain is otherwise a re-runnable
  * PREVIEW of the composite and mutates nothing). Journaled over the
@@ -318,6 +369,12 @@ export function layers_bake_adjust(exposure_ev: number, brightness: number, cont
  * The handle the stack is bound to, or `-1` when none is open.
  */
 export function layers_bound(): number;
+
+/**
+ * DELETE the mask (the coverage is gone), as distinct from
+ * disabling it.
+ */
+export function layers_clear_mask(index: number): void;
 
 /**
  * Drop the bound stack (and its undo history).
@@ -351,6 +408,23 @@ export function layers_history(): string;
  * `opacity` is 0–1; `blend` is the `compose.*` wire name.
  */
 export function layers_list(): string;
+
+/**
+ * CONVERT a pixel layer into a smart object, preserving its pixels
+ * as the source. One-way by design: going back would discard the
+ * source, which is the destructive move this exists to prevent.
+ */
+export function layers_make_smart(index: number): void;
+
+/**
+ * Make the CURRENT SELECTION this layer's mask. The natural
+ * authoring path, and the reason layer masks needed no new
+ * authoring engine: the marquee / lasso / wand already produce
+ * exactly the coverage a mask is. Errors when nothing is selected —
+ * silently attaching an all-one mask would look like success and
+ * mask nothing.
+ */
+export function layers_mask_from_selection(index: number): void;
 
 /**
  * OPEN a layer stack over an engine-held image: one full-canvas
@@ -392,6 +466,17 @@ export function layers_redo(): Promise<string>;
 export function layers_remove(index: number): void;
 
 /**
+ * RE-RENDER a smart object at `scale` — from its preserved SOURCE,
+ * never from the current cache, which is the whole point: scaling
+ * down and back up loses nothing.
+ *
+ * GPU-only (the resample is a kernel dispatch). The rendered result
+ * is letterboxed into the canvas extent, so the layer keeps its
+ * place in a stack whose layers are all canvas-sized.
+ */
+export function layers_render_smart(index: number, scale: number): Promise<void>;
+
+/**
  * Move a layer in stack order (0 = bottom).
  */
 export function layers_reorder(from: number, to: number): void;
@@ -409,6 +494,12 @@ export function layers_set_blend(index: number, blend: string): void;
  * properties stay editable — that is what the lock means.
  */
 export function layers_set_locked(index: number, locked: boolean): void;
+
+/**
+ * Toggle whether the attached mask applies, RETAINING it either way
+ * — losing painted coverage to a toggle would be a real loss.
+ */
+export function layers_set_mask_enabled(index: number, enabled: boolean): void;
 
 export function layers_set_name(index: number, name: string): void;
 
@@ -607,16 +698,21 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_decodedhandle_free: (a: number, b: number) => void;
+    readonly __wbg_get_decodedhandle_display: (a: number) => number;
     readonly __wbg_get_decodedhandle_handle: (a: number) => number;
     readonly __wbg_get_decodedhandle_height: (a: number) => number;
     readonly __wbg_get_decodedhandle_width: (a: number) => number;
+    readonly __wbg_set_decodedhandle_display: (a: number, b: number) => void;
     readonly __wbg_set_decodedhandle_handle: (a: number, b: number) => void;
     readonly __wbg_set_decodedhandle_height: (a: number, b: number) => void;
     readonly __wbg_set_decodedhandle_width: (a: number, b: number) => void;
     readonly abi_version: () => number;
+    readonly abr_presets: (a: number, b: number) => [number, number, number, number];
     readonly adjust_image: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly adjust_image_ext: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => any;
     readonly adjust_image_full: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => any;
+    readonly apply_gradient_map: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_warp: (a: number, b: number, c: number, d: number) => any;
     readonly brush_blend_modes: () => [number, number];
     readonly brush_stroke_active: () => number;
     readonly brush_stroke_begin: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
@@ -644,21 +740,27 @@ export interface InitOutput {
     readonly init_gpu: () => any;
     readonly kernel_count: () => number;
     readonly layers_add: (a: number, b: number) => [number, number, number];
+    readonly layers_add_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number) => [number, number, number];
     readonly layers_bake_adjust: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => any;
     readonly layers_bound: () => number;
+    readonly layers_clear_mask: (a: number) => [number, number];
     readonly layers_close: () => void;
     readonly layers_composite: () => any;
     readonly layers_duplicate: (a: number) => [number, number, number];
     readonly layers_history: () => [number, number];
     readonly layers_list: () => [number, number];
+    readonly layers_make_smart: (a: number) => [number, number];
+    readonly layers_mask_from_selection: (a: number) => [number, number];
     readonly layers_open: (a: number) => [number, number];
     readonly layers_open_from_psd: (a: number, b: number) => [number, number, number];
     readonly layers_redo: () => any;
     readonly layers_remove: (a: number) => [number, number];
+    readonly layers_render_smart: (a: number, b: number) => any;
     readonly layers_reorder: (a: number, b: number) => [number, number];
     readonly layers_set_active: (a: number) => [number, number];
     readonly layers_set_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_locked: (a: number, b: number) => [number, number];
+    readonly layers_set_mask_enabled: (a: number, b: number) => [number, number];
     readonly layers_set_name: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_opacity: (a: number, b: number) => [number, number];
     readonly layers_set_visible: (a: number, b: number) => [number, number];

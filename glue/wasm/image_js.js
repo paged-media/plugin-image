@@ -22,6 +22,19 @@ export class DecodedHandle {
         wasm.__wbg_decodedhandle_free(ptr, 0);
     }
     /**
+     * CMS rung 1 — what the RGB display transform did at decode, as a
+     * discriminant the bundle maps to a label: 0 = ICC managed,
+     * 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
+     * because an embedded profile was rejected. Surfaced so the panel
+     * can STATE the colour treatment instead of leaving the user to
+     * guess which numbers they are looking at.
+     * @returns {number}
+     */
+    get display() {
+        const ret = wasm.__wbg_get_decodedhandle_display(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {number}
      */
     get handle() {
@@ -41,6 +54,18 @@ export class DecodedHandle {
     get width() {
         const ret = wasm.__wbg_get_decodedhandle_width(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * CMS rung 1 — what the RGB display transform did at decode, as a
+     * discriminant the bundle maps to a label: 0 = ICC managed,
+     * 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
+     * because an embedded profile was rejected. Surfaced so the panel
+     * can STATE the colour treatment instead of leaving the user to
+     * guess which numbers they are looking at.
+     * @param {number} arg0
+     */
+    set display(arg0) {
+        wasm.__wbg_set_decodedhandle_display(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0
@@ -69,6 +94,40 @@ if (Symbol.dispose) DecodedHandle.prototype[Symbol.dispose] = DecodedHandle.prot
 export function abi_version() {
     const ret = wasm.abi_version();
     return ret >>> 0;
+}
+
+/**
+ * Read a Photoshop `.abr` brush library and return its presets as
+ * JSON — the door that makes the `.abr` reader REACHABLE.
+ *
+ * Without a caller a wasm32 release build eliminates the whole
+ * parser, so this is the difference between a capability that
+ * exists in the repository and one that exists in the artifact.
+ * The projection (which parameters, and why the absent ones stay
+ * absent) lives in [`crate::brushes`], which is host-testable —
+ * `mod wasm` is `#[cfg(target_arch = "wasm32")]` and never is.
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+export function abr_presets(bytes) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.abr_presets(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
 }
 
 /**
@@ -160,6 +219,39 @@ export function adjust_image_full(handle, exposure_ev, brightness, contrast, sat
     const ptr0 = passArray8ToWasm0(curve_lut, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.adjust_image_full(handle, exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, ptr0, len0, blur_sigma, sharpen_amount, hue_degrees, invert);
+    return ret;
+}
+
+/**
+ * APPLY a gradient map — luminance through a two-stop colour ramp.
+ * A pixel edit into the active layer, journaled and selection-masked
+ * exactly like a fill, because that is what it is.
+ * @param {number} handle
+ * @param {Float32Array} shadow
+ * @param {Float32Array} highlight
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gradient_map(handle, shadow, highlight) {
+    const ptr0 = passArrayF32ToWasm0(shadow, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(highlight, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.apply_gradient_map(handle, ptr0, len0, ptr1, len1);
+    return ret;
+}
+
+/**
+ * APPLY a parametric distortion (`geom.warp_backward`). `kind` is
+ * 0 pinch / 1 spherize / 2 twirl / 3 wave; `amount == 0` is the
+ * identity for every kind, so a UI slider needs no special cases.
+ * @param {number} handle
+ * @param {number} kind
+ * @param {number} amount
+ * @param {number} frequency
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_warp(handle, kind, amount, frequency) {
+    const ret = wasm.apply_warp(handle, kind, amount, frequency);
     return ret;
 }
 
@@ -666,6 +758,52 @@ export function layers_add(name) {
 }
 
 /**
+ * Insert an ADJUSTMENT LAYER carrying the panel's current chain.
+ *
+ * The non-destructive counterpart of `layers_bake_adjust` below: the
+ * bake writes the chain into the active layer's pixels and journals
+ * it; this stacks the chain ABOVE and touches no pixel at all, so
+ * deleting the layer restores the original exactly. Same wire block
+ * so the two can never disagree about what the panel meant.
+ *
+ * Refuses at identity — an adjustment layer that adjusts nothing is
+ * a row that does nothing, and adding one silently is worse than
+ * saying so.
+ * @param {string} name
+ * @param {number} exposure_ev
+ * @param {number} brightness
+ * @param {number} contrast
+ * @param {number} saturation
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} in_black
+ * @param {number} in_white
+ * @param {number} gamma
+ * @param {number} out_black
+ * @param {number} out_white
+ * @param {Uint8Array} curve_lut
+ * @param {number} blur_sigma
+ * @param {number} sharpen_amount
+ * @param {number} hue_degrees
+ * @param {boolean} invert
+ * @param {Float32Array} ext
+ * @returns {number}
+ */
+export function layers_add_adjustment(name, exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, curve_lut, blur_sigma, sharpen_amount, hue_degrees, invert, ext) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(curve_lut, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayF32ToWasm0(ext, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_add_adjustment(ptr0, len0, exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, ptr1, len1, blur_sigma, sharpen_amount, hue_degrees, invert, ptr2, len2);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] >>> 0;
+}
+
+/**
  * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
  * per-layer adjustment (the panel's chain is otherwise a re-runnable
  * PREVIEW of the composite and mutates nothing). Journaled over the
@@ -706,6 +844,18 @@ export function layers_bake_adjust(exposure_ev, brightness, contrast, saturation
 export function layers_bound() {
     const ret = wasm.layers_bound();
     return ret;
+}
+
+/**
+ * DELETE the mask (the coverage is gone), as distinct from
+ * disabling it.
+ * @param {number} index
+ */
+export function layers_clear_mask(index) {
+    const ret = wasm.layers_clear_mask(index);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
 }
 
 /**
@@ -780,6 +930,35 @@ export function layers_list() {
 }
 
 /**
+ * CONVERT a pixel layer into a smart object, preserving its pixels
+ * as the source. One-way by design: going back would discard the
+ * source, which is the destructive move this exists to prevent.
+ * @param {number} index
+ */
+export function layers_make_smart(index) {
+    const ret = wasm.layers_make_smart(index);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Make the CURRENT SELECTION this layer's mask. The natural
+ * authoring path, and the reason layer masks needed no new
+ * authoring engine: the marquee / lasso / wand already produce
+ * exactly the coverage a mask is. Errors when nothing is selected —
+ * silently attaching an all-one mask would look like success and
+ * mask nothing.
+ * @param {number} index
+ */
+export function layers_mask_from_selection(index) {
+    const ret = wasm.layers_mask_from_selection(index);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * OPEN a layer stack over an engine-held image: one full-canvas
  * "Background" layer sharing that image's pixels. Re-opening on the
  * SAME handle is a no-op (the stack survives); opening on a
@@ -844,6 +1023,23 @@ export function layers_remove(index) {
 }
 
 /**
+ * RE-RENDER a smart object at `scale` — from its preserved SOURCE,
+ * never from the current cache, which is the whole point: scaling
+ * down and back up loses nothing.
+ *
+ * GPU-only (the resample is a kernel dispatch). The rendered result
+ * is letterboxed into the canvas extent, so the layer keeps its
+ * place in a stack whose layers are all canvas-sized.
+ * @param {number} index
+ * @param {number} scale
+ * @returns {Promise<void>}
+ */
+export function layers_render_smart(index, scale) {
+    const ret = wasm.layers_render_smart(index, scale);
+    return ret;
+}
+
+/**
  * Move a layer in stack order (0 = bottom).
  * @param {number} from
  * @param {number} to
@@ -888,6 +1084,19 @@ export function layers_set_blend(index, blend) {
  */
 export function layers_set_locked(index, locked) {
     const ret = wasm.layers_set_locked(index, locked);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Toggle whether the attached mask applies, RETAINING it either way
+ * — losing painted coverage to a toggle would be a real loss.
+ * @param {number} index
+ * @param {boolean} enabled
+ */
+export function layers_set_mask_enabled(index, enabled) {
+    const ret = wasm.layers_set_mask_enabled(index, enabled);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
@@ -2008,12 +2217,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 319, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 336, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 354, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 371, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

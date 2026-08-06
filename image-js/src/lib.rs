@@ -58,6 +58,7 @@
 //! (image-conformance / `image-kernels` feature `reference`) is
 //! reachable from this crate (cargo-tree guard, spec §4 dep rule 2).
 
+pub mod brushes;
 pub mod cmyk;
 pub mod display;
 pub mod fill;
@@ -2475,6 +2476,20 @@ mod wasm {
         PSDS.with(|m| {
             m.borrow_mut().remove(&handle);
         });
+    }
+
+    /// Read a Photoshop `.abr` brush library and return its presets as
+    /// JSON — the door that makes the `.abr` reader REACHABLE.
+    ///
+    /// Without a caller a wasm32 release build eliminates the whole
+    /// parser, so this is the difference between a capability that
+    /// exists in the repository and one that exists in the artifact.
+    /// The projection (which parameters, and why the absent ones stay
+    /// absent) lives in [`crate::brushes`], which is host-testable —
+    /// `mod wasm` is `#[cfg(target_arch = "wasm32")]` and never is.
+    #[wasm_bindgen]
+    pub fn abr_presets(bytes: &[u8]) -> Result<String, JsValue> {
+        crate::brushes::presets_json(bytes).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Minimal JSON string escape (quotes, backslash, control chars) —

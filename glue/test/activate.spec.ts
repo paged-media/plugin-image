@@ -22,6 +22,9 @@
 // command and the K-2 raster importer. The ingest loop itself is
 // session.spec.ts (real engine wasm).
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { loadBundle } from "@paged-media/plugin-sdk";
@@ -65,6 +68,7 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.undo",
       "media.paged.image.command.redo",
       "media.paged.image.command.applyToFile",
+      "media.paged.image.command.loadBrushLibrary",
       "media.paged.image.command.selectAll",
       "media.paged.image.command.deselect",
       "media.paged.image.command.invertSelection",
@@ -113,5 +117,24 @@ describe("imageBundle.activate", () => {
     expect(fake.commands.ids()).toHaveLength(0);
     expect(fake.tools.ids()).toHaveLength(0);
     expect(fake.importers.ids()).toHaveLength(0);
+  });
+});
+
+// ── the two manifests must be ONE manifest ───────────────────────────
+//
+// `manifest/manifest.json` is what `pnpm validate:manifest` checks and
+// what the packaged bundle declares; `glue/manifest.json` is the COPY
+// the bundle actually imports at build time. They are two tracked files
+// with no sync step between them, so a capability declared in one and
+// not the other produces a `PluginCapabilityError` at activate — which
+// is exactly what happened when the `.abr` command was added. This is
+// the guard that turns that into a one-line failure instead of a
+// mystery.
+describe("the manifest copy", () => {
+  it("is byte-identical to the validated manifest", () => {
+    const here = fileURLToPath(new URL(".", import.meta.url));
+    const declared = readFileSync(`${here}../../manifest/manifest.json`, "utf8");
+    const embedded = readFileSync(`${here}../manifest.json`, "utf8");
+    expect(embedded).toBe(declared);
   });
 });

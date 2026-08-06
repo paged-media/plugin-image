@@ -338,6 +338,21 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
+  // BRUSH PRESETS — the `.abr` reader's only caller, and the reason it
+  // survives dead-code elimination in the shipped wasm at all. Reads
+  // through `shell.pickFile@1` (the same READ door the importer uses);
+  // `.abr` carries parameters, not pixels, so nothing is ingested and
+  // no handle is retained.
+  host.contribute.command({
+    id: "media.paged.image.command.loadBrushLibrary",
+    title: "Load brush library (.abr)",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.pickBrushLibrary();
+    },
+  });
+
   // Selection commands (the panel buttons + command-palette reach).
   host.contribute.command({
     id: "media.paged.image.command.selectAll",
