@@ -36,7 +36,11 @@
 // (and an rgba16float→rgba8 downconvert) to wasm is the M2/Stage-B
 // follow-on; until then this is the truthful partial, named here.
 
-import type { BundleHost, Disposable, TileBytes } from "@paged-media/plugin-api";
+import type {
+  BundleHost,
+  Disposable,
+  TileBytes,
+} from "@paged-media/plugin-api";
 
 import type { ImageEngine } from "./engine";
 

@@ -566,6 +566,9 @@ export interface LayerInfo {
   opacity: number;
   /** A `compose.*` wire name (the prefix dropped). */
   blend: string;
+  /** `"pixels"` or `"adjustment"` — an adjustment layer carries no
+   *  pixels of its own and transforms everything beneath it. */
+  kind: "pixels" | "adjustment";
   /** Whether a layer mask is attached at all. */
   hasMask: boolean;
   /** Whether that mask APPLIES. Disabled keeps the coverage — the two
@@ -862,6 +865,10 @@ export interface ImageEngine {
   /** Set the blend by `compose.*` wire name; an unregistered name
    *  THROWS rather than silently becoming normal. */
   layerSetBlend(index: number, blend: string): void;
+  /** Stack the chain as an ADJUSTMENT LAYER above the active one —
+   *  non-destructive, unlike `layersBakeAdjust`. Returns its index.
+   *  Throws at identity rather than adding a row that does nothing. */
+  layersAddAdjustment(name: string, params: AdjustParams): number;
   /** Make the current selection this layer's mask — the natural
    *  authoring path (a selection and a mask are the same coverage). */
   layerMaskFromSelection(index: number): void;
@@ -1120,6 +1127,26 @@ export interface ImageWasmModule {
   layers_set_opacity(index: number, opacity: number): void;
   layers_set_name(index: number, name: string): void;
   layers_set_blend(index: number, blend: string): void;
+  layers_add_adjustment(
+    name: string,
+    exposureEv: number,
+    brightness: number,
+    contrast: number,
+    saturation: number,
+    temp: number,
+    tint: number,
+    inBlack: number,
+    inWhite: number,
+    gamma: number,
+    outBlack: number,
+    outWhite: number,
+    curveLut: Uint8Array,
+    blurSigma: number,
+    sharpenAmount: number,
+    hueDegrees: number,
+    invert: boolean,
+    ext: Float32Array,
+  ): number;
   layers_mask_from_selection(index: number): void;
   layers_clear_mask(index: number): void;
   layers_set_mask_enabled(index: number, enabled: boolean): void;
@@ -1482,6 +1509,29 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layerSetMaskEnabled: (index, enabled) =>
       wasm.layers_set_mask_enabled(index, enabled),
     layersComposite: () => wasm.layers_composite(),
+    layersAddAdjustment: (name, p) =>
+      // The SAME wire block the bake and the preview use — one decode,
+      // one meaning. The only difference is where the chain LIVES.
+      wasm.layers_add_adjustment(
+        name,
+        p.exposureEv,
+        p.brightness,
+        p.contrast,
+        p.saturation,
+        p.temp,
+        p.tint,
+        p.levels.inBlack,
+        p.levels.inWhite,
+        p.levels.gamma,
+        p.levels.outBlack,
+        p.levels.outWhite,
+        p.curveLut ?? new Uint8Array(0),
+        p.blurSigma,
+        p.sharpenAmount,
+        p.hueDegrees,
+        p.invert,
+        packAdjustExt(p),
+      ),
     layersBakeAdjust: (p) =>
       // The SAME wire the preview chain uses (`adjust_image_ext` minus
       // the handle) — one decode of the block, one meaning.

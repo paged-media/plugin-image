@@ -66,7 +66,9 @@ export function imageToPage(
   fit: FitTransform | null,
   p: [number, number],
 ): [number, number] {
-  return fit ? [fit.originX + p[0] * fit.scale, fit.originY + p[1] * fit.scale] : p;
+  return fit
+    ? [fit.originX + p[0] * fit.scale, fit.originY + p[1] * fit.scale]
+    : p;
 }
 
 /** page-local pt → image px (the inverse of [`imageToPage`]). */
@@ -74,7 +76,9 @@ export function pageToImage(
   fit: FitTransform | null,
   p: [number, number],
 ): [number, number] {
-  return fit ? [(p[0] - fit.originX) / fit.scale, (p[1] - fit.originY) / fit.scale] : p;
+  return fit
+    ? [(p[0] - fit.originX) / fit.scale, (p[1] - fit.originY) / fit.scale]
+    : p;
 }
 
 /** The composited frame's fit transform for the session's live source,

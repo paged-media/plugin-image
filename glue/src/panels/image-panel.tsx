@@ -684,6 +684,7 @@ export function LayersSection({
   onOpacity,
   onBlend,
   onLock,
+  onAddAdjustment,
   onMaskFromSelection,
   onMaskToggle,
   onMaskClear,
@@ -709,6 +710,8 @@ export function LayersSection({
   onOpacity: (index: number, opacity: number) => void;
   onBlend: (index: number, blend: string) => void;
   onLock: (index: number, locked: boolean) => void;
+  /** Stack the chain as a non-destructive adjustment layer. */
+  onAddAdjustment: () => void;
   /** Make the current selection this layer's mask. */
   onMaskFromSelection: (index: number) => void;
   /** Toggle whether the mask applies (the coverage is retained). */
@@ -908,6 +911,15 @@ export function LayersSection({
           onClick={onAdd}
         >
           Add layer
+        </button>
+        <button
+          type="button"
+          data-image-layer-add-adjustment
+          disabled={disabled}
+          title="Stack the adjustment chain as a non-destructive layer — it transforms everything beneath it, and deleting it restores the original exactly"
+          onClick={onAddAdjustment}
+        >
+          Add adjustment layer
         </button>
         <button
           type="button"
@@ -1799,6 +1811,7 @@ export function makeImagePanel(session: ImageSession) {
           onOpacity={(i, v) => void session.setLayerOpacity(i, v)}
           onBlend={(i, b) => void session.setLayerBlend(i, b)}
           onLock={(i, v) => session.setLayerLocked(i, v)}
+          onAddAdjustment={() => void session.addAdjustmentLayer()}
           onMaskFromSelection={(i) => void session.layerMaskFromSelection(i)}
           onMaskToggle={(i, v) => void session.setLayerMaskEnabled(i, v)}
           onMaskClear={(i) => void session.clearLayerMask(i)}

@@ -73,7 +73,8 @@ describe("the M4 ingest session (real engine wasm)", () => {
     // image scene item carrying the DECODED RGBA, full-frame dest.
     expect(await session.apply()).toBe(true);
     expect(fake.sceneLayers.submit).toHaveBeenCalledTimes(1);
-    const [elementId, layer] = fake.sceneLayers.submit.mock.calls[0] as unknown as [
+    const [elementId, layer] = fake.sceneLayers.submit.mock
+      .calls[0] as unknown as [
       string,
       { items: Array<Record<string, unknown>> },
     ];

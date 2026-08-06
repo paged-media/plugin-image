@@ -105,7 +105,13 @@ export function makeFakeEditor() {
   const imageSubmits: Array<{
     imageId: string;
     level: number;
-    tiles: Array<{ x: number; y: number; width: number; height: number; rgba: number[] }>;
+    tiles: Array<{
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      rgba: number[];
+    }>;
     generation: number;
   }> = [];
   const images = {

@@ -28,12 +28,21 @@
 import { describe, expect, it } from "vitest";
 
 import { createBundleHost } from "@paged-media/plugin-sdk";
-import type { ElementGeometryItem, PluginManifest } from "@paged-media/plugin-api";
+import type {
+  ElementGeometryItem,
+  PluginManifest,
+} from "@paged-media/plugin-api";
 
 import manifestJson from "@paged-media/image-manifest/manifest.json";
 
 import { createImageSession } from "../src/session";
-import { makeFakeEditor, mapBacking, psdBytes, shellStub, silentConsole } from "./helpers";
+import {
+  makeFakeEditor,
+  mapBacking,
+  psdBytes,
+  shellStub,
+  silentConsole,
+} from "./helpers";
 
 function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
   return createBundleHost(() => fake.editor, manifestJson as PluginManifest, {
@@ -44,7 +53,10 @@ function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
 }
 
 /** A frame geometry box (page-local pt bounds) for the crop tool's read. */
-function geomFor(id: string, bounds: [number, number, number, number]): ElementGeometryItem {
+function geomFor(
+  id: string,
+  bounds: [number, number, number, number],
+): ElementGeometryItem {
   return { id: { kind: "rectangle", id } as never, pageId: "pg1", bounds };
 }
 

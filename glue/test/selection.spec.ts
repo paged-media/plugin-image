@@ -40,7 +40,13 @@ import manifestJson from "@paged-media/image-manifest/manifest.json";
 import { createImageSession } from "../src/session";
 import { makeSelectionGesture } from "../src/selection-tool";
 import { modeFromModifiers } from "../src/selection-machine";
-import { makeFakeEditor, mapBacking, psdBytes, shellStub, silentConsole } from "./helpers";
+import {
+  makeFakeEditor,
+  mapBacking,
+  psdBytes,
+  shellStub,
+  silentConsole,
+} from "./helpers";
 
 function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
   return createBundleHost(() => fake.editor, manifestJson as PluginManifest, {
@@ -50,7 +56,10 @@ function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
   });
 }
 
-function geomFor(id: string, bounds: [number, number, number, number]): ElementGeometryItem {
+function geomFor(
+  id: string,
+  bounds: [number, number, number, number],
+): ElementGeometryItem {
   return { id: { kind: "rectangle", id } as never, pageId: "pg1", bounds };
 }
 

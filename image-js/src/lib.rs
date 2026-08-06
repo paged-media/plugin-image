@@ -1457,7 +1457,7 @@ mod wasm {
                 .enumerate()
                 .map(|(index, layer)| {
                     format!(
-                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\",\"hasMask\":{},\"maskEnabled\":{}}}",
+                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\",\"hasMask\":{},\"maskEnabled\":{},\"kind\":\"{}\"}}",
                         layer.id,
                         json_escape(&layer.name),
                         layer.visible,
@@ -1466,6 +1466,11 @@ mod wasm {
                         layer.blend_name(),
                         layer.mask.is_some(),
                         layer.mask_enabled,
+                        if layer.adjust_params().is_some() {
+                            "adjustment"
+                        } else {
+                            "pixels"
+                        },
                     )
                 })
                 .collect();
@@ -1621,6 +1626,66 @@ mod wasm {
             (doc, result)
         })
         .await
+    }
+
+    /// Insert an ADJUSTMENT LAYER carrying the panel's current chain.
+    ///
+    /// The non-destructive counterpart of `layers_bake_adjust` below: the
+    /// bake writes the chain into the active layer's pixels and journals
+    /// it; this stacks the chain ABOVE and touches no pixel at all, so
+    /// deleting the layer restores the original exactly. Same wire block
+    /// so the two can never disagree about what the panel meant.
+    ///
+    /// Refuses at identity — an adjustment layer that adjusts nothing is
+    /// a row that does nothing, and adding one silently is worse than
+    /// saying so.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn layers_add_adjustment(
+        name: &str,
+        exposure_ev: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        temp: f32,
+        tint: f32,
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+        curve_lut: &[u8],
+        blur_sigma: f32,
+        sharpen_amount: f32,
+        hue_degrees: f32,
+        invert: bool,
+        ext: &[f32],
+    ) -> Result<usize, JsValue> {
+        let params = build_adjust_params(
+            exposure_ev,
+            brightness,
+            contrast,
+            saturation,
+            temp,
+            tint,
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+            curve_lut,
+            blur_sigma,
+            sharpen_amount,
+            hue_degrees,
+            invert,
+            ext,
+        )?;
+        if params.is_identity() {
+            return Err(JsValue::from_str(
+                "nothing to stack — the adjustment chain is at identity",
+            ));
+        }
+        with_stack(|d| Ok(d.stack.add_adjustment(name, params)))
     }
 
     /// BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE

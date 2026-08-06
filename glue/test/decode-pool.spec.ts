@@ -34,7 +34,13 @@ import manifestJson from "@paged-media/image-manifest/manifest.json";
 import { createDecodePool, DECODE_WORKER_MODULE } from "../src/decode-pool";
 import type { DecodeReply, DecodeRequest } from "../src/decode-worker";
 import { bootEngine } from "../src/engine";
-import { makeFakeEditor, mapBacking, psdBytes, silentConsole, PSD_RGBA } from "./helpers";
+import {
+  makeFakeEditor,
+  mapBacking,
+  psdBytes,
+  silentConsole,
+  PSD_RGBA,
+} from "./helpers";
 
 // A mock WorkerBackend whose every "worker" decodes via the REAL engine
 // wasm in-process (the worker module's logic, run on the main thread for
@@ -60,7 +66,13 @@ function makeDecodingBackend() {
               // The worker decodes to an engine handle, then windows the
               // whole image out as RGBA8 (the decode-worker's contract).
               const info = engine.decode(req.bytes);
-              const rgba = engine.tile(info.handle, 0, 0, info.width, info.height);
+              const rgba = engine.tile(
+                info.handle,
+                0,
+                0,
+                info.width,
+                info.height,
+              );
               engine.freeImage(info.handle);
               const out = new Uint8Array(rgba.length);
               out.set(rgba);
@@ -119,7 +131,9 @@ describe("the paged.image decode pool (K-3 consumer)", () => {
     const grant = host.workers.concurrency();
     expect(pool!.size()).toBe(grant);
     expect(mock.spawned.length).toBe(grant);
-    expect(mock.spawned.every((s) => s.module === DECODE_WORKER_MODULE)).toBe(true);
+    expect(mock.spawned.every((s) => s.module === DECODE_WORKER_MODULE)).toBe(
+      true,
+    );
 
     // A real decode round-trips the codec output.
     const decoded = await pool!.decode(psdBytes());

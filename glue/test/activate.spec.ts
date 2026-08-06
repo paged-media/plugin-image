@@ -27,7 +27,12 @@ import { describe, expect, it, vi } from "vitest";
 import { loadBundle } from "@paged-media/plugin-sdk";
 
 import { imageBundle, PANEL_ID } from "../src";
-import { makeFakeEditor, mapBacking, shellStub, silentConsole } from "./helpers";
+import {
+  makeFakeEditor,
+  mapBacking,
+  shellStub,
+  silentConsole,
+} from "./helpers";
 
 function load(
   fake: ReturnType<typeof makeFakeEditor>,

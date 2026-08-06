@@ -65,7 +65,9 @@ describe("the extended adjust parameter wire", () => {
     expect(e[19]).toBe(0); // threshold off
     expect(e[21]).toBe(0); // photo filter density 0 = off
     // Channel mixer identity matrix (rows at 26 / 30 / 34).
-    expect(Array.from(e.slice(26, 38))).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]);
+    expect(Array.from(e.slice(26, 38))).toEqual([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+    ]);
     // Per-channel levels identity {0, 1, 1} × 3 (at 38).
     expect(Array.from(e.slice(38, 47))).toEqual([0, 1, 1, 0, 1, 1, 0, 1, 1]);
   });
@@ -81,7 +83,11 @@ describe("the extended adjust parameter wire", () => {
     p.blackWhite = { enabled: true, weights: [...DEFAULT_BW_WEIGHTS] };
     p.posterizeLevels = 8;
     p.threshold = 0.4;
-    p.photoFilter = { color: [0.1, 0.2, 0.3], density: 0.5, preserveLuminosity: false };
+    p.photoFilter = {
+      color: [0.1, 0.2, 0.3],
+      density: 0.5,
+      preserveLuminosity: false,
+    };
     p.channelMixer = { r: [1, 2, 3, 4], g: [5, 6, 7, 8], b: [9, 10, 11, 12] };
     p.levelsRgb = {
       r: { inBlack: 0.1, inWhite: 0.9, gamma: 1.5 },
@@ -92,19 +98,21 @@ describe("the extended adjust parameter wire", () => {
     expect(e[0]).toBeCloseTo(0.25);
     expect(Array.from(e.slice(1, 10))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(e[10]).toBe(1);
-    expect(Array.from(e.slice(11, 17)).map((n) => Math.round(n * 100) / 100)).toEqual([
-      ...DEFAULT_BW_WEIGHTS,
-    ]);
+    expect(
+      Array.from(e.slice(11, 17)).map((n) => Math.round(n * 100) / 100),
+    ).toEqual([...DEFAULT_BW_WEIGHTS]);
     expect(e[17]).toBe(1);
     expect(e[18]).toBe(8);
     expect(e[19]).toBe(1);
     expect(e[20]).toBeCloseTo(0.4);
     expect(e[21]).toBeCloseTo(0.5);
     expect(e[25]).toBe(0); // preserve luminosity OFF
-    expect(Array.from(e.slice(26, 38))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    expect(Array.from(e.slice(38, 47)).map((n) => Math.round(n * 10) / 10)).toEqual([
-      0.1, 0.9, 1.5, 0.2, 0.8, 1.4, 0.3, 0.7, 1.3,
+    expect(Array.from(e.slice(26, 38))).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     ]);
+    expect(
+      Array.from(e.slice(38, 47)).map((n) => Math.round(n * 10) / 10),
+    ).toEqual([0.1, 0.9, 1.5, 0.2, 0.8, 1.4, 0.3, 0.7, 1.3]);
   });
 
   it("treats a GATED-OFF stage as identity whatever its other fields hold", () => {
@@ -177,7 +185,9 @@ describe("the save-back lane (real engine wasm)", () => {
     expect(back).not.toBeNull();
     expect(back!.fileName).toBe("shot.png");
     expect(back!.mimeType).toBe("image/png");
-    expect(Array.from(back!.bytes.slice(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(Array.from(back!.bytes.slice(0, 4))).toEqual([
+      0x89, 0x50, 0x4e, 0x47,
+    ]);
     expect(session.state().saveBack?.fileName).toBe("shot.png");
 
     session.dispose();
@@ -196,7 +206,9 @@ describe("the save-back lane (real engine wasm)", () => {
     expect(back).not.toBeNull();
     expect(back!.fileName).toBe("art.psd");
     expect(back!.mimeType).toBe("image/vnd.adobe.photoshop");
-    expect(Array.from(back!.bytes.slice(0, 4))).toEqual([0x38, 0x42, 0x50, 0x53]);
+    expect(Array.from(back!.bytes.slice(0, 4))).toEqual([
+      0x38, 0x42, 0x50, 0x53,
+    ]);
     // The layerless fixture gains the synthesized single layer — the
     // note must SAY the structure changed, never stay silent.
     expect(back!.note).toContain("PSD save-back");

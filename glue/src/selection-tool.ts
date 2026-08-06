@@ -78,7 +78,8 @@ export function makeSelectionGesture(
   let fit: FitTransform | null = null;
 
   const imageToPage = (p: [number, number]): [number, number] => toPage(fit, p);
-  const pageToImage = (p: [number, number]): [number, number] => toImage(fit, p);
+  const pageToImage = (p: [number, number]): [number, number] =>
+    toImage(fit, p);
 
   /** Publish the marching-ants preview: the live gesture outline while
    *  dragging, else the committed selection outline; null clears. */
@@ -93,7 +94,9 @@ export function makeSelectionGesture(
       host.overlay.setToolPreview(null);
       return;
     }
-    host.overlay.setToolPreview(dashedPath(fit.pageId, outline.map(imageToPage)));
+    host.overlay.setToolPreview(
+      dashedPath(fit.pageId, outline.map(imageToPage)),
+    );
   };
 
   /** Resolve the composited frame's fit transform (async; cached until

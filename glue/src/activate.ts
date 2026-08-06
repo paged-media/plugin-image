@@ -381,11 +381,7 @@ export function activate(host: BundleHost): BundleHandle {
       id: "media.paged.image.importer.raster",
       title: "Image (PSD/PNG/JPEG)",
       extensions: [".psd", ".psb", ".png", ".jpg", ".jpeg"],
-      mimeTypes: [
-        "image/vnd.adobe.photoshop",
-        "image/png",
-        "image/jpeg",
-      ],
+      mimeTypes: ["image/vnd.adobe.photoshop", "image/png", "image/jpeg"],
       import: async ({ name, bytes }) => {
         host.shell.openPanel(PANEL_ID);
         await session.importBytes(name, bytes);

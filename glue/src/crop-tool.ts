@@ -48,11 +48,15 @@ import {
 /** The crop tool's gesture. Activates over the composited frame: reads its
  *  geometry, maps pointer points to image px, drives the session's crop
  *  machine, and publishes the crop frame as a closed overlay polyline. */
-export function makeCropGesture(host: BundleHost, session: ImageSession): GestureHandler {
+export function makeCropGesture(
+  host: BundleHost,
+  session: ImageSession,
+): GestureHandler {
   let fit: FitTransform | null = null;
 
   const imageToPage = (p: [number, number]): [number, number] => toPage(fit, p);
-  const pageToImage = (p: [number, number]): [number, number] => toImage(fit, p);
+  const pageToImage = (p: [number, number]): [number, number] =>
+    toImage(fit, p);
 
   /** Push the crop frame polyline to the overlay (or clear it). */
   const renderOverlay = () => {

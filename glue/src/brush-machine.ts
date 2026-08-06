@@ -208,7 +208,12 @@ export function createBrushMachine(): BrushMachine {
     move(point, pressure, pointerType) {
       if (!drawing) return false;
       const p = normalizePressure(pressure, pointerType);
-      if (last && last.x === point[0] && last.y === point[1] && last.pressure === p) {
+      if (
+        last &&
+        last.x === point[0] &&
+        last.y === point[1] &&
+        last.pressure === p
+      ) {
         return false;
       }
       return push(point, pressure, pointerType) !== null;

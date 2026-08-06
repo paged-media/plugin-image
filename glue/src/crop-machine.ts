@@ -31,27 +31,19 @@
 // caller maps page-local pt ↔ image px using the composited frame's
 // content box (the same aspect-fit transform `session.apply` uses).
 
-import type {
-  AspectLock,
-  CropHandle,
-  CropRect,
-  ImageEngine,
-} from "./engine";
+import type { AspectLock, CropHandle, CropRect, ImageEngine } from "./engine";
 
 /** The aspect-ratio lock presets the panel offers. `free` is
  *  unconstrained; `original` resolves to the source image's own ratio;
  *  the rest are fixed `w:h`. */
-export type AspectPreset =
-  | "free"
-  | "original"
-  | "1:1"
-  | "3:2"
-  | "4:3"
-  | "16:9";
+export type AspectPreset = "free" | "original" | "1:1" | "3:2" | "4:3" | "16:9";
 
 /** The fixed `w:h` ratios for the non-source presets (`free`/`original`
  *  resolve dynamically). */
-const PRESET_RATIO: Record<Exclude<AspectPreset, "free" | "original">, [number, number]> = {
+const PRESET_RATIO: Record<
+  Exclude<AspectPreset, "free" | "original">,
+  [number, number]
+> = {
   "1:1": [1, 1],
   "3:2": [3, 2],
   "4:3": [4, 3],
@@ -105,7 +97,11 @@ export interface CropMachine {
 
 /** Resolve a preset to the wasm aspect lock given the source dimensions
  *  (so `original` follows the image's own ratio). */
-function presetLock(preset: AspectPreset, imageW: number, imageH: number): AspectLock {
+function presetLock(
+  preset: AspectPreset,
+  imageW: number,
+  imageH: number,
+): AspectLock {
   if (preset === "free") return null;
   if (preset === "original") return { w: imageW, h: imageH };
   const [w, h] = PRESET_RATIO[preset];
@@ -154,7 +150,12 @@ export function createCropMachine(
       // lock without waiting for a drag.
       const l = lock();
       if (l) {
-        const br = { x: state.rect.x, y: state.rect.y, w: state.rect.w, h: state.rect.h };
+        const br = {
+          x: state.rect.x,
+          y: state.rect.y,
+          w: state.rect.w,
+          h: state.rect.h,
+        };
         state.rect = engine.cropApplyDrag(
           br,
           4, // BottomRight

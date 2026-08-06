@@ -157,7 +157,8 @@ export function makeBrushGesture(
       const machine = session.brushMachine();
       if (!machine || !e.pagePoint || !fit) return;
       const point = pageToImage(fit, e.pagePoint);
-      if (!machine.down(point, e.pressure, e.pointerType as BrushPointerType)) return;
+      if (!machine.down(point, e.pressure, e.pointerType as BrushPointerType))
+        return;
       renderTip(point);
       void (async () => {
         if (!(await session.brushBegin(tool))) {

@@ -138,16 +138,36 @@ use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
 use image_kernels::KernelDef;
 
 use crate::fill::{f16_to_rgba8, rgba8_to_f16};
-use crate::ingest::IngestError;
+use crate::ingest::{adjust_rgba8, AdjustParams, DecodedImage, IngestError};
 use crate::stroke::blend_kernel;
 
 /// The default name of the layer an ingested image becomes.
 pub const BACKGROUND_LAYER_NAME: &str = "Background";
 
+/// What a layer CONTRIBUTES to the fold.
+///
+/// A pixel layer contributes its own pixels; an adjustment layer
+/// contributes a TRANSFORMATION OF EVERYTHING BENEATH IT. That is the
+/// whole non-destructive idea, and it is why this is a kind on the layer
+/// rather than a second stack: order, opacity, blend, visibility, lock
+/// and the MASK all mean the same thing for both, so they must not be
+/// re-implemented per kind.
+#[derive(Debug, Clone)]
+pub enum LayerKind {
+    /// Canvas-extent pixels of its own.
+    Pixels,
+    /// No pixels — the adjust chain, run over the backdrop beneath.
+    /// Boxed because `AdjustParams` is much larger than a discriminant
+    /// and every pixel layer would otherwise pay for it.
+    Adjustment(Box<AdjustParams>),
+}
+
 /// One pixel layer: canvas-extent straight RGBA8 plus the four
 /// properties the composite reads and the one (`locked`) it refuses on.
 #[derive(Debug, Clone)]
 pub struct Layer {
+    /// Pixels of its own, or an adjustment over what is below.
+    pub kind: LayerKind,
     /// Stable across reorders — the id the UI keys rows by.
     pub id: u32,
     pub name: String,
@@ -202,9 +222,23 @@ impl Layer {
     /// Is this layer a plain, unmodified pass-through — the shape that
     /// makes a one-layer composite the identity?
     fn is_plain(&self) -> bool {
-        self.opacity >= 1.0
+        self.is_pixels()
+            && self.opacity >= 1.0
             && std::ptr::eq(self.blend, &COMPOSE_NORMAL)
             && self.live_mask().is_none()
+    }
+
+    /// Does this layer carry pixels of its own?
+    pub fn is_pixels(&self) -> bool {
+        matches!(self.kind, LayerKind::Pixels)
+    }
+
+    /// The adjust parameters when this is an adjustment layer.
+    pub fn adjust_params(&self) -> Option<&AdjustParams> {
+        match &self.kind {
+            LayerKind::Adjustment(p) => Some(p),
+            LayerKind::Pixels => None,
+        }
     }
 
     /// The mask that actually applies: `None` when there is none or it is
@@ -284,6 +318,7 @@ impl LayerStack {
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
                 rgba,
+                kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
@@ -328,6 +363,7 @@ impl LayerStack {
                 opacity: plate.opacity as f32 / 255.0,
                 blend: psd_blend_kernel(&plate.blend_key),
                 rgba: Arc::from(plate.rgba.clone().into_boxed_slice()),
+                kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
@@ -385,6 +421,68 @@ impl LayerStack {
 
     /// Add an empty transparent layer directly ABOVE the active one and
     /// make it active. Returns its index.
+    /// Insert an ADJUSTMENT layer above the active one. It carries no
+    /// pixels; it transforms everything beneath it at composite time, so
+    /// the pixels it affects are never modified and deleting it restores
+    /// the original exactly.
+    ///
+    /// This is what makes the 15 reachable §14.1 adjustments
+    /// non-destructive: the same `AdjustParams` the panel already builds,
+    /// evaluated in the fold instead of written into a layer.
+    pub fn add_adjustment(&mut self, name: &str, params: AdjustParams) -> usize {
+        let id = self.fresh_id();
+        let at = self.active + 1;
+        let pixels = self.transparent();
+        self.layers.insert(
+            at,
+            Layer {
+                kind: LayerKind::Adjustment(Box::new(params)),
+                id,
+                name: if name.is_empty() {
+                    format!("Adjustment {id}")
+                } else {
+                    name.to_string()
+                },
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                blend: &COMPOSE_NORMAL,
+                rgba: pixels,
+                mask: None,
+                mask_enabled: true,
+            },
+        );
+        self.active = at;
+        at
+    }
+
+    /// Retune an existing adjustment layer. Errors on a pixel layer
+    /// rather than silently converting it — a conversion would discard
+    /// pixels, which is the one thing this whole feature exists to avoid.
+    pub fn set_adjustment(
+        &mut self,
+        index: usize,
+        params: AdjustParams,
+    ) -> Result<(), IngestError> {
+        let layer = self.layer_mut(index)?;
+        match &mut layer.kind {
+            LayerKind::Adjustment(p) => {
+                **p = params;
+                Ok(())
+            }
+            LayerKind::Pixels => Err(IngestError::Unsupported(format!(
+                "layer {index} holds pixels, not an adjustment"
+            ))),
+        }
+    }
+
+    /// Whether `index` is an adjustment layer.
+    pub fn is_adjustment(&self, index: usize) -> bool {
+        self.layers
+            .get(index)
+            .is_some_and(|l| l.adjust_params().is_some())
+    }
+
     pub fn add(&mut self, name: &str) -> usize {
         let id = self.fresh_id();
         let at = self.active + 1;
@@ -403,6 +501,7 @@ impl LayerStack {
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
                 rgba: pixels,
+                kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
@@ -746,7 +845,11 @@ impl LayerStack {
                     Some(o) if i == self.active => o,
                     _ => &l.rgba,
                 };
-                if is_fully_transparent(px) {
+                // An ADJUSTMENT layer has no pixels of its own — its
+                // `rgba` is a transparent placeholder — so the
+                // transparency skip would drop exactly the layers whose
+                // whole job is to change what is beneath them.
+                if l.is_pixels() && is_fully_transparent(px) {
                     return None;
                 }
                 Some((l, px))
@@ -793,6 +896,32 @@ impl LayerStack {
         // transparent black — the compose family's `in0` contract.
         let mut acc = vec![0u8; (w as usize) * (h as usize) * 8];
         for (layer, px) in plates {
+            // AN ADJUSTMENT LAYER transforms the backdrop instead of
+            // blending over it. The accumulator is the backdrop, so the
+            // chain runs on THAT and replaces it — which is precisely
+            // what "non-destructive" means: no layer's own pixels are
+            // touched, and removing this layer restores the result
+            // exactly.
+            //
+            // The layer MASK becomes the chain's `selection`. The adjust
+            // chain has always taken one, so a masked adjustment layer
+            // needed no new plumbing — the mask a designer paints and the
+            // selection a marquee makes are the same object again.
+            if let Some(params) = layer.adjust_params() {
+                let straight8 = f16_to_rgba8(&unpremultiply(ctx, &acc, w, h).await?);
+                let image = DecodedImage {
+                    width: w,
+                    height: h,
+                    rgba: Arc::from(straight8.into_boxed_slice()),
+                    // Post-ingest pixels: the display transform already ran.
+                    display: crate::display::DisplayTreatment::AssumedSrgb,
+                };
+                let adjusted =
+                    adjust_rgba8(ctx, &image, params, layer.live_mask().cloned()).await?;
+                acc = premultiply(ctx, &rgba8_to_f16(&adjusted), w, h).await?;
+                continue;
+            }
+
             let straight = rgba8_to_f16(px);
             // `premultiply` over a fully-opaque window is `rgb·1` — the
             // identity, provably; skip the round-trip there.
@@ -925,6 +1054,50 @@ async fn dispatch_unary(
     .map_err(|e| IngestError::Pipeline(e.to_string()))
 }
 
+/// Premultiply a straight f16 RGBA window (the compose family's `in0`
+/// contract). Identity over a fully-opaque window, so that is skipped.
+async fn premultiply(
+    ctx: &GpuContext,
+    straight: &[u8],
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, IngestError> {
+    if window_is_opaque(straight) {
+        return Ok(straight.to_vec());
+    }
+    dispatch_unary(
+        ctx,
+        &CAST_PREMULTIPLY,
+        CastPremultiplyParams::new().as_bytes(),
+        straight,
+        w,
+        h,
+    )
+    .await
+}
+
+/// The inverse — out of premultiplied space, skipped where the division
+/// is by one.
+async fn unpremultiply(
+    ctx: &GpuContext,
+    premul: &[u8],
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, IngestError> {
+    if window_is_opaque(premul) {
+        return Ok(premul.to_vec());
+    }
+    dispatch_unary(
+        ctx,
+        &CAST_UNPREMULTIPLY,
+        CastUnpremultiplyParams::new().as_bytes(),
+        premul,
+        w,
+        h,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -949,6 +1122,129 @@ mod tests {
                 }
             })
             .as_ref()
+    }
+
+    // ── adjustment layers ────────────────────────────────────────────
+
+    fn bright(v: f32) -> AdjustParams {
+        AdjustParams {
+            brightness: v,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn image_editor_layers_an_adjustment_layer_carries_no_pixels() {
+        let mut s = stack(4, 4);
+        let at = s.add_adjustment("Brighten", bright(0.25));
+        assert!(s.is_adjustment(at));
+        assert!(!s.layers[at].is_pixels(), "it holds params, not pixels");
+        assert!(
+            !s.layers[at].is_plain(),
+            "and it is never a pass-through — the fold must visit it"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_retuning_a_pixel_layer_as_an_adjustment_is_refused() {
+        // Converting would discard pixels, which is the single thing this
+        // feature exists to avoid.
+        let mut s = stack(4, 4);
+        let err = s
+            .set_adjustment(0, bright(0.5))
+            .expect_err("a pixel layer is not retunable");
+        assert!(err.to_string().contains("holds pixels"));
+    }
+
+    #[test]
+    fn image_editor_layers_an_adjustment_layer_survives_the_transparency_skip() {
+        // Its `rgba` IS transparent — the skip that drops empty pixel
+        // layers must not drop it, or a brightness layer would silently
+        // do nothing.
+        let mut s = stack(4, 4);
+        s.add_adjustment("Brighten", bright(0.25));
+        assert!(
+            !s.composite_is_trivial(),
+            "the stack is no longer a trivial one-layer fold"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_an_adjustment_layer_changes_the_composite() {
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+        s.add_adjustment("Brighten", bright(0.25));
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("adjusted");
+        assert_ne!(
+            out.to_vec(),
+            base.to_vec(),
+            "the adjustment layer transformed the backdrop beneath it"
+        );
+        assert!(
+            out[0] > base[0],
+            "and brightened it: {} should exceed {}",
+            out[0],
+            base[0]
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_removing_an_adjustment_layer_restores_exactly() {
+        // THE non-destructive claim, stated as a test: the pixels beneath
+        // were never written, so deleting the adjustment returns the
+        // original byte-for-byte — not approximately.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+        let at = s.add_adjustment("Brighten", bright(0.4));
+        let _ = pollster::block_on(s.composite(Some(ctx), None)).expect("adjusted");
+        s.remove(at).expect("remove");
+        let after = pollster::block_on(s.composite(Some(ctx), None)).expect("restored");
+        assert_eq!(
+            after.to_vec(),
+            base.to_vec(),
+            "removing an adjustment layer restores the original exactly"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_hiding_an_adjustment_layer_is_the_identity() {
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+        let at = s.add_adjustment("Brighten", bright(0.4));
+        s.set_visible(at, false).expect("hide");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("hidden");
+        assert_eq!(
+            out.to_vec(),
+            base.to_vec(),
+            "a hidden adjustment does nothing"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_masked_adjustment_applies_only_inside_the_mask() {
+        // The two rungs meeting: the layer mask becomes the adjust
+        // chain's selection, so the right half must be untouched.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+        let at = s.add_adjustment("Brighten", bright(0.5));
+        let half = SelectionCoverage::rasterize_rect(16, 16, 0.0, 0.0, 8.0, 16.0);
+        s.set_mask(at, Arc::new(half)).expect("mask it");
+
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("masked");
+        let at_px = |buf: &[u8], x: usize, y: usize| buf[(y * 16 + x) * 4];
+        assert!(
+            at_px(&out, 2, 8) > at_px(&base, 2, 8),
+            "inside the mask the adjustment applied"
+        );
+        assert_eq!(
+            at_px(&out, 13, 8),
+            at_px(&base, 13, 8),
+            "outside it the pixels are untouched"
+        );
     }
 
     // ── layer masks ──────────────────────────────────────────────────

@@ -53,7 +53,11 @@ export const WAND_CONTIGUOUS_DEFAULT = true;
 
 export interface SelectionMachine {
   /** Begin a marquee/lasso gesture at `point` (image px). */
-  begin(kind: SelectionShapeKind, point: [number, number], mode: SelectionMode): void;
+  begin(
+    kind: SelectionShapeKind,
+    point: [number, number],
+    mode: SelectionMode,
+  ): void;
   /** Extend the active gesture (drag corner / append lasso vertex). */
   update(point: [number, number]): void;
   /** Commit the active gesture into the engine selection (lasso closes
@@ -157,7 +161,13 @@ export function createSelectionMachine(
           if (kind === "rect") {
             engine.selectionSetRect(x, y, w, h, mode);
           } else {
-            engine.selectionSetEllipse(x + w / 2, y + h / 2, w / 2, h / 2, mode);
+            engine.selectionSetEllipse(
+              x + w / 2,
+              y + h / 2,
+              w / 2,
+              h / 2,
+              mode,
+            );
           }
         }
       } catch {
@@ -192,7 +202,10 @@ export function createSelectionMachine(
       if (active.kind === "lasso") {
         return active.trail.length >= 2 ? [...active.trail] : null;
       }
-      if (active.anchor[0] === active.current[0] && active.anchor[1] === active.current[1]) {
+      if (
+        active.anchor[0] === active.current[0] &&
+        active.anchor[1] === active.current[1]
+      ) {
         return null;
       }
       return active.kind === "rect"
@@ -220,7 +233,10 @@ export function createSelectionMachine(
  *  (documented on every selection tool): shift = add, alt = subtract,
  *  shift+alt = intersect, none = replace. Exported for the tools AND the
  *  tests (the one place the convention lives). */
-export function modeFromModifiers(mods: { shift: boolean; alt: boolean }): SelectionMode {
+export function modeFromModifiers(mods: {
+  shift: boolean;
+  alt: boolean;
+}): SelectionMode {
   if (mods.shift && mods.alt) return "intersect";
   if (mods.shift) return "add";
   if (mods.alt) return "subtract";

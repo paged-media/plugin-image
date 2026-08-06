@@ -309,6 +309,10 @@ export interface ImageSession {
    *  layer (journaled, so undoable). The chain is otherwise a
    *  re-runnable preview that never mutates a pixel. */
   bakeAdjustToLayer(): Promise<boolean>;
+  /** Stack the panel's chain as an ADJUSTMENT LAYER — the
+   *  non-destructive counterpart of {@link bakeAdjustToLayer}. No pixel
+   *  is written, so deleting the layer restores the original exactly. */
+  addAdjustmentLayer(): Promise<boolean>;
   /** Undo / redo the newest journaled PIXEL edit (paint, fill, bake).
    *  Layer STRUCTURE changes are not journaled. */
   undo(): Promise<boolean>;
@@ -1718,6 +1722,36 @@ export function createImageSession(host: BundleHost): ImageSession {
       refreshLayers();
       emit();
       return true;
+    },
+
+    async addAdjustmentLayer() {
+      if (!engine || !state.source) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      state.busy = true;
+      emit();
+      try {
+        engine.layersAddAdjustment("", state.params);
+      } catch (err) {
+        // Identity is the common refusal, and it is honest: a row that
+        // adjusts nothing would just be clutter that looks like work.
+        setStatus(
+          `Adjustment layer failed: ${err instanceof Error ? err.message : err}`,
+        );
+        state.busy = false;
+        emit();
+        return false;
+      }
+      state.busy = false;
+      const ok = await finishMaskEdit();
+      if (ok) {
+        setStatus(
+          "Adjustment layer added — it transforms everything beneath it, " +
+            "and deleting it restores the original exactly.",
+        );
+      }
+      return ok;
     },
 
     async bakeAdjustToLayer() {
