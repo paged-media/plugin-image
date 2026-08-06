@@ -60,8 +60,9 @@
 use image_conformance::harness::{assert_within, parity_windowed, RefTile};
 use image_conformance::Px;
 use image_kernels::families::geom::{
-    CropParams, FlipHParams, FlipVParams, Rotate90Params, RotateBilinearParams, GEOM_CROP,
-    GEOM_FLIP_H, GEOM_FLIP_V, GEOM_ROTATE90_CCW, GEOM_ROTATE90_CW, GEOM_ROTATE_BILINEAR,
+    CropParams, FlipHParams, FlipVParams, Rotate90Params, RotateBilinearParams, WarpBackwardParams,
+    WarpKind, GEOM_CROP, GEOM_FLIP_H, GEOM_FLIP_V, GEOM_ROTATE90_CCW, GEOM_ROTATE90_CW,
+    GEOM_ROTATE_BILINEAR, GEOM_WARP_BACKWARD,
 };
 
 /// A labeled source window: each texel encodes its own (x, y) source
@@ -302,6 +303,118 @@ fn rotate_bilinear_ref(
     let p01 = tap(win, win_w, win_h, ix, iy + 1);
     let p11 = tap(win, win_w, win_h, ix + 1, iy + 1);
     lerp(lerp(p00, p10, fx), lerp(p01, p11, fx), fy)
+}
+
+// ─────────────────────── warp_backward ────────────────────────────
+//
+// The scalar twin of `geom.warp_backward`. Written to mirror the WGSL
+// branch-for-branch, because the parity here is what pins that ONE
+// sampler serves every distortion kind — the whole argument for a
+// single kernel rather than nine.
+
+fn warp_source_offset(p: &WarpBackwardParams, dx: f32, dy: f32, t: f32) -> (f32, f32) {
+    let a = p.amount;
+    match p.kind {
+        0 => {
+            let k = 1.0 + a * (1.0 - t);
+            (dx * k, dy * k)
+        }
+        1 => {
+            let k = 1.0 + a * (std::f32::consts::PI * t.clamp(0.0, 1.0)).sin();
+            (dx * k, dy * k)
+        }
+        2 => {
+            let ang = a * (1.0 - t.clamp(0.0, 1.0));
+            let (sn, cs) = ang.sin_cos();
+            (cs * dx - sn * dy, sn * dx + cs * dy)
+        }
+        _ => {
+            let phase = p.frequency * std::f32::consts::TAU * (dy / p.radius.max(1.0));
+            (dx + a * p.radius * 0.05 * phase.sin(), dy)
+        }
+    }
+}
+
+fn warp_backward_ref(
+    win: &[Px],
+    win_w: u32,
+    win_h: u32,
+    ox: u32,
+    oy: u32,
+    p: &WarpBackwardParams,
+) -> Px {
+    let dx = ox as f32 + 0.5 - p.cx;
+    let dy = oy as f32 + 0.5 - p.cy;
+    let r = (dx * dx + dy * dy).sqrt();
+    let t = r / p.radius.max(1.0);
+    let (sx0, sy0) = warp_source_offset(p, dx, dy, t);
+    let sx = sx0 + p.cx - 0.5;
+    let sy = sy0 + p.cy - 0.5;
+    let x0 = sx.floor();
+    let y0 = sy.floor();
+    let (fx, fy) = (sx - x0, sy - y0);
+    let (ix, iy) = (x0 as i32, y0 as i32);
+    let p00 = tap(win, win_w, win_h, ix, iy);
+    let p10 = tap(win, win_w, win_h, ix + 1, iy);
+    let p01 = tap(win, win_w, win_h, ix, iy + 1);
+    let p11 = tap(win, win_w, win_h, ix + 1, iy + 1);
+    lerp(lerp(p00, p10, fx), lerp(p01, p11, fx), fy)
+}
+
+/// Drive every kind through the same parity harness. One test per kind
+/// would repeat the setup four times and hide which one broke; the
+/// message names the kind instead.
+fn warp_parity_for(kind: WarpKind, amount: f32) {
+    let (w, h) = (48u32, 40u32);
+    let win = labeled(w, h);
+    let p = WarpBackwardParams::new(
+        kind,
+        amount,
+        w as f32 / 2.0,
+        h as f32 / 2.0,
+        (w.min(h) as f32) / 2.0,
+    );
+    match parity_windowed(&GEOM_WARP_BACKWARD, warp_backward_ref, &win, w, h, &p) {
+        Some(r) => {
+            eprintln!("geom.warp_backward[{kind:?}]: max f16 ULP {}", r.max_ulp);
+            assert_within(r, &GEOM_WARP_BACKWARD);
+        }
+        None => eprintln!("SKIP: no GPU adapter"),
+    }
+}
+
+#[test]
+fn geom_warp_backward_parity_pinch() {
+    warp_parity_for(WarpKind::Pinch, 0.35);
+}
+
+#[test]
+fn geom_warp_backward_parity_spherize() {
+    warp_parity_for(WarpKind::Spherize, -0.4);
+}
+
+#[test]
+fn geom_warp_backward_parity_twirl() {
+    warp_parity_for(WarpKind::Twirl, 1.1);
+}
+
+#[test]
+fn geom_warp_backward_parity_wave() {
+    warp_parity_for(WarpKind::Wave, 0.8);
+}
+
+/// `amount == 0` must be the IDENTITY for every kind — the property the
+/// whole parameterization rests on, and the one a UI slider depends on.
+#[test]
+fn geom_warp_backward_identity_at_zero_amount() {
+    for kind in [
+        WarpKind::Pinch,
+        WarpKind::Spherize,
+        WarpKind::Twirl,
+        WarpKind::Wave,
+    ] {
+        warp_parity_for(kind, 0.0);
+    }
 }
 
 #[test]

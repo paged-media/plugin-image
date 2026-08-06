@@ -1262,6 +1262,21 @@
   tests:
     rust: ["image-conformance/tests/family_geom.rs"]
 
+- id: geom.warp_backward
+  rust_path: families::geom::GEOM_WARP_BACKWARD
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "General BACKWARD-map parametric warp: for each output texel compute its source coordinate from a kind + amount, sample bilinearly, clamp to edge. Backward rather than forward because a forward map scatters and leaves holes; a backward map is total by construction."
+    - "One kernel for the Distort family rather than nine: Pinch/Spherize/Twirl/Wave are not independent effects, they are source-coordinate functions over the same map. Sharing one sampler keeps the reconstruction filter, the edge rule and the parity tolerance identical across all of them, which is what makes them comparable."
+    - "amount == 0 is the IDENTITY for every kind, so one slider per distortion needs no special cases and the identity parity test covers all kinds at once. Standard radial/sinusoidal displacement forms; no reference reading."
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
 - id: geom.rotate_bilinear
   rust_path: families::geom::GEOM_ROTATE_BILINEAR
   state_row: image.kernel.family-t2

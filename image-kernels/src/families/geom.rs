@@ -590,6 +590,218 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+// ─────────────────────────── warp_backward ─────────────────────────
+//
+// THE GENERAL BACKWARD-MAP WARP — one kernel, one sampler, a family of
+// distortions selected by `kind`.
+//
+// `geom.rotate_bilinear` was the only warp in the engine, which is why
+// the entire Distort family (Pinch, Spherize, Twirl, Ripple, Wave,
+// ZigZag, Polar Coordinates, Shear, Displace) was listed as unbuilt in
+// the catalog's §36.4: they are not nine independent effects, they are
+// nine source-coordinate functions over the same backward map. Sharing
+// the sampler is not a shortcut — it is the only way the reconstruction
+// filter, the edge rule and the parity tolerance stay identical across
+// all of them, which is what makes them comparable.
+//
+// BACKWARD, not forward: for each OUTPUT texel compute where it came
+// from and sample there. A forward map scatters and leaves holes; a
+// backward map is total by construction. Bilinear reconstruction with
+// clamp-to-edge, exactly as the rotation already does — one 2x2 tap
+// footprint, so `Resample { support: 1.0 }`.
+//
+// Amount is normalized so 0 is the IDENTITY for every kind. That is
+// what lets a UI expose one slider per distortion without special
+// cases, and it makes the identity parity test meaningful for all of
+// them at once.
+
+/// Which source-coordinate function the warp applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum WarpKind {
+    /// Pull toward (amount > 0) or push away from the centre.
+    Pinch = 0,
+    /// Spherical bulge (amount > 0) or dent.
+    Spherize = 1,
+    /// Rotate by an angle that falls off with radius.
+    Twirl = 2,
+    /// Sinusoidal displacement along x, by y.
+    Wave = 3,
+}
+
+impl WarpKind {
+    pub fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Warp params: the kind, the normalized amount, the centre, and a
+/// frequency the periodic kinds use (ignored by the others).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct WarpBackwardParams {
+    pub kind: u32,
+    pub amount: f32,
+    pub cx: f32,
+    pub cy: f32,
+    pub radius: f32,
+    pub frequency: f32,
+    pub _pad0: u32,
+    pub _abi_pad: u32,
+}
+
+impl WarpBackwardParams {
+    pub fn new(kind: WarpKind, amount: f32, cx: f32, cy: f32, radius: f32) -> Self {
+        Self {
+            kind: kind.as_u32(),
+            amount,
+            cx,
+            cy,
+            radius,
+            frequency: 1.0,
+            _pad0: 0,
+            _abi_pad: 0,
+        }
+    }
+
+    /// Periodic kinds (Wave) read this; the others ignore it.
+    pub fn with_frequency(mut self, frequency: f32) -> Self {
+        self.frequency = frequency;
+        self
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const WARP_BACKWARD_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "kind",
+        wgsl_ty: "u32",
+    },
+    ParamField {
+        name: "amount",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "cx",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "cy",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "radius",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "frequency",
+        wgsl_ty: "f32",
+    },
+];
+
+/// Backward-mapped parametric distortion, bilinear, clamp-to-edge.
+/// `amount == 0` is the identity for every kind.
+pub static GEOM_WARP_BACKWARD: KernelDef = KernelDef {
+    id: "geom.warp_backward",
+    class: KernelClass::Resample { support: 1.0 },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<WarpBackwardParams>(),
+        fields: WARP_BACKWARD_FIELDS,
+    },
+    wgsl: GEOM_WARP_BACKWARD_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const GEOM_WARP_BACKWARD_WGSL: &str = "\
+// paged.image kernel `geom.warp_backward` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    kind: u32,
+    amount: f32,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    frequency: f32,
+    _pad0: u32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+fn tap(p: vec2<i32>, dims: vec2<i32>) -> vec4<f32> {
+    let c = clamp(p, vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+    return textureLoad(in0, c, 0);
+}
+
+// Where output point `d` (centre-relative) READ FROM. Returns a
+// centre-relative source offset. `t` is the normalized radius.
+fn source_offset(d: vec2<f32>, t: f32) -> vec2<f32> {
+    let a = params.amount;
+    if (params.kind == 0u) {
+        // PINCH: scale radius by (1 + a·(1 − t)), so the effect is
+        // strongest at the centre and vanishes at the rim.
+        return d * (1.0 + a * (1.0 - t));
+    }
+    if (params.kind == 1u) {
+        // SPHERIZE: a smooth radial remap, zero at centre and rim.
+        let k = 1.0 + a * sin(3.14159265 * clamp(t, 0.0, 1.0));
+        return d * k;
+    }
+    if (params.kind == 2u) {
+        // TWIRL: rotate by an angle that falls off linearly with radius.
+        let ang = a * (1.0 - clamp(t, 0.0, 1.0));
+        let cs = cos(ang);
+        let sn = sin(ang);
+        return vec2<f32>(cs * d.x - sn * d.y, sn * d.x + cs * d.y);
+    }
+    // WAVE: displace x by a sinusoid of y.
+    let phase = params.frequency * 6.28318531 * (d.y / max(params.radius, 1.0));
+    return vec2<f32>(d.x + a * params.radius * 0.05 * sin(phase), d.y);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(outp);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let wdims = vec2<i32>(textureDimensions(in0));
+
+    let d = vec2<f32>(f32(xy.x) + 0.5 - params.cx, f32(xy.y) + 0.5 - params.cy);
+    let r = length(d);
+    let t = r / max(params.radius, 1.0);
+    let src = source_offset(d, t) + vec2<f32>(params.cx, params.cy) - vec2<f32>(0.5, 0.5);
+
+    let x0 = floor(src.x);
+    let y0 = floor(src.y);
+    let fx = src.x - x0;
+    let fy = src.y - y0;
+    let i0 = vec2<i32>(i32(x0), i32(y0));
+
+    let p00 = tap(i0, wdims);
+    let p10 = tap(i0 + vec2<i32>(1, 0), wdims);
+    let p01 = tap(i0 + vec2<i32>(0, 1), wdims);
+    let p11 = tap(i0 + vec2<i32>(1, 1), wdims);
+
+    let top = mix(p00, p10, fx);
+    let bot = mix(p01, p11, fx);
+    let result = mix(top, bot, fy);
+
+    let m = textureLoad(mask, xy, 0).r;
+    let a = textureLoad(in0, clamp(xy, vec2<i32>(0, 0), wdims - vec2<i32>(1, 1)), 0);
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
     &GEOM_FLIP_H,
     &GEOM_FLIP_V,
@@ -597,6 +809,7 @@ pub static FAMILY: &[&KernelDef] = &[
     &GEOM_ROTATE90_CCW,
     &GEOM_CROP,
     &GEOM_ROTATE_BILINEAR,
+    &GEOM_WARP_BACKWARD,
 ];
 
 #[cfg(test)]
