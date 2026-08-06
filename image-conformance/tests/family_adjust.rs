@@ -52,12 +52,12 @@ use image_kernels::families::adjust::{
     adjust_invert_rgb, AdjustBlackWhiteParams, AdjustBrightnessContrastParams,
     AdjustChannelMixerParams, AdjustColorBalanceParams, AdjustExposureParams,
     AdjustHueRotateParams, AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams,
-    AdjustLut1dParams, AdjustPhotoFilterParams, AdjustPosterizeParams, AdjustSaturationParams,
-    AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE,
-    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE,
-    ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_LUT1D,
-    ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE,
-    ADJUST_WHITE_BALANCE,
+    AdjustLut1dParams, AdjustLut3dParams, AdjustPhotoFilterParams, AdjustPosterizeParams,
+    AdjustSaturationParams, AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams,
+    ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE,
+    ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB,
+    ADJUST_LUT1D, ADJUST_LUT3D, ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION,
+    ADJUST_THRESHOLD, ADJUST_VIBRANCE, ADJUST_WHITE_BALANCE,
 };
 
 /// `unpremul_rgb` — the module preamble helper (a==0 → 0).
@@ -89,6 +89,49 @@ fn lut1d_ref(a: Px, _b: Px, p: &AdjustLut1dParams) -> Px {
         entry(lo) * (1.0 - f) + entry(hi) * f
     };
     let m = [at(c[0]), at(c[1]), at(c[2])];
+    Px([m[0] * a.0[3], m[1] * a.0[3], m[2] * a.0[3], a.0[3]])
+}
+
+/// The 3D-LUT reference — trilinear over the same 9^3 cube.
+fn lut3d_ref(a: Px, _b: Px, p: &AdjustLut3dParams) -> Px {
+    const EDGE: usize = 9;
+    let c = unpremul(a);
+    let at = |r: usize, g: usize, b: usize| -> [f32; 3] {
+        let i = (b.min(EDGE - 1) * EDGE + g.min(EDGE - 1)) * EDGE + r.min(EDGE - 1);
+        [p.cube[i][0], p.cube[i][1], p.cube[i][2]]
+    };
+    let lerp = |x: [f32; 3], y: [f32; 3], f: f32| -> [f32; 3] {
+        [
+            x[0] + (y[0] - x[0]) * f,
+            x[1] + (y[1] - x[1]) * f,
+            x[2] + (y[2] - x[2]) * f,
+        ]
+    };
+    let t: Vec<f32> = (0..3)
+        .map(|k| c[k].clamp(0.0, 1.0) * (EDGE - 1) as f32)
+        .collect();
+    let i0: Vec<usize> = t.iter().map(|v| v.floor() as usize).collect();
+    let f: Vec<f32> = t.iter().map(|v| v - v.floor()).collect();
+
+    let x00 = lerp(at(i0[0], i0[1], i0[2]), at(i0[0] + 1, i0[1], i0[2]), f[0]);
+    let x10 = lerp(
+        at(i0[0], i0[1] + 1, i0[2]),
+        at(i0[0] + 1, i0[1] + 1, i0[2]),
+        f[0],
+    );
+    let x01 = lerp(
+        at(i0[0], i0[1], i0[2] + 1),
+        at(i0[0] + 1, i0[1], i0[2] + 1),
+        f[0],
+    );
+    let x11 = lerp(
+        at(i0[0], i0[1] + 1, i0[2] + 1),
+        at(i0[0] + 1, i0[1] + 1, i0[2] + 1),
+        f[0],
+    );
+    let y0 = lerp(x00, x10, f[1]);
+    let y1 = lerp(x01, x11, f[1]);
+    let m = lerp(y0, y1, f[2]);
     Px([m[0] * a.0[3], m[1] * a.0[3], m[2] * a.0[3], a.0[3]])
 }
 
@@ -457,6 +500,21 @@ parity_test!(
     ADJUST_LUT1D,
     lut1d_ref,
     AdjustLut1dParams::identity()
+);
+
+// A CHANNEL-CROSSING cube — swap red and blue. A 1D LUT cannot express
+// this, so it also pins that the kernel really is three-dimensional.
+parity_test!(
+    lut3d_parity,
+    ADJUST_LUT3D,
+    lut3d_ref,
+    AdjustLut3dParams::from_fn(|r, g, b| [b, g, r])
+);
+parity_test!(
+    lut3d_identity_parity,
+    ADJUST_LUT3D,
+    lut3d_ref,
+    AdjustLut3dParams::identity()
 );
 
 parity_test!(

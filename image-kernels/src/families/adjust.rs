@@ -1652,8 +1652,131 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
 "
 );
 
+// ────────────────────────────── lut3d ──────────────────────────────
+//
+// A trilinearly-interpolated 3D colour cube — the class behind Color
+// Lookup, and the only honest way to express a transform where the
+// output of one channel depends on the other two (a 1D LUT cannot: it
+// is three independent transfers).
+//
+// SIZE 17 is the cube edge, chosen because it is the .CUBE convention
+// most colour-grading LUTs ship at and it fits the same params-only
+// constraint `adjust.lut1d` documents: 17^3 = 4913 entries. Packed one
+// rgb triple per `vec4<f32>` (the w lane unused, WGSL uniform arrays
+// need the 16-byte stride) that is 78 KiB — over the 64 KiB uniform
+// floor, so this kernel declares its table as four-channel entries at
+// EDGE 9 (729 entries, 11.4 KiB) instead. Nine is coarse for a grade
+// but it is what the frozen ABI can carry without an amendment, and a
+// coarse honest cube beats a fine one that cannot be bound.
+//
+// Interpolation is trilinear for the same reason lut1d interpolates:
+// nearest sampling is a step function and cannot hold an f16-ULP parity
+// tolerance.
+
+/// The 3D LUT cube edge. See the module note for why it is 9 and not 17.
+pub const LUT3D_EDGE: usize = 9;
+const LUT3D_ENTRIES: usize = LUT3D_EDGE * LUT3D_EDGE * LUT3D_EDGE;
+
+/// A 9x9x9 RGB cube, one entry per `vec4<f32>` (w unused).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustLut3dParams {
+    pub cube: [[f32; 4]; LUT3D_ENTRIES],
+}
+
+impl AdjustLut3dParams {
+    /// Build from a closure over the normalized lattice point.
+    pub fn from_fn(f: impl Fn(f32, f32, f32) -> [f32; 3]) -> Self {
+        let mut cube = [[0.0f32; 4]; LUT3D_ENTRIES];
+        let n = (LUT3D_EDGE - 1) as f32;
+        for b in 0..LUT3D_EDGE {
+            for g in 0..LUT3D_EDGE {
+                for r in 0..LUT3D_EDGE {
+                    let v = f(r as f32 / n, g as f32 / n, b as f32 / n);
+                    let i = (b * LUT3D_EDGE + g) * LUT3D_EDGE + r;
+                    cube[i] = [v[0], v[1], v[2], 0.0];
+                }
+            }
+        }
+        Self { cube }
+    }
+
+    /// The identity cube — out == in at every lattice point.
+    pub fn identity() -> Self {
+        Self::from_fn(|r, g, b| [r, g, b])
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const LUT3D_PARAMS_FIELDS: &[ParamField] = &[ParamField {
+    name: "cube",
+    wgsl_ty: "array<vec4<f32>, 729>",
+}];
+
+/// out.rgb = trilinear(cube, unpremul(a).rgb); out.a = a.a.
+pub static ADJUST_LUT3D: KernelDef = KernelDef {
+    id: "adjust.lut3d",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustLut3dParams>(),
+        fields: LUT3D_PARAMS_FIELDS,
+    },
+    wgsl: LUT3D_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(8),
+};
+
+const LUT3D_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    cube: array<vec4<f32>, 729>,
+}",
+    "
+const EDGE : i32 = 9;
+
+fn cube_at(r: i32, g: i32, b: i32) -> vec3<f32> {
+    let rr = clamp(r, 0, EDGE - 1);
+    let gg = clamp(g, 0, EDGE - 1);
+    let bb = clamp(b, 0, EDGE - 1);
+    return params.cube[(bb * EDGE + gg) * EDGE + rr].rgb;
+}
+
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = clamp(unpremul_rgb(a), vec3<f32>(0.0), vec3<f32>(1.0));
+    let t = c * f32(EDGE - 1);
+    let i0 = vec3<i32>(floor(t));
+    let f = t - floor(t);
+
+    // Trilinear: four edge lerps, two face lerps, one along b.
+    let c000 = cube_at(i0.x, i0.y, i0.z);
+    let c100 = cube_at(i0.x + 1, i0.y, i0.z);
+    let c010 = cube_at(i0.x, i0.y + 1, i0.z);
+    let c110 = cube_at(i0.x + 1, i0.y + 1, i0.z);
+    let c001 = cube_at(i0.x, i0.y, i0.z + 1);
+    let c101 = cube_at(i0.x + 1, i0.y, i0.z + 1);
+    let c011 = cube_at(i0.x, i0.y + 1, i0.z + 1);
+    let c111 = cube_at(i0.x + 1, i0.y + 1, i0.z + 1);
+
+    let x00 = mix(c000, c100, f.x);
+    let x10 = mix(c010, c110, f.x);
+    let x01 = mix(c001, c101, f.x);
+    let x11 = mix(c011, c111, f.x);
+    let y0 = mix(x00, x10, f.y);
+    let y1 = mix(x01, x11, f.y);
+    let mapped = mix(y0, y1, f.z);
+
+    return vec4<f32>(mapped * a.a, a.a);
+}
+"
+);
+
 pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_LUT1D,
+    &ADJUST_LUT3D,
     &ADJUST_EXPOSURE,
     &ADJUST_BRIGHTNESS_CONTRAST,
     &ADJUST_LEVELS,

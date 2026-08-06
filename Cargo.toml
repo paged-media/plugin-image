@@ -34,7 +34,9 @@ too_many_arguments = "allow"
 thiserror = "2"
 anyhow = "1"
 bytes = "1"
-bytemuck = { version = "1", features = ["derive"] }
+# `min_const_generics` lifts the Pod/Zeroable derive past the built-in
+# small-array impls — `adjust.lut3d`'s params carry a 729-entry cube.
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
 half = { version = "2", features = ["bytemuck"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

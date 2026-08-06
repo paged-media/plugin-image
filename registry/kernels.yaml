@@ -1154,6 +1154,21 @@
   tests:
     rust: ["image-conformance/tests/family_adjust.rs"]
 
+- id: adjust.lut3d
+  rust_path: families::adjust::ADJUST_LUT3D
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 8 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Trilinearly-interpolated 3D colour cube on unpremultiplied rgb; alpha never remapped. The class behind Color Lookup, and the only honest way to express a transform whose output per channel depends on the other two (a 1D LUT is three independent transfers and cannot)."
+    - "EDGE 9 (729 entries, 11.4 KiB as one vec4<f32> per entry), not the .CUBE convention's 17. Same params-only constraint as adjust.lut1d — the ABI is frozen and inputs upload at tile size — and 17^3 packed the same way is 78 KiB, over the 64 KiB uniform floor. A coarse cube that binds beats a fine one that cannot."
+    - "Trilinear rather than nearest for the reason lut1d documents: nearest is a step function and cannot hold an f16-ULP tolerance. No reference reading."
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
 - id: adjust.channel_mixer
   rust_path: families::adjust::ADJUST_CHANNEL_MIXER
   state_row: image.kernel.family-t2
