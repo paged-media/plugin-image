@@ -1774,9 +1774,107 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
 "
 );
 
+// ─────────────────────────── gradient_map ──────────────────────────
+//
+// Map LUMINANCE through a colour ramp — the Photoshop Gradient Map.
+//
+// Not expressible with `adjust.lut1d`, and the difference is worth
+// stating because the catalog groups them: lut1d applies one table to
+// each channel INDEPENDENTLY, so it can never make output red depend on
+// input green. A gradient map reads a single luminance and returns an
+// rgb TRIPLE, which is a 256-entry RGB ramp indexed by luma. Same
+// params-carrying pattern (the ABI is frozen; see lut1d), same
+// interpolation for the same measured reason.
+//
+// Luma is Rec.709 on unpremultiplied rgb — the same coefficients
+// `adjust.black_white` defaults to, so a desaturate-then-map and a
+// gradient map agree about what "brightness" means.
+
+/// A 256-entry RGB ramp, one entry per `vec4<f32>` (w unused).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustGradientMapParams {
+    pub ramp: [[f32; 4]; 256],
+}
+
+impl AdjustGradientMapParams {
+    /// Build a ramp by interpolating between two endpoint colours — the
+    /// two-stop gradient a UI exposes first.
+    pub fn two_stop(shadow: [f32; 3], highlight: [f32; 3]) -> Self {
+        Self::from_fn(|t| {
+            [
+                shadow[0] + (highlight[0] - shadow[0]) * t,
+                shadow[1] + (highlight[1] - shadow[1]) * t,
+                shadow[2] + (highlight[2] - shadow[2]) * t,
+            ]
+        })
+    }
+
+    /// Build from a closure over the normalized luminance.
+    pub fn from_fn(f: impl Fn(f32) -> [f32; 3]) -> Self {
+        let mut ramp = [[0.0f32; 4]; 256];
+        for (i, e) in ramp.iter_mut().enumerate() {
+            let v = f(i as f32 / 255.0);
+            *e = [v[0], v[1], v[2], 0.0];
+        }
+        Self { ramp }
+    }
+
+    /// The identity-ish ramp: black to white, which maps an image to its
+    /// own luminance (a greyscale conversion).
+    pub fn greyscale() -> Self {
+        Self::two_stop([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const GRADIENT_MAP_FIELDS: &[ParamField] = &[ParamField {
+    name: "ramp",
+    wgsl_ty: "array<vec4<f32>, 256>",
+}];
+
+/// out.rgb = ramp[luma709(unpremul(a))]; out.a = a.a.
+pub static ADJUST_GRADIENT_MAP: KernelDef = KernelDef {
+    id: "adjust.gradient_map",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustGradientMapParams>(),
+        fields: GRADIENT_MAP_FIELDS,
+    },
+    wgsl: GRADIENT_MAP_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const GRADIENT_MAP_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    ramp: array<vec4<f32>, 256>,
+}",
+    "
+fn ramp_at(i: i32) -> vec3<f32> {
+    return params.ramp[clamp(i, 0, 255)].rgb;
+}
+
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let luma = clamp(dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    let t = luma * 255.0;
+    let lo = i32(floor(t));
+    let mapped = mix(ramp_at(lo), ramp_at(lo + 1), t - floor(t));
+    return vec4<f32>(mapped * a.a, a.a);
+}
+"
+);
+
 pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_LUT1D,
     &ADJUST_LUT3D,
+    &ADJUST_GRADIENT_MAP,
     &ADJUST_EXPOSURE,
     &ADJUST_BRIGHTNESS_CONTRAST,
     &ADJUST_LEVELS,

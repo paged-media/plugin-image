@@ -51,13 +51,14 @@ use image_conformance::Px;
 use image_kernels::families::adjust::{
     adjust_invert_rgb, AdjustBlackWhiteParams, AdjustBrightnessContrastParams,
     AdjustChannelMixerParams, AdjustColorBalanceParams, AdjustExposureParams,
-    AdjustHueRotateParams, AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams,
-    AdjustLut1dParams, AdjustLut3dParams, AdjustPhotoFilterParams, AdjustPosterizeParams,
-    AdjustSaturationParams, AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams,
-    ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE,
-    ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB,
-    ADJUST_LUT1D, ADJUST_LUT3D, ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION,
-    ADJUST_THRESHOLD, ADJUST_VIBRANCE, ADJUST_WHITE_BALANCE,
+    AdjustGradientMapParams, AdjustHueRotateParams, AdjustInvertRgbParams, AdjustLevelsParams,
+    AdjustLevelsRgbParams, AdjustLut1dParams, AdjustLut3dParams, AdjustPhotoFilterParams,
+    AdjustPosterizeParams, AdjustSaturationParams, AdjustThresholdParams, AdjustVibranceParams,
+    AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER,
+    ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE, ADJUST_GRADIENT_MAP, ADJUST_HUE_ROTATE,
+    ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_LUT1D, ADJUST_LUT3D,
+    ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE,
+    ADJUST_WHITE_BALANCE,
 };
 
 /// `unpremul_rgb` — the module preamble helper (a==0 → 0).
@@ -132,6 +133,27 @@ fn lut3d_ref(a: Px, _b: Px, p: &AdjustLut3dParams) -> Px {
     let y0 = lerp(x00, x10, f[1]);
     let y1 = lerp(x01, x11, f[1]);
     let m = lerp(y0, y1, f[2]);
+    Px([m[0] * a.0[3], m[1] * a.0[3], m[2] * a.0[3], a.0[3]])
+}
+
+/// The gradient-map reference — Rec.709 luma into an interpolated ramp.
+fn gradient_map_ref(a: Px, _b: Px, p: &AdjustGradientMapParams) -> Px {
+    let c = unpremul(a);
+    let luma = (c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722).clamp(0.0, 1.0);
+    let t = luma * 255.0;
+    let lo = t.floor() as usize;
+    let hi = (lo + 1).min(255);
+    let f = t - t.floor();
+    let e = |i: usize| {
+        let i = i.min(255);
+        [p.ramp[i][0], p.ramp[i][1], p.ramp[i][2]]
+    };
+    let (x, y) = (e(lo), e(hi));
+    let m = [
+        x[0] + (y[0] - x[0]) * f,
+        x[1] + (y[1] - x[1]) * f,
+        x[2] + (y[2] - x[2]) * f,
+    ];
     Px([m[0] * a.0[3], m[1] * a.0[3], m[2] * a.0[3], a.0[3]])
 }
 
@@ -515,6 +537,21 @@ parity_test!(
     ADJUST_LUT3D,
     lut3d_ref,
     AdjustLut3dParams::identity()
+);
+
+// A CHROMATIC ramp (teal to orange) — a greyscale-only implementation
+// would pass an identity test and fail this one.
+parity_test!(
+    gradient_map_parity,
+    ADJUST_GRADIENT_MAP,
+    gradient_map_ref,
+    AdjustGradientMapParams::two_stop([0.0, 0.35, 0.4], [1.0, 0.6, 0.2])
+);
+parity_test!(
+    gradient_map_greyscale_parity,
+    ADJUST_GRADIENT_MAP,
+    gradient_map_ref,
+    AdjustGradientMapParams::greyscale()
 );
 
 parity_test!(

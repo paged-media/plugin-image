@@ -1169,6 +1169,21 @@
   tests:
     rust: ["image-conformance/tests/family_adjust.rs"]
 
+- id: adjust.gradient_map
+  rust_path: families::adjust::ADJUST_GRADIENT_MAP
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Luminance through a 256-entry RGB ramp — Photoshop's Gradient Map. NOT expressible with adjust.lut1d, which applies one table to each channel independently and so can never make output red depend on input green; a gradient map reads one luminance and returns an rgb triple."
+    - "Luma is Rec.709 (0.2126/0.7152/0.0722) on unpremultiplied rgb — the same coefficients adjust.black_white defaults to, so desaturate-then-map and gradient-map agree about what brightness means."
+    - "Ramp in params and linearly interpolated, for the reasons adjust.lut1d records. No reference reading."
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
 - id: adjust.channel_mixer
   rust_path: families::adjust::ADJUST_CHANNEL_MIXER
   state_row: image.kernel.family-t2
