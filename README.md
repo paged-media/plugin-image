@@ -10,8 +10,12 @@ Concept / spec: `thoughts/docs/paged/plugin-image/base-idea.md` (v0.5).
 First-party in authorship, third-party in discipline: this plugin runs
 under exactly the rules every external plugin runs under, and is
 deliberately the heaviest stress test the plugin platform has. Every
-place the SDK falls short is an entry in `BREAKAGE_LOG.md` (I-NN), never
-a core modification.
+place the SDK falls short is a row in the cross-repo RFI
+(`thoughts/docs/paged/plugin-platform/rfi-core-sdk-gaps.md`), never a core
+modification. The old in-repo `BREAKAGE_LOG.md` was retired on 2026-06-12 —
+every I-NN it held resolved into a platform `C-`/`K-` row (I-01→C-1,
+I-02→K-3, I-04→C-5, I-06→C-6), and the RFI records that there is no
+image-local residual left to fold.
 
 ## Packages
 
@@ -23,7 +27,7 @@ a core modification.
 | `image-kernels/` | `KernelDef` + frozen WGSL ABI + `kernel_family!` codegen |
 | `image-gpu/` | wgpu device mgmt, tile pool, residency tiers, dispatch |
 | `image-pipeline/` | Engine A — demand-driven streaming evaluation |
-| `image-graph/` | Engine B — types now, engine in M2 |
+| `image-graph/` | Engine B — buffer graph, eval, tile cache, bounded COW undo journal |
 | `image-cms/` | color management behind a swappable `CmsEngine` (D-11: hybrid) |
 | `image-codecs/` | `ImageSource`/`ImageTarget` adapters (sans-IO) |
 | `image-psd/` | PSD/PSB structural parse + preservation-invariant writer |
@@ -63,6 +67,10 @@ pnpm test && pnpm validate:manifest
   `rendered`, public crates announcement.
 - **M2** — buffer graph + interactivity (Engine B), PSD `mutatable`.
 - **M3** — breadth (T3 ops), selections plumbing, editor enablement.
+- **M4** — editor enablement in the product sense: ingest → GPU adjust →
+  in-frame composite, the selection and paint tool layers, the layer graph
+  and undo journal, and save-back. This rung is what the code calls M4; the
+  ladder above stopped at M3 while the shipped slice already used the name.
 
 ## License
 
