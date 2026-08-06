@@ -950,11 +950,30 @@ export function createImageSession(host: BundleHost): ImageSession {
       state.busy = true;
       emit();
       try {
-        const ok = await decodeInto(name, bytes, "import", null);
+        // BIND THE SELECTED FRAME when there is exactly one, the same way
+        // `ingestSelection` does. Without an `elementId` the session holds
+        // pixels that no page element owns, and every frame-fit tool —
+        // brush, pencil, eraser, crop — is dead on arrival:
+        // `resolveFrameFit` returns null without the id, so the gesture's
+        // `onPointerDown` returns before opening a stroke. That failed
+        // SILENTLY (no error, no dab, an unchanged composite), which is
+        // how it survived: import an image, reach for the brush, and
+        // nothing happens for a reason nothing reports.
+        //
+        // Binding is a strict improvement and never a lie: with no
+        // selection, or an ambiguous multi-selection, the id stays null
+        // and the status line keeps asking for a frame — exactly as
+        // before.
+        const selected = host.selection.get();
+        const boundTo = selected.length === 1 ? elementIdOf(selected[0]) : null;
+        const ok = await decodeInto(name, bytes, "import", boundTo);
         if (ok) {
           setStatus(
-            `${name} — ${state.source?.width}×${state.source?.height} decoded. ` +
-              "Select an image frame and Apply to composite.",
+            boundTo
+              ? `${name} — ${state.source?.width}×${state.source?.height} decoded ` +
+                  "into the selected frame. Apply to composite, or paint on it."
+              : `${name} — ${state.source?.width}×${state.source?.height} decoded. ` +
+                  "Select an image frame and Apply to composite.",
           );
         }
         return ok;
