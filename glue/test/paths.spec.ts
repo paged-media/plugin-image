@@ -82,36 +82,36 @@ describe("selection → path (real engine wasm)", () => {
 
     expect(fake.mutations).toHaveLength(1);
     const m = fake.mutations[0] as {
-      kind: string;
-      parent: { kind: string; id: string };
-      node: {
-        kind: string;
-        bounds: number[];
+      op: string;
+      args: {
+        pageId: string;
+        open: boolean;
+        smooth: boolean;
         anchors: Array<{
           anchor: [number, number];
           left: [number, number];
           right: [number, number];
         }>;
-        subpath_open: boolean[];
-        fill_color?: string | null;
       };
     };
-    expect(m.kind).toBe("InsertNode");
-    expect(m.parent).toEqual({ kind: "Page", id: "pg1" });
-    expect(m.node.kind).toBe("polygon");
+    // The contract's OP vocabulary (`{op, args}`), not the raw wire
+    // `Operation` union. Sending an `InsertNode` here typechecked, was
+    // REFUSED at runtime, and — because the code read the outcome as
+    // truthy rather than reading `applied` — reported success over a
+    // document that had gained nothing. Both halves are pinned now.
+    expect(m.op).toBe("insertPath");
+    expect(m.args.pageId).toBe("pg1");
 
     // Select-all traces the image border: (0,0)-(2,1) in image px, which
-    // at scale 100 with origin (0,0) is (0,0)-(200,100) in pt. Bounds are
-    // [top, left, bottom, right].
-    expect(m.node.bounds).toEqual([0, 0, 1 * SCALE, 2 * SCALE]);
-    const xs = m.node.anchors.map((a) => a.anchor[0]).sort((a, b) => a - b);
+    // at scale 100 with origin (0,0) is (0,0)-(200,100) in pt.
+    const xs = m.args.anchors.map((a) => a.anchor[0]).sort((a, b) => a - b);
     expect(xs[0]).toBe(0);
     expect(xs[xs.length - 1]).toBe(2 * SCALE);
 
-    // A closed contour, and a PATH rather than a filled shape — filling
-    // it would paint over the image it was traced from.
-    expect(m.node.subpath_open).toEqual([false]);
-    expect(m.node.fill_color ?? null).toBeNull();
+    // A CLOSED contour, and no smoothing: the trace is a staircase and
+    // fitting curves to it would invent geometry the mask lacks.
+    expect(m.args.open).toBe(false);
+    expect(m.args.smooth).toBe(false);
 
     session.dispose();
     handle.dispose();
@@ -123,12 +123,18 @@ describe("selection → path (real engine wasm)", () => {
     const { session, handle, fake } = await ingested();
     session.selectAll();
     await session.selectionToPath();
-    const node = (fake.mutations[0] as { node: { anchors: Array<{
-      anchor: [number, number];
-      left: [number, number];
-      right: [number, number];
-    }> } }).node;
-    for (const a of node.anchors) {
+    const args = (
+      fake.mutations[0] as {
+        args: {
+          anchors: Array<{
+            anchor: [number, number];
+            left: [number, number];
+            right: [number, number];
+          }>;
+        };
+      }
+    ).args;
+    for (const a of args.anchors) {
       expect(a.left).toEqual(a.anchor);
       expect(a.right).toEqual(a.anchor);
     }

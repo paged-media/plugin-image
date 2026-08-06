@@ -1731,52 +1731,51 @@ export function createImageSession(host: BundleHost): ImageSession {
         );
         return false;
       }
-      const parent = { kind: "Page", id: fit.pageId } as never;
       let inserted = 0;
-      for (const [i, contour] of contours.entries()) {
-        const pts = contour.points.map((pt) => imageToPage(fit, pt));
-        const xs = pts.map((q) => q[0]);
-        const ys = pts.map((q) => q[1]);
-        const bounds: [number, number, number, number] = [
-          Math.min(...ys),
-          Math.min(...xs),
-          Math.max(...ys),
-          Math.max(...xs),
-        ];
+      let lastError: string | null = null;
+      for (const contour of contours) {
         // Straight segments: each anchor's handles sit ON the anchor,
         // which is how a bezier path expresses a corner. Fitting curves
         // to a traced staircase would invent smoothness the mask does
-        // not have.
-        const anchors = pts.map(([x, y]) => ({
-          anchor: [x, y] as [number, number],
-          left: [x, y] as [number, number],
-          right: [x, y] as [number, number],
-        }));
+        // not have — so `smooth: false`, and the Pen is right there for
+        // anyone who wants curves.
+        const anchors = contour.points.map((pt) => {
+          const [x, y] = imageToPage(fit, pt);
+          return {
+            anchor: [x, y] as [number, number],
+            left: [x, y] as [number, number],
+            right: [x, y] as [number, number],
+          };
+        });
         try {
+          // `MutationOutcome` is a discriminated union and a REFUSAL is a
+          // resolved value, not a throw — so truthiness proves nothing.
+          // Counting on it once produced "Traced 1 path" over a document
+          // that had gained no path at all.
           const outcome = await host.document.mutate({
-            kind: "InsertNode",
-            parent,
-            position: 0,
-            node: {
-              kind: "polygon",
-              self_id: `paged-image-path-${Date.now()}-${i}`,
-              bounds,
+            op: "insertPath",
+            args: {
+              pageId: fit.pageId,
               anchors,
-              subpath_starts: [],
-              subpath_open: [false],
-              // No fill: a traced path is a PATH, and filling it would
-              // paint over the image it was traced from.
-              stroke_color: "Black",
-              stroke_weight: 1,
+              open: false,
+              smooth: false,
             },
-          } as never);
-          if (outcome) inserted += 1;
+          });
+          if (outcome.applied) {
+            inserted += 1;
+          } else {
+            lastError = String(outcome.error ?? "the host refused the insert");
+            host.log.debug("path insert refused", outcome.error);
+          }
         } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
           host.log.debug("path insert failed", err);
         }
       }
       if (inserted === 0) {
-        setStatus("The host refused the path insert.");
+        setStatus(
+          `The host refused the path insert${lastError ? `: ${lastError}` : "."}`,
+        );
         return false;
       }
       const holes = contours.filter((c) => !c.outer).length;
