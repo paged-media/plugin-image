@@ -321,6 +321,13 @@ export interface ImageSession {
   /** Undo / redo the newest journaled PIXEL edit (paint, fill, bake).
    *  Layer STRUCTURE changes are not journaled. */
   undo(): Promise<boolean>;
+  /** Walk BACK `n` journal steps — the History panel's "jump to here".
+   *  The journal is a stack, not a random-access log, so this is n
+   *  undos; holding every intermediate state to make it O(1) would cost
+   *  exactly what the byte budget exists to bound. */
+  undoSteps(n: number): Promise<boolean>;
+  /** Walk FORWARD `n` journal steps. */
+  redoSteps(n: number): Promise<boolean>;
   redo(): Promise<boolean>;
   /** Commit the crop: cut the machine's rect out of the source image, swap
    *  the engine-held source to the cropped result, recompute the
@@ -1836,6 +1843,18 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     undo() {
       return historyStep(true);
+    },
+
+    async undoSteps(n) {
+      let ok = true;
+      for (let i = 0; i < n && ok; i++) ok = await historyStep(true);
+      return ok;
+    },
+
+    async redoSteps(n) {
+      let ok = true;
+      for (let i = 0; i < n && ok; i++) ok = await historyStep(false);
+      return ok;
     },
 
     redo() {

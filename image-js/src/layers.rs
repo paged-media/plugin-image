@@ -915,6 +915,18 @@ impl LayerStack {
         self.journal.redo_label()
     }
 
+    /// Every retained undo step, oldest first — what a History panel
+    /// lists. See `TileJournal::undo_labels` on why this is the RETAINED
+    /// history and not the whole session.
+    pub fn undo_labels(&self) -> Vec<&str> {
+        self.journal.undo_labels()
+    }
+
+    /// Every redo step, next-to-replay first.
+    pub fn redo_labels(&self) -> Vec<&str> {
+        self.journal.redo_labels()
+    }
+
     /// Drop the history (a resolution change makes every tile snapshot
     /// meaningless — better to say "no history" than to restore garbage).
     pub fn clear_history(&mut self) {

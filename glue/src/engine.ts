@@ -599,6 +599,13 @@ export interface LayerHistory {
   generation: number;
   undoLabel: string | null;
   redoLabel: string | null;
+  /** Every RETAINED undo step, oldest first — the History panel's list.
+   *  Not the whole session: the journal is byte-budgeted and `dropped`
+   *  counts what fell off, which the panel states rather than implying a
+   *  completeness the bound cannot provide. */
+  undoSteps: readonly string[];
+  /** Every redo step, next-to-replay first. */
+  redoSteps: readonly string[];
 }
 
 export const EMPTY_LAYER_STACK: LayerStackInfo = { active: -1, layers: [] };

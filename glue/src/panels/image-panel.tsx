@@ -689,6 +689,8 @@ export function LayersSection({
   onMaskToggle,
   onMaskClear,
   onBake,
+  onUndoTo,
+  onRedoTo,
   onUndo,
   onRedo,
 }: {
@@ -718,6 +720,10 @@ export function LayersSection({
   onMaskToggle: (index: number, enabled: boolean) => void;
   /** Delete the mask outright. */
   onMaskClear: (index: number) => void;
+  /** Walk BACK `n` journal steps (n undos — the journal is a stack). */
+  onUndoTo: (n: number) => void;
+  /** Walk FORWARD `n` journal steps. */
+  onRedoTo: (n: number) => void;
   onBake: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -951,6 +957,59 @@ export function LayersSection({
           Redo{history?.redoLabel ? ` ${history.redoLabel}` : ""}
         </button>
       </div>
+      {/* HISTORY — the list, not just the counter. The catalog records
+          this as a PANEL gap and not an engine gap, and it was right:
+          the journal has carried labels, scopes and a dropped count all
+          along, and the only thing missing was somewhere to show them.
+          Steps are listed oldest-first with the current position marked;
+          clicking one walks the journal to it. */}
+      {history &&
+      (history.undoSteps.length > 0 || history.redoSteps.length > 0) ? (
+        <div data-image-history-list>
+          {history.undoSteps.map((label, i) => (
+            <button
+              key={`u${i}-${label}`}
+              type="button"
+              data-image-history-step={i}
+              disabled={disabled}
+              title={`Step back to just after "${label}"`}
+              // Walking back N steps is N undos — the journal is a stack,
+              // not a random-access log, and pretending otherwise would
+              // mean holding every intermediate state.
+              onClick={() => onUndoTo(history.undoSteps.length - 1 - i)}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                opacity: 1,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+          <div style={{ ...note, fontWeight: 600 }} data-image-history-here>
+            ▸ here
+          </div>
+          {history.redoSteps.map((label, i) => (
+            <button
+              key={`r${i}-${label}`}
+              type="button"
+              data-image-history-redo-step={i}
+              disabled={disabled}
+              title={`Step forward through "${label}"`}
+              onClick={() => onRedoTo(i + 1)}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                opacity: 0.55,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {history ? (
         <div style={note} data-image-history-readout>
           History: {history.depth} undo / {history.redoDepth} redo,{" "}
@@ -1815,6 +1874,8 @@ export function makeImagePanel(session: ImageSession) {
           onMaskFromSelection={(i) => void session.layerMaskFromSelection(i)}
           onMaskToggle={(i, v) => void session.setLayerMaskEnabled(i, v)}
           onMaskClear={(i) => void session.clearLayerMask(i)}
+          onUndoTo={(n) => void session.undoSteps(n)}
+          onRedoTo={(n) => void session.redoSteps(n)}
           onBake={() => void session.bakeAdjustToLayer()}
           onUndo={() => void session.undo()}
           onRedo={() => void session.redo()}

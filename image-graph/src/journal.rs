@@ -255,6 +255,25 @@ impl TileJournal {
         self.undo.back().map(|e| e.label.as_str())
     }
 
+    /// Every undoable step's label, OLDEST first — what a History panel
+    /// lists. The top label alone (`undo_label`) answers "what does
+    /// ctrl-Z do", which is a different question from "where can I go
+    /// back to", and only the second one makes a panel worth having.
+    ///
+    /// Note this is the RETAINED history, not the whole edit session:
+    /// the journal is byte-budgeted and `dropped()` counts what fell off
+    /// the back. A panel showing this list must say so, or it implies a
+    /// completeness the bound does not provide.
+    pub fn undo_labels(&self) -> Vec<&str> {
+        self.undo.iter().map(|e| e.label.as_str()).collect()
+    }
+
+    /// Every redoable step's label, NEXT first — the order `redo` would
+    /// replay them in.
+    pub fn redo_labels(&self) -> Vec<&str> {
+        self.redo.iter().rev().map(|e| e.label.as_str()).collect()
+    }
+
     /// The label of the edit `redo` would replay, if any.
     pub fn redo_label(&self) -> Option<&str> {
         self.redo.last().map(|e| e.label.as_str())
@@ -509,6 +528,52 @@ mod tests {
                 bytes[i..i + BPT].fill(value);
             }
         }
+    }
+
+    #[test]
+    fn image_editor_undo_the_label_list_is_the_retained_stack_oldest_first() {
+        let (w, h) = (256u32, 256u32);
+        let mut px = image(w, h, 10);
+        let mut j = TileJournal::new();
+        for label in ["Paint", "Fill", "Curves"] {
+            paint(w, &mut px, Region::new(0, 0, 8, 8), 1);
+            j.record(label, 0, &store(w, h, &mut px), Region::new(0, 0, 8, 8));
+        }
+        assert_eq!(
+            j.undo_labels(),
+            vec!["Paint", "Fill", "Curves"],
+            "oldest first — the order a History panel reads top to bottom"
+        );
+        assert!(j.redo_labels().is_empty());
+
+        // Step back twice; the labels move across, redo in replay order.
+        j.undo(&mut store(w, h, &mut px));
+        j.undo(&mut store(w, h, &mut px));
+        assert_eq!(j.undo_labels(), vec!["Paint"]);
+        assert_eq!(
+            j.redo_labels(),
+            vec!["Fill", "Curves"],
+            "next-to-replay first"
+        );
+    }
+
+    #[test]
+    fn image_editor_undo_the_label_list_only_shows_what_survived_the_budget() {
+        // The list is the RETAINED history, not the session — a panel
+        // that implied otherwise would claim a completeness the byte
+        // budget cannot provide, which is what `dropped()` exists to say.
+        let (w, h) = (256u32, 256u32);
+        let mut px = image(w, h, 10);
+        let mut j = TileJournal::with_budget(JournalBudget {
+            max_entries: 2,
+            ..JournalBudget::default()
+        });
+        for label in ["One", "Two", "Three"] {
+            paint(w, &mut px, Region::new(0, 0, 8, 8), 1);
+            j.record(label, 0, &store(w, h, &mut px), Region::new(0, 0, 8, 8));
+        }
+        assert_eq!(j.undo_labels(), vec!["Two", "Three"], "the oldest fell off");
+        assert_eq!(j.dropped(), 1, "and the journal says how many");
     }
 
     #[test]

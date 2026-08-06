@@ -1496,7 +1496,7 @@ mod wasm {
             };
             let h = doc.stack.history();
             format!(
-                "{{\"canUndo\":{},\"canRedo\":{},\"depth\":{},\"redoDepth\":{},\"bytes\":{},\"maxBytes\":{},\"maxEntries\":{},\"dropped\":{},\"generation\":{},\"undoLabel\":{},\"redoLabel\":{}}}",
+                "{{\"canUndo\":{},\"canRedo\":{},\"depth\":{},\"redoDepth\":{},\"bytes\":{},\"maxBytes\":{},\"maxEntries\":{},\"dropped\":{},\"generation\":{},\"undoLabel\":{},\"redoLabel\":{},\"undoSteps\":[{}],\"redoSteps\":[{}]}}",
                 h.can_undo,
                 h.can_redo,
                 h.depth,
@@ -1512,6 +1512,18 @@ mod wasm {
                 doc.stack
                     .redo_label()
                     .map_or_else(|| "null".to_string(), json_escape),
+                doc.stack
+                    .undo_labels()
+                    .iter()
+                    .map(|l| json_escape(l))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                doc.stack
+                    .redo_labels()
+                    .iter()
+                    .map(|l| json_escape(l))
+                    .collect::<Vec<_>>()
+                    .join(","),
             )
         })
     }

@@ -342,6 +342,8 @@ describe("the panel's Layers section", () => {
     generation: 2,
     undoLabel: "Paint",
     redoLabel: null,
+    undoSteps: ["Paint"],
+    redoSteps: [],
     ...over,
   });
 
@@ -373,6 +375,8 @@ describe("the panel's Layers section", () => {
         onOpacity: () => {},
         onBlend: () => {},
         onLock: () => {},
+        onUndoTo: () => {},
+        onRedoTo: () => {},
         onAddAdjustment: () => {},
         onMaskFromSelection: () => {},
         onMaskToggle: () => {},
