@@ -46,12 +46,38 @@ import {
   silentConsole,
 } from "./helpers";
 
-function makeHost(fake: ReturnType<typeof makeFakeEditor>) {
+function makeHost(
+  fake: ReturnType<typeof makeFakeEditor>,
+  shell: ReturnType<typeof shellStub> = shellStub(),
+) {
   return createBundleHost(() => fake.editor, manifestJson as PluginManifest, {
     console: silentConsole,
     storage: mapBacking(),
-    shell: shellStub(),
+    shell,
   });
+}
+
+/** A shell whose K-10 saver records what it was handed. */
+function savingShell(accept = true) {
+  const saved: Array<{
+    suggestedName: string;
+    bytes: Uint8Array;
+    mimeType?: string;
+  }> = [];
+  return {
+    shell: {
+      ...shellStub(),
+      saveFile: async (o: {
+        suggestedName: string;
+        bytes: Uint8Array;
+        mimeType?: string;
+      }) => {
+        saved.push(o);
+        return accept;
+      },
+    } as unknown as ReturnType<typeof shellStub>,
+    saved,
+  };
 }
 
 describe("the extended adjust parameter wire", () => {
@@ -257,5 +283,80 @@ describe("the save-back lane (real engine wasm)", () => {
     ]);
     loaded.dispose();
     expect(fake.exporters.ids()).toHaveLength(0);
+  });
+});
+
+// ── K-10: the bundle finally CALLS the door added for it ─────────────
+//
+// `shell.saveFile@1` was added to the contract with paged.image named as
+// its consumer, and this bundle went on staging bytes for the Export
+// Center regardless — a gap that had migrated out of the contract and
+// into the plugin. These specs pin both branches, because the door is
+// PROBED: without the probe its `false` and a user's cancel are the same
+// answer.
+
+describe("save-to-file (K-10)", () => {
+  it("hands the staged bytes to the host's saver", async () => {
+    const fake = makeFakeEditor();
+    const { shell, saved } = savingShell();
+    const handle = makeHost(fake, shell);
+    const session = createImageSession(handle.host);
+
+    expect(await session.importBytes("art.psd", psdBytes())).toBe(true);
+    expect(await session.saveToFile()).toBe(true);
+
+    expect(saved).toHaveLength(1);
+    expect(saved[0].suggestedName).toBe("art.psd");
+    expect(saved[0].mimeType).toBe("image/vnd.adobe.photoshop");
+    expect(Array.from(saved[0].bytes.slice(0, 4))).toEqual([
+      0x38, 0x42, 0x50, 0x53,
+    ]);
+    // The ceiling the door documents, repeated where the user reads it:
+    // a browser download cannot report a cancel.
+    expect(session.state().status).toContain("delivery, not proof");
+
+    session.dispose();
+    handle.dispose();
+  });
+
+  it("stages first, so the button is one action and not two", async () => {
+    const fake = makeFakeEditor();
+    const { shell, saved } = savingShell();
+    const handle = makeHost(fake, shell);
+    const session = createImageSession(handle.host);
+    await session.importBytes("art.psd", psdBytes());
+    // Nothing staged yet.
+    expect(session.state().saveBack).toBeNull();
+    expect(await session.saveToFile()).toBe(true);
+    expect(saved).toHaveLength(1);
+    expect(session.state().saveBack).not.toBeNull();
+    session.dispose();
+    handle.dispose();
+  });
+
+  it("reports a refusal as a refusal", async () => {
+    const fake = makeFakeEditor();
+    const { shell } = savingShell(false);
+    const handle = makeHost(fake, shell);
+    const session = createImageSession(handle.host);
+    await session.importBytes("art.psd", psdBytes());
+    expect(await session.saveToFile()).toBe(false);
+    expect(session.state().status).toContain("declined");
+    session.dispose();
+    handle.dispose();
+  });
+
+  it("says when the host wires no saver, instead of silently failing", async () => {
+    // The stub shell has no `saveFile`, so `supports` is false — the
+    // honest no-door state, distinct from a refusal.
+    const fake = makeFakeEditor();
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+    await session.importBytes("art.psd", psdBytes());
+    expect(await session.saveToFile()).toBe(false);
+    expect(session.state().status).toContain("shell.saveFile@1");
+    expect(session.state().status).toContain("Export Center");
+    session.dispose();
+    handle.dispose();
   });
 });

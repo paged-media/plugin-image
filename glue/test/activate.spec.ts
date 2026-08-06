@@ -68,6 +68,7 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.undo",
       "media.paged.image.command.redo",
       "media.paged.image.command.applyToFile",
+      "media.paged.image.command.saveToFile",
       "media.paged.image.command.loadBrushLibrary",
       // The raster↔vector bridge + the luminosity mask.
       "media.paged.image.command.selectionToPath",

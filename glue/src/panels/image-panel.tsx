@@ -2499,9 +2499,11 @@ export function makeImagePanel(session: ImageSession) {
         </div>
 
         {/* SAVE-BACK — bake the adjustments into the SOURCE FILE bytes.
-            The button computes + STAGES them; the Export Center delivers
-            them, because the host contract has no save-file door
-            (shell.pickFile READS bytes in). Stated, not hidden. */}
+            "Apply" computes + STAGES them; "Save…" hands them to the
+            host's K-10 saver. That door was added to the contract FOR
+            this consumer and this bundle had never called it, so the
+            Export Center was doing work the panel could do itself. The
+            exporters remain the fallback for a host with no saver. */}
         <div style={sectionTitle}>Apply to file</div>
         <div style={{ display: "flex", gap: "var(--space-2, 8px)" }}>
           <button
@@ -2511,6 +2513,14 @@ export function makeImagePanel(session: ImageSession) {
             onClick={() => void session.applyToFile()}
           >
             Apply to file
+          </button>
+          <button
+            type="button"
+            data-image-save-to-file
+            disabled={disabled}
+            onClick={() => void session.saveToFile()}
+          >
+            Save…
           </button>
         </div>
         {s.saveBack ? (
@@ -2530,8 +2540,9 @@ export function makeImagePanel(session: ImageSession) {
             Bakes the adjustments into the source file&apos;s bytes at full
             resolution: a PSD writes its channel pixels back (single-layer; a
             MULTI-layer PSD is flattened into a new single-layer PSD and says
-            so), a PNG/JPEG is re-encoded. The bytes are handed to the Export
-            Center — the host wires no save-file door.
+            so), a PNG/JPEG is re-encoded. Save… hands the result to the
+            host&apos;s saver; where no saver is wired it says so, and the
+            Export Center delivers the same bytes.
           </div>
         )}
 

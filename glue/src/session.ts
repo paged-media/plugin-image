@@ -216,6 +216,17 @@ export interface ImageSession {
   /** The edited PSD, preservation-safe (zero-edit ⇒ byte-identical).
    *  Null when no PSD is loaded / the engine is gone. */
   psdExport(): { bytes: Uint8Array; fileName: string } | null;
+  /** Hand the STAGED save-back bytes to the host's saver (K-10). Stages
+   *  them first when nothing is staged yet, so the panel button is one
+   *  action rather than two.
+   *
+   *  Resolves false when no saver is wired, when there is nothing to
+   *  save, or when the host refused. HONEST CEILING, inherited from the
+   *  door: a host backed by the browser's anchor-download cannot observe
+   *  a user cancel, so `true` means "handed to the download path", not
+   *  "a file exists on disk". The status text says which of those the
+   *  answer is. */
+  saveToFile(): Promise<boolean>;
   /** SAVE-BACK: composite the current adjustments at FULL resolution and
    *  bake them into the source file's bytes.
    *
@@ -1296,7 +1307,9 @@ export function createImageSession(host: BundleHost): ImageSession {
         state.saveBack = result;
         setStatus(
           `${result.note} ${result.fileName}, ${result.bytes.length} bytes — ready. ` +
-            "Deliver it from the Export Center (the host wires no save-file door).",
+            (host.supports("shell.saveFile@1")
+              ? "Save it from the panel, or deliver it from the Export Center."
+              : "This host wires no save-file door — deliver it from the Export Center."),
         );
         return result;
       } catch (err) {
@@ -1308,6 +1321,33 @@ export function createImageSession(host: BundleHost): ImageSession {
         state.busy = false;
         emit();
       }
+    },
+
+    async saveToFile() {
+      if (!host.supports("shell.saveFile@1")) {
+        // Probed, not assumed. Without this the door's `false` would be
+        // indistinguishable from a user cancel.
+        setStatus(
+          "This host wires no save-file door (shell.saveFile@1) — use the " +
+            "Export Center.",
+        );
+        return false;
+      }
+      const staged = state.saveBack ?? (await api.applyToFile());
+      if (!staged) return false;
+      const accepted = await host.shell.saveFile({
+        suggestedName: staged.fileName,
+        bytes: staged.bytes,
+        mimeType: staged.mimeType,
+      });
+      setStatus(
+        accepted
+          ? `${staged.fileName} handed to the host's save path ` +
+            "(a browser download cannot report a cancel, so this is " +
+            "delivery, not proof of a file on disk)."
+          : `The host declined to save ${staged.fileName}.`,
+      );
+      return accepted;
     },
 
     async psdExportBytes() {

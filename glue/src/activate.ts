@@ -318,16 +318,19 @@ export function activate(host: BundleHost): BundleHandle {
 
   // SAVE-BACK — bake the adjustments into the SOURCE FILE's bytes.
   //
-  // DELIVERY SEAM (honest, and the reason this is a "stage + export"
-  // flow rather than a one-click write): the host wires NO save-file
-  // door. `host.shell.pickFile` is a READ picker — it returns
-  // `PickedFile { name, bytes }`, i.e. bytes coming IN — and there is no
-  // counterpart that takes bytes out (probed here at activate time so
-  // the claim is checked, not assumed). So the panel button + this
-  // command COMPUTE and STAGE the bytes (reporting size + the honest
-  // layer-structure note), and the Export Center's exporters below are
-  // the whole delivery lane. A `shell.saveFile@1` door is the RFI-worthy
-  // gap; the day it exists this handler writes directly.
+  // DELIVERY SEAM. This used to read "the host wires NO save-file door",
+  // and that stopped being true when K-10 landed `shell.saveFile@1` in
+  // the contract — with paged.image named as its consumer. The bundle
+  // nevertheless kept staging bytes for the Export Center, so a door
+  // added for this plugin went uncalled: the gap had moved from the
+  // contract into this file without anyone noticing, which is what a
+  // comment stating a fact about someone ELSE's code will eventually do.
+  //
+  // Now: `applyToFile` COMPUTES and STAGES (reporting size + the honest
+  // layer-structure note) and `saveToFile` hands the bytes to the host's
+  // saver, PROBED rather than assumed — without the probe the door's
+  // `false` would be indistinguishable from a user cancel. The exporters
+  // below remain the delivery lane for a host with no saver.
   host.contribute.command({
     id: "media.paged.image.command.applyToFile",
     title: "Apply adjustments to the file",
@@ -335,6 +338,16 @@ export function activate(host: BundleHost): BundleHandle {
     handler: () => {
       host.shell.openPanel(PANEL_ID);
       void session.applyToFile();
+    },
+  });
+
+  host.contribute.command({
+    id: "media.paged.image.command.saveToFile",
+    title: "Save the adjusted file",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.saveToFile();
     },
   });
 

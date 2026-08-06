@@ -48,6 +48,7 @@
       "media.paged.image.command.fillSelection",
       "media.paged.image.command.fillNoise",
       "media.paged.image.command.applyToFile",
+      "media.paged.image.command.saveToFile",
       "media.paged.image.command.loadBrushLibrary",
       "media.paged.image.command.selectionToPath",
       "media.paged.image.command.pathToSelection",
