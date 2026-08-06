@@ -629,6 +629,27 @@ export interface PsdLayerInfo {
   right: number;
 }
 
+/** One traced contour of the selection (`selection_to_paths`), in IMAGE
+ *  pixel coordinates on pixel EDGES. `outer` false marks a HOLE, which
+ *  the caller needs in order to build an even-odd path rather than two
+ *  overlapping filled shapes. */
+export interface TracedContour {
+  outer: boolean;
+  points: Array<[number, number]>;
+}
+
+/** One colour channel's reduction over the working buffer
+ *  (`image_channel_stats`). `null` where the buffer had no pixels to
+ *  measure — which is not the same as a channel that is all zero. */
+export interface ChannelStatsInfo {
+  /** `red` | `green` | `blue` | `alpha` | `luma` — the wire name the
+   *  channel→selection door takes, lowercase. */
+  name: string;
+  min: number | null;
+  max: number | null;
+  mean: number | null;
+}
+
 /** One `.abr` preset, projected onto the parameters the brush machine
  *  actually takes (`abr_presets`). Every optional field is `null` when
  *  the FILE does not carry it — a sampled (bitmap) tip has no hardness,
@@ -813,6 +834,26 @@ export interface ImageEngine {
    *  handle/resolution drops the selection; `adjust` on the bound handle
    *  automatically masks when a non-trivial selection exists. */
   selectionBind(handle: number): void;
+  /** SELECTION → PATH. `threshold` (0–255) is the coverage cut and is a
+   *  PARAMETER because it is a decision — a feathered selection has no
+   *  single right answer. `tolerance` (image px) straightens staircases.
+   *  Empty when nothing is selected. */
+  selectionToPaths(threshold: number, tolerance: number): TracedContour[];
+  /** The per-channel readout for an engine-held image: R/G/B/A plus the
+   *  derived Rec.709 luma, reduced from the same buffer the histogram
+   *  reads. */
+  channelStats(handle: number): ChannelStatsInfo[];
+  /** LOAD A CHANNEL AS THE SELECTION. The channel's bytes ARE the
+   *  coverage representation, so this is a copy and not a threshold — a
+   *  50% channel yields a 50%-selected region, which is what a
+   *  luminosity mask means. An unknown channel name THROWS rather than
+   *  falling back: masking on the wrong channel is a silent wrong
+   *  answer. */
+  selectionFromChannel(
+    handle: number,
+    channel: string,
+    mode: SelectionMode,
+  ): void;
   /** Marquee rect `[x, x+w) × [y, y+h)` (image px, fractional = AA edge). */
   selectionSetRect(
     x: number,
@@ -1134,6 +1175,9 @@ export interface ImageWasmModule {
     filter: string,
   ): Promise<DecodedHandleWasm>;
   selection_bind(handle: number): void;
+  image_channel_stats(handle: number): string;
+  selection_to_paths(threshold: number, tolerance: number): string;
+  selection_from_channel(handle: number, channel: string, mode: number): void;
   selection_set_rect(
     x: number,
     y: number,
@@ -1498,6 +1542,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     tile: (handle, x, y, w, h) => wasm.image_tile_rgba8(handle, x, y, w, h),
     freeImage: (h) => wasm.free_image(h),
     selectionBind: (handle) => wasm.selection_bind(handle),
+    selectionToPaths: (threshold, tolerance) =>
+      JSON.parse(wasm.selection_to_paths(threshold, tolerance)) as TracedContour[],
+    channelStats: (handle) =>
+      JSON.parse(wasm.image_channel_stats(handle)) as ChannelStatsInfo[],
+    selectionFromChannel: (handle, channel, mode) =>
+      wasm.selection_from_channel(handle, channel, selectionModeCode(mode)),
     selectionSetRect: (x, y, w, h, mode) =>
       wasm.selection_set_rect(x, y, w, h, selectionModeCode(mode)),
     selectionSetEllipse: (cx, cy, rx, ry, mode) =>

@@ -69,6 +69,10 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.redo",
       "media.paged.image.command.applyToFile",
       "media.paged.image.command.loadBrushLibrary",
+      // The raster↔vector bridge + the luminosity mask.
+      "media.paged.image.command.selectionToPath",
+      "media.paged.image.command.pathToSelection",
+      "media.paged.image.command.channelToSelection",
       "media.paged.image.command.selectAll",
       "media.paged.image.command.deselect",
       "media.paged.image.command.invertSelection",

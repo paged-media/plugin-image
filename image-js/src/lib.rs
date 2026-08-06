@@ -59,12 +59,14 @@
 //! reachable from this crate (cargo-tree guard, spec §4 dep rule 2).
 
 pub mod brushes;
+pub mod channels;
 pub mod cmyk;
 pub mod display;
 pub mod fill;
 pub mod ingest;
 pub mod layers;
 pub mod mip;
+pub mod paths;
 pub mod saveback;
 pub mod selection;
 pub mod stroke;
@@ -950,6 +952,85 @@ mod wasm {
     #[wasm_bindgen]
     pub fn selection_feather(sigma: f32) -> Result<(), JsValue> {
         with_selection(|s| s.feather(sigma))
+    }
+
+    /// SELECTION → PATH: trace the live selection's coverage into closed
+    /// polygons, as `[{outer, points: [[x, y], …]}]` in IMAGE pixel
+    /// coordinates on pixel EDGES.
+    ///
+    /// `threshold` (0–255) is the cut at which partial coverage counts as
+    /// selected, and it is a PARAMETER because it is a decision: a
+    /// feathered or luminosity selection has no single right answer, and
+    /// picking one silently would discard the anti-aliased boundary the
+    /// selection tools produced. `tolerance` (image px) collapses
+    /// near-collinear runs; `0` keeps every staircase step.
+    ///
+    /// An EMPTY array means "nothing selected" — a caller that wants to
+    /// distinguish that from "no selection at all" reads
+    /// `selection_stats`.
+    #[wasm_bindgen]
+    pub fn selection_to_paths(threshold: u8, tolerance: f32) -> Result<String, JsValue> {
+        SELECTION.with(|s| {
+            let sel = s.borrow();
+            let bound = sel
+                .bound()
+                .ok_or_else(|| JsValue::from_str("no image bound (selection_bind first)"))?;
+            let Some(cov) = sel.coverage() else {
+                return Ok("[]".to_string());
+            };
+            Ok(crate::paths::trace_json(
+                cov.data(),
+                bound.width as usize,
+                bound.height as usize,
+                threshold,
+                tolerance,
+            ))
+        })
+    }
+
+    /// The CHANNELS readout for an engine-held image: `[{name, min, max,
+    /// mean}]` for red/green/blue/alpha and the derived Rec.709 luma.
+    /// Pure CPU reduction over the same straight-RGBA8 buffer
+    /// `image_histogram` reads, so the two agree by construction.
+    #[wasm_bindgen]
+    pub fn image_channel_stats(handle: u32) -> Result<String, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        Ok(crate::channels::stats_json(&img.rgba))
+    }
+
+    /// LOAD A CHANNEL AS THE SELECTION — the operation a channels list
+    /// exists to enable (luminosity masks, a PSD's alpha as a selection).
+    ///
+    /// The channel's bytes ARE the coverage representation, so this is a
+    /// COPY and not a threshold: a 50%-grey channel yields a 50%-selected
+    /// region, which is exactly what a luminosity mask means and what the
+    /// masked kernel pipeline already honours at `@group(2)`.
+    ///
+    /// `channel` is one of `red`/`green`/`blue`/`alpha`/`luma`; an
+    /// unknown name is an ERROR rather than a fallback, because masking
+    /// on the wrong channel is a silent wrong answer.
+    #[wasm_bindgen]
+    pub fn selection_from_channel(handle: u32, channel: &str, mode: u32) -> Result<(), JsValue> {
+        let mode = decode_mode(mode)?;
+        let ch = crate::channels::Channel::from_name(channel)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown channel {channel:?}")))?;
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let bytes = crate::channels::channel_bytes(&img.rgba, ch);
+        with_selection(|s| {
+            let b = s.bound().ok_or("no image bound (selection_bind first)")?;
+            let shape =
+                SelectionCoverage::from_data(b.width, b.height, bytes).ok_or_else(|| {
+                    format!(
+                        "channel is {}×{} but the bound image is {}×{}",
+                        img.width, img.height, b.width, b.height
+                    )
+                })?;
+            s.apply_shape(shape, mode)
+        })
     }
 
     /// Select ALL explicitly (a full-extent selection in the readouts;

@@ -624,6 +624,33 @@ export function image_auto_enhance_params(handle) {
 }
 
 /**
+ * The CHANNELS readout for an engine-held image: `[{name, min, max,
+ * mean}]` for red/green/blue/alpha and the derived Rec.709 luma.
+ * Pure CPU reduction over the same straight-RGBA8 buffer
+ * `image_histogram` reads, so the two agree by construction.
+ * @param {number} handle
+ * @returns {string}
+ */
+export function image_channel_stats(handle) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.image_channel_stats(handle);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Compute the RGB + luma 256-bin histogram of an engine-held image as
  * a flat `[r…, g…, b…, luma…]` 1024-`u32` array (the LEVELS / CURVES
  * panel slices it into four channels). Pure CPU reduction over the
@@ -1375,6 +1402,31 @@ export function selection_feather(sigma) {
 }
 
 /**
+ * LOAD A CHANNEL AS THE SELECTION — the operation a channels list
+ * exists to enable (luminosity masks, a PSD's alpha as a selection).
+ *
+ * The channel's bytes ARE the coverage representation, so this is a
+ * COPY and not a threshold: a 50%-grey channel yields a 50%-selected
+ * region, which is exactly what a luminosity mask means and what the
+ * masked kernel pipeline already honours at `@group(2)`.
+ *
+ * `channel` is one of `red`/`green`/`blue`/`alpha`/`luma`; an
+ * unknown name is an ERROR rather than a fallback, because masking
+ * on the wrong channel is a silent wrong answer.
+ * @param {number} handle
+ * @param {string} channel
+ * @param {number} mode
+ */
+export function selection_from_channel(handle, channel, mode) {
+    const ptr0 = passStringToWasm0(channel, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.selection_from_channel(handle, ptr0, len0, mode);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * Invert the selection ("everything" inverts to the explicit EMPTY
  * selection — adjust applies nowhere until reselected).
  */
@@ -1478,6 +1530,44 @@ export function selection_stats() {
     var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
     return v1;
+}
+
+/**
+ * SELECTION → PATH: trace the live selection's coverage into closed
+ * polygons, as `[{outer, points: [[x, y], …]}]` in IMAGE pixel
+ * coordinates on pixel EDGES.
+ *
+ * `threshold` (0–255) is the cut at which partial coverage counts as
+ * selected, and it is a PARAMETER because it is a decision: a
+ * feathered or luminosity selection has no single right answer, and
+ * picking one silently would discard the anti-aliased boundary the
+ * selection tools produced. `tolerance` (image px) collapses
+ * near-collinear runs; `0` keeps every staircase step.
+ *
+ * An EMPTY array means "nothing selected" — a caller that wants to
+ * distinguish that from "no selection at all" reads
+ * `selection_stats`.
+ * @param {number} threshold
+ * @param {number} tolerance
+ * @returns {string}
+ */
+export function selection_to_paths(threshold, tolerance) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.selection_to_paths(threshold, tolerance);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
 }
 
 /**
@@ -2217,12 +2307,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 336, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 339, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 371, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 374, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

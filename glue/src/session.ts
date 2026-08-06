@@ -39,6 +39,7 @@ import {
   isIdentity,
   type AdjustParams,
   type BrushLibraryInfo,
+  type ChannelStatsInfo,
   type BrushParams,
   type BrushStats,
   type DecodedInfo,
@@ -58,6 +59,11 @@ import {
   type SelectionStats,
   type StrokeTool,
 } from "./engine";
+import {
+  imageToPage,
+  pageToImage,
+  resolveFrameFit,
+} from "./frame-fit";
 import { claimImageTiles } from "./tile-provider";
 import { createDecodePool, type DecodePool } from "./decode-pool";
 import { createCropMachine, type CropMachine } from "./crop-machine";
@@ -174,6 +180,10 @@ export interface ImageSessionState {
    *  layers, or the honest reason the layered import was DECLINED and
    *  the flattened composite kept. Null for non-PSD sources. */
   layersNote: string | null;
+  /** The per-channel readout for the ingested source (R/G/B/A + luma),
+   *  or null before an ingest. Refreshed alongside the histogram, from
+   *  the same buffer, so the two never disagree. */
+  channels: ChannelStatsInfo[] | null;
   /** A loaded `.abr` brush library, or null before one is opened. The
    *  presets are PARAMETERS, not pixels — loading one changes nothing
    *  until the designer applies a row. */
@@ -291,6 +301,19 @@ export interface ImageSession {
   brushMachine(): BrushMachine | null;
   /** Merge into the brush parameters (the panel's Brush section). Takes
    *  effect on the NEXT stroke — the in-flight one is frozen. */
+  /** Turn a channel into the selection — `red`|`green`|`blue`|`alpha`|
+   *  `luma`. Replaces the current selection (the panel's other combine
+   *  modes belong to the marquee tools, not to a channel load). */
+  selectionFromChannel(channel: string): boolean;
+  /** SELECTION → PATH: trace the selection and insert the result as real
+   *  vector polygons on the page, in DOCUMENT coordinates. The first
+   *  document mutation this bundle makes — everything else it does lands
+   *  in the engine or on the scene channel — so it is undoable through
+   *  the host's own history, not the image journal. */
+  selectionToPath(threshold?: number, tolerance?: number): Promise<boolean>;
+  /** PATH → SELECTION: read the selected vector element's anchors through
+   *  the host, flatten its curves, and make it the selection. */
+  selectionFromPath(): Promise<boolean>;
   setBrushParams(p: Partial<BrushParams>): void;
   /** Load a Photoshop `.abr` brush library. Parses only — nothing about
    *  the current brush changes until `applyBrushPreset`. Resolves false
@@ -410,6 +433,30 @@ export function elementIdOf(value: unknown): string | null {
   return null;
 }
 
+/** Subdivisions per cubic segment when flattening a host path into the
+ *  pixel mask. The target is a per-pixel coverage, so more precision
+ *  than this buys nothing measurable and the cost stays bounded. */
+const CURVE_STEPS = 16;
+
+/** A cubic bezier at `t`. */
+function cubicAt(
+  p0: readonly [number, number],
+  p1: readonly [number, number],
+  p2: readonly [number, number],
+  p3: readonly [number, number],
+  t: number,
+): [number, number] {
+  const u = 1 - t;
+  const a = u * u * u;
+  const b = 3 * u * u * t;
+  const c = 3 * u * t * t;
+  const d = t * t * t;
+  return [
+    a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+    a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1],
+  ];
+}
+
 export function createImageSession(host: BundleHost): ImageSession {
   const listeners = new Set<() => void>();
   let engine: ImageEngine | null = null;
@@ -457,6 +504,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     layers: EMPTY_LAYER_STACK,
     history: null,
     layersNote: null,
+    channels: null,
     brushLibrary: null,
     brushLibraryName: null,
     brushPreset: null,
@@ -748,6 +796,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     if (state.source && engine) engine.freeImage(state.source.handle);
     state.source = null;
     state.histogram = null;
+    state.channels = null;
     cropMachineRef = null;
     selectionMachineRef = null;
     brushMachineRef = null;
@@ -836,11 +885,13 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
   };
 
-  /** Recompute the histogram + (re)build the crop machine for the live
-   *  engine-held source. Called after a decode/ingest and after a crop
-   *  commit (both change the source pixels). The histogram is the panel's
-   *  levels/curves readout. A histogram-read failure is non-fatal (the
-   *  panel just shows no histogram). */
+  /** Recompute the histogram + the CHANNELS readout + (re)build the crop
+   *  machine for the live engine-held source. Called after a decode/
+   *  ingest and after a crop commit (both change the source pixels).
+   *  Both readouts come from the SAME buffer in the same pass, which is
+   *  why the Channels panel's means can never disagree with the
+   *  histogram it sits under. A read failure is non-fatal (the panel
+   *  just shows no readout). */
   const refreshHistogram = () => {
     if (!engine || !state.source) return;
     try {
@@ -848,6 +899,12 @@ export function createImageSession(host: BundleHost): ImageSession {
     } catch (err) {
       host.log.debug("histogram read failed", err);
       state.histogram = null;
+    }
+    try {
+      state.channels = engine.channelStats(state.source.handle);
+    } catch (err) {
+      host.log.debug("channel stats read failed", err);
+      state.channels = null;
     }
   };
 
@@ -1577,6 +1634,202 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     brushMachine() {
       return brushMachineRef;
+    },
+
+    selectionFromChannel(channel) {
+      const src = state.source;
+      if (!engine || !src) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      try {
+        engine.selectionFromChannel(src.handle, channel, "replace");
+      } catch (err) {
+        // The engine names the channel it refused; a generic failure
+        // would hide a typo'd channel behind "could not select".
+        setStatus(
+          `Channel selection failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      api.refreshSelection();
+      setStatus(
+        `Selection loaded from the ${channel} channel — its values ARE the ` +
+          "coverage, so mid-tones select partially.",
+      );
+      return true;
+    },
+
+    async selectionToPath(threshold = 128, tolerance = 0.5) {
+      const src = state.source;
+      if (!engine || !src) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      if (!state.selection) {
+        setStatus("Nothing selected — select a region first.");
+        return false;
+      }
+      const contours = engine.selectionToPaths(threshold, tolerance);
+      if (contours.length === 0) {
+        // A selection that exists but covers nothing at this threshold is
+        // a real state, and raising the threshold is the fix — so say
+        // which threshold produced nothing rather than "no paths".
+        setStatus(
+          `Nothing traced at coverage ≥ ${threshold} — the selection is ` +
+            "empty at that cut.",
+        );
+        return false;
+      }
+      // Image px → page pt, through the SAME fit the paint tools use, so
+      // a traced path lands exactly on top of what it traced.
+      const fit = await resolveFrameFit(host, src, "selectionToPath");
+      if (!fit) {
+        setStatus(
+          "The frame's geometry could not be read, so the path would land " +
+            "in the wrong place. Nothing was inserted.",
+        );
+        return false;
+      }
+      const parent = { kind: "Page", id: fit.pageId } as never;
+      let inserted = 0;
+      for (const [i, contour] of contours.entries()) {
+        const pts = contour.points.map((pt) => imageToPage(fit, pt));
+        const xs = pts.map((q) => q[0]);
+        const ys = pts.map((q) => q[1]);
+        const bounds: [number, number, number, number] = [
+          Math.min(...ys),
+          Math.min(...xs),
+          Math.max(...ys),
+          Math.max(...xs),
+        ];
+        // Straight segments: each anchor's handles sit ON the anchor,
+        // which is how a bezier path expresses a corner. Fitting curves
+        // to a traced staircase would invent smoothness the mask does
+        // not have.
+        const anchors = pts.map(([x, y]) => ({
+          anchor: [x, y] as [number, number],
+          left: [x, y] as [number, number],
+          right: [x, y] as [number, number],
+        }));
+        try {
+          const outcome = await host.document.mutate({
+            kind: "InsertNode",
+            parent,
+            position: 0,
+            node: {
+              kind: "polygon",
+              self_id: `paged-image-path-${Date.now()}-${i}`,
+              bounds,
+              anchors,
+              subpath_starts: [],
+              subpath_open: [false],
+              // No fill: a traced path is a PATH, and filling it would
+              // paint over the image it was traced from.
+              stroke_color: "Black",
+              stroke_weight: 1,
+            },
+          } as never);
+          if (outcome) inserted += 1;
+        } catch (err) {
+          host.log.debug("path insert failed", err);
+        }
+      }
+      if (inserted === 0) {
+        setStatus("The host refused the path insert.");
+        return false;
+      }
+      const holes = contours.filter((c) => !c.outer).length;
+      setStatus(
+        `Traced ${inserted} path${inserted === 1 ? "" : "s"} from the ` +
+          `selection` +
+          (holes > 0
+            ? ` (${holes} of them hole${holes === 1 ? "" : "s"}, inserted ` +
+              "separately — this engine emits one polygon per contour)"
+            : ""),
+      );
+      return true;
+    },
+
+    async selectionFromPath() {
+      const src = state.source;
+      if (!engine || !src) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      const picked = host.selection
+        .get()
+        .filter((i) => elementIdOf(i) !== src.elementId);
+      if (picked.length !== 1) {
+        setStatus(
+          "Select exactly ONE vector element (other than the image frame) " +
+            "to load its path as the selection.",
+        );
+        return false;
+      }
+      let result;
+      try {
+        result = await host.document.pathAnchors(picked[0]);
+      } catch (err) {
+        setStatus(
+          `Path read failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      if (!result || result.anchors.length < 3) {
+        // A rectangle can legitimately carry NO PathGeometry, which the
+        // contract documents as "nothing to draw" — reporting that is
+        // more useful than an error the designer cannot act on.
+        setStatus(
+          "That element exposes no path with at least three anchors " +
+            "(a plain rectangle often carries none).",
+        );
+        return false;
+      }
+      const fit = await resolveFrameFit(host, src, "selectionFromPath");
+      if (!fit) {
+        setStatus("The image frame's geometry could not be read.");
+        return false;
+      }
+      // Flatten each cubic segment. A fixed subdivision is honest here:
+      // the target is a PIXEL mask, so more than a pixel's worth of
+      // precision buys nothing and the cost is bounded.
+      const flat: Array<[number, number]> = [];
+      const a = result.anchors;
+      for (let i = 0; i < a.length; i += 1) {
+        const cur = a[i];
+        const nxt = a[(i + 1) % a.length];
+        flat.push(pageToImage(fit, cur.anchor as [number, number]));
+        const straight =
+          cur.anchor[0] === cur.right[0] &&
+          cur.anchor[1] === cur.right[1] &&
+          nxt.anchor[0] === nxt.left[0] &&
+          nxt.anchor[1] === nxt.left[1];
+        if (straight) continue;
+        for (let step = 1; step < CURVE_STEPS; step += 1) {
+          const t = step / CURVE_STEPS;
+          flat.push(
+            pageToImage(
+              fit,
+              cubicAt(cur.anchor, cur.right, nxt.left, nxt.anchor, t),
+            ),
+          );
+        }
+      }
+      try {
+        engine.selectionSetPolygon(flat, "replace");
+      } catch (err) {
+        setStatus(
+          `Path selection failed: ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
+      api.refreshSelection();
+      setStatus(
+        `Selection loaded from a ${a.length}-anchor path ` +
+          `(${flat.length} points after flattening).`,
+      );
+      return true;
     },
 
     setBrushParams(p) {

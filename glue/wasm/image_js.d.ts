@@ -274,6 +274,14 @@ export function gpu_ready(): boolean;
 export function image_auto_enhance_params(handle: number): Float32Array;
 
 /**
+ * The CHANNELS readout for an engine-held image: `[{name, min, max,
+ * mean}]` for red/green/blue/alpha and the derived Rec.709 luma.
+ * Pure CPU reduction over the same straight-RGBA8 buffer
+ * `image_histogram` reads, so the two agree by construction.
+ */
+export function image_channel_stats(handle: number): string;
+
+/**
  * Compute the RGB + luma 256-bin histogram of an engine-held image as
  * a flat `[r…, g…, b…, luma…]` 1024-`u32` array (the LEVELS / CURVES
  * panel slices it into four channels). Pure CPU reduction over the
@@ -618,6 +626,21 @@ export function selection_coverage_bytes(): Uint8Array;
 export function selection_feather(sigma: number): void;
 
 /**
+ * LOAD A CHANNEL AS THE SELECTION — the operation a channels list
+ * exists to enable (luminosity masks, a PSD's alpha as a selection).
+ *
+ * The channel's bytes ARE the coverage representation, so this is a
+ * COPY and not a threshold: a 50%-grey channel yields a 50%-selected
+ * region, which is exactly what a luminosity mask means and what the
+ * masked kernel pipeline already honours at `@group(2)`.
+ *
+ * `channel` is one of `red`/`green`/`blue`/`alpha`/`luma`; an
+ * unknown name is an ERROR rather than a fallback, because masking
+ * on the wrong channel is a silent wrong answer.
+ */
+export function selection_from_channel(handle: number, channel: string, mode: number): void;
+
+/**
  * Invert the selection ("everything" inverts to the explicit EMPTY
  * selection — adjust applies nowhere until reselected).
  */
@@ -667,6 +690,24 @@ export function selection_set_rect(x: number, y: number, w: number, h: number, m
  * empty selection reads `has == 1, w == h == 0, fraction == 0`.
  */
 export function selection_stats(): Float32Array;
+
+/**
+ * SELECTION → PATH: trace the live selection's coverage into closed
+ * polygons, as `[{outer, points: [[x, y], …]}]` in IMAGE pixel
+ * coordinates on pixel EDGES.
+ *
+ * `threshold` (0–255) is the cut at which partial coverage counts as
+ * selected, and it is a PARAMETER because it is a decision: a
+ * feathered or luminosity selection has no single right answer, and
+ * picking one silently would discard the anti-aliased boundary the
+ * selection tools produced. `tolerance` (image px) collapses
+ * near-collinear runs; `0` keeps every staircase step.
+ *
+ * An EMPTY array means "nothing selected" — a caller that wants to
+ * distinguish that from "no selection at all" reads
+ * `selection_stats`.
+ */
+export function selection_to_paths(threshold: number, tolerance: number): string;
 
 /**
  * Re-point the selection at a NEW image handle that holds the SAME
@@ -732,6 +773,7 @@ export interface InitOutput {
     readonly free_image: (a: number) => void;
     readonly gpu_ready: () => number;
     readonly image_auto_enhance_params: (a: number) => [number, number, number];
+    readonly image_channel_stats: (a: number) => [number, number, number, number];
     readonly image_histogram: (a: number) => [number, number, number];
     readonly image_tile_rgba8: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly image_tile_rgba8_level: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -779,6 +821,7 @@ export interface InitOutput {
     readonly selection_clear: () => void;
     readonly selection_coverage_bytes: () => any;
     readonly selection_feather: (a: number) => [number, number];
+    readonly selection_from_channel: (a: number, b: number, c: number, d: number) => [number, number];
     readonly selection_invert: () => [number, number];
     readonly selection_magic_wand: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly selection_select_all: () => [number, number];
@@ -786,6 +829,7 @@ export interface InitOutput {
     readonly selection_set_polygon: (a: number, b: number, c: number) => [number, number];
     readonly selection_set_rect: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly selection_stats: () => [number, number];
+    readonly selection_to_paths: (a: number, b: number) => [number, number, number, number];
     readonly selection_transfer: (a: number) => [number, number, number];
     readonly straighten_crop_image: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly qcms_enable_iccv4: () => void;

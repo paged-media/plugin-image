@@ -153,6 +153,12 @@ export function makeFakeEditor() {
   const placed = new Map<string, Uint8Array>();
   /** elementId → element geometry (the crop tool's frame-box read). */
   const geometry = new Map<string, ElementGeometryItem>();
+  /** elementId → the anchors `document.pathAnchors` answers (the
+   *  path→selection read). Absent ⇒ the door answers null, which is the
+   *  contract's own "this element has no path geometry". */
+  const pathAnchors = new Map<string, unknown>();
+  /** Every mutation the bundle sent, in order. */
+  const mutations: unknown[] = [];
   const editor = {
     registries: { panels, commands, importers, exporters, tools },
     overlaySignals,
@@ -165,7 +171,12 @@ export function makeFakeEditor() {
     sceneLayers,
     images,
     client: {
-      mutate: async () => ({ kind: "mutationApplied", payload: {} }),
+      mutate: async (m: unknown) => {
+        mutations.push(m);
+        return { kind: "mutationApplied", payload: {} };
+      },
+      pathAnchors: async (id: { id?: string }) =>
+        (id.id ? pathAnchors.get(id.id) : undefined) ?? null,
       documentMeta: async () => ({ pageCount: 1, activePage: "pg1" }),
       collection: async () => [],
       setElementSelection: async (ids: unknown[]) => ids,
@@ -241,6 +252,8 @@ export function makeFakeEditor() {
     imageSubmits,
     emitTilesNeeded,
     placed,
+    pathAnchors,
+    mutations,
     emitSelection,
   };
 }

@@ -38,6 +38,7 @@ import type {
   BrushParams,
   BrushPresetInfo,
   BrushStats,
+  ChannelStatsInfo,
   GradientKind,
   ImageHistogram,
   LayerHistory,
@@ -661,6 +662,149 @@ export function BrushSection({
   );
 }
 
+// ── paths (raster ↔ vector) ──────────────────────────────────────────
+
+/** The PATHS section — the raster↔vector bridge, and only that.
+ *
+ *  Deliberately NOT a Paths palette. The vector side of Paged is
+ *  host-owned and already strong (the Pen family, the shape tools, the
+ *  Pathfinder), and a second list of the same paths living inside the
+ *  image panel would be a duplicate surface that drifts. What was
+ *  genuinely missing was the CONVERSION between a raster selection and a
+ *  real vector element, in both directions — so that is what this is.
+ *
+ *  The threshold is exposed rather than hidden because it is a decision:
+ *  a feathered or luminosity selection has no single correct outline,
+ *  and choosing silently would throw away the anti-aliased boundary. */
+export function PathsSection({
+  hasSelection,
+  threshold,
+  disabled,
+  onThreshold,
+  onToPath,
+  onFromPath,
+}: {
+  hasSelection: boolean;
+  threshold: number;
+  disabled: boolean;
+  onThreshold: (v: number) => void;
+  onToPath: () => void;
+  onFromPath: () => void;
+}) {
+  return (
+    <>
+      <div style={sectionTitle}>Paths</div>
+      <Slider
+        label="Trace at coverage ≥"
+        min={1}
+        max={255}
+        step={1}
+        value={threshold}
+        disabled={disabled}
+        onChange={onThreshold}
+      />
+      <div style={row}>
+        <button
+          type="button"
+          data-image-selection-to-path
+          disabled={disabled || !hasSelection}
+          onClick={onToPath}
+        >
+          Selection → path
+        </button>
+        <button
+          type="button"
+          data-image-path-to-selection
+          disabled={disabled}
+          onClick={onFromPath}
+        >
+          Path → selection
+        </button>
+      </div>
+      <div style={note}>
+        A traced path is inserted as a real vector polygon on the page — the
+        host owns it from then on, so the Pen, the shape tools and the
+        Pathfinder all apply, and undo is the document&apos;s rather than the
+        image journal&apos;s. Each contour becomes its own polygon, holes
+        included: a ring is two paths, because collapsing them would fill the
+        hole.
+      </div>
+      <div style={note}>
+        Corners are corners. The trace follows pixel edges and the anchors
+        carry no handles, because fitting curves to a mask&apos;s staircase
+        would invent a smoothness the selection does not have — straighten it
+        with the tolerance, or edit it with the Pen once it is a path.
+      </div>
+    </>
+  );
+}
+
+// ── channels ─────────────────────────────────────────────────────────
+
+/** The CHANNELS list — per-channel statistics and the one operation a
+ *  channel list exists to enable: loading a channel as the selection.
+ *  PURE (props in, elements out) so a spec can assert what it says.
+ *
+ *  The honest scope, stated in the UI and not only here: Photoshop's
+ *  channels panel also VIEWS a channel in isolation, and that is a
+ *  display state the host scene channel does not model — it takes a
+ *  composited image, not a view mode. Writing a greyscale composite into
+ *  the document to fake it would be a destructive edit wearing a view's
+ *  clothes, so the section says what it does not do instead. */
+export function ChannelsSection({
+  channels,
+  disabled,
+  onLoadSelection,
+}: {
+  channels: readonly ChannelStatsInfo[] | null;
+  disabled: boolean;
+  onLoadSelection: (channel: string) => void;
+}) {
+  return (
+    <>
+      <div style={sectionTitle}>Channels</div>
+      {channels === null ? (
+        <div style={note}>Ingest an image to read its channels.</div>
+      ) : (
+        <>
+          <div data-image-channels>
+            {channels.map((c) => (
+              <div key={c.name} style={row}>
+                <button
+                  type="button"
+                  data-image-channel={c.name}
+                  disabled={disabled}
+                  onClick={() => onLoadSelection(c.name)}
+                  title={`Load the ${c.name} channel as the selection`}
+                >
+                  {c.name}
+                </button>
+                <span style={mono} data-image-channel-stats={c.name}>
+                  {c.mean === null
+                    ? "unmeasured"
+                    : `${c.min}–${c.max} · mean ${c.mean.toFixed(1)}`}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div style={note}>
+            Loading a channel REPLACES the selection, and its bytes are the
+            coverage directly — no threshold — so a mid-grey channel selects
+            at 50% and every masked kernel honours that partial coverage.
+            Luma is the derived Rec.709 luminance, the usual luminosity mask.
+          </div>
+          <div style={note}>
+            Viewing one channel in isolation is not offered: that is a display
+            state, and the host scene channel takes a composited image rather
+            than a view mode. Compositing a greyscale image into the document
+            to imitate it would be a destructive edit, not a view.
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 // ── brush presets (.abr) ─────────────────────────────────────────────
 
 /** What a preset row says it will and will NOT bring across, in the
@@ -1186,6 +1330,7 @@ export function makeImagePanel(session: ImageSession) {
     const [aspect, setAspect] = useState<AspectPreset>("free");
     const [angle, setAngle] = useState(0);
     // Generate-section local state (the request shape, not engine state).
+    const [pathThreshold, setPathThreshold] = useState(128);
     const [gradKind, setGradKind] = useState<GradientKind>("linear");
     const [stop0, setStop0] = useState(0);
     const [stop1, setStop1] = useState(1);
@@ -2075,6 +2220,29 @@ export function makeImagePanel(session: ImageSession) {
           gpu={s.gpu}
           disabled={disabled}
           onChange={(patch) => session.setBrushParams(patch)}
+        />
+
+        {/* PATHS — the raster↔vector bridge (the vector side itself is
+            host-owned and stays there). */}
+        <PathsSection
+          hasSelection={s.selection !== null}
+          threshold={pathThreshold}
+          disabled={disabled}
+          onThreshold={setPathThreshold}
+          onToPath={() => {
+            void session.selectionToPath(pathThreshold);
+          }}
+          onFromPath={() => {
+            void session.selectionFromPath();
+          }}
+        />
+
+        {/* CHANNELS — the per-channel readout, and channel→selection
+            (the luminosity mask). */}
+        <ChannelsSection
+          channels={s.channels}
+          disabled={disabled}
+          onLoadSelection={(c) => session.selectionFromChannel(c)}
         />
 
         {/* BRUSH PRESETS — the `.abr` reader, finally reachable. Until

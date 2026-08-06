@@ -353,6 +353,37 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
+  // RASTER ↔ VECTOR — the conversion pair the "Paths / shapes" catalog
+  // row priced as missing. The vector side stays host-owned; these are
+  // only the bridge.
+  host.contribute.command({
+    id: "media.paged.image.command.selectionToPath",
+    title: "Selection to path (image)",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.selectionToPath();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.pathToSelection",
+    title: "Path to selection (image)",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.selectionFromPath();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.channelToSelection",
+    title: "Luminosity channel to selection (image)",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      session.selectionFromChannel("luma");
+    },
+  });
+
   // Selection commands (the panel buttons + command-palette reach).
   host.contribute.command({
     id: "media.paged.image.command.selectAll",
