@@ -1139,6 +1139,21 @@
   tests:
     rust: ["image-conformance/tests/family_adjust.rs"]
 
+- id: adjust.lut1d
+  rust_path: families::adjust::ADJUST_LUT1D
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "256-entry per-channel LUT on unpremultiplied rgb; alpha never remapped. The class behind Curves and Gradient Map."
+    - "LINEARLY INTERPOLATED between entries, decided by measurement: nearest indexing (which would match ingest::apply_curve_lut bit for bit) makes the kernel a step function, and a step function cannot hold an f16-ULP tolerance — f16 storage flips the chosen entry at index boundaries and one whole LUT step separates the answers. Measured 61 ULP on the identity table and 135 on an inverted one against a declared 4. Interpolation also avoids quantizing output to 1/255 steps."
+    - "Table travels in PARAMS (64 x vec4<f32> = 1 KiB uniform), not as a second input texture: the ABI is frozen at M0 and every kernel input uploads at the tile's w x h, so a 256x1 LUT texture would require a versioned ABI amendment. No reference reading."
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]
+
 - id: adjust.channel_mixer
   rust_path: families::adjust::ADJUST_CHANNEL_MIXER
   state_row: image.kernel.family-t2

@@ -1546,7 +1546,114 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
 "
 );
 
+// ────────────────────────────── lut1d ──────────────────────────────
+//
+// A 256-entry per-channel LOOKUP TABLE applied to unpremultiplied rgb —
+// the class behind Curves and Gradient Map.
+//
+// The table travels in PARAMS, not as a second input texture, and that
+// is forced rather than chosen: the ABI is frozen at M0 and every kernel
+// input uploads at the tile's `w`×`h`, so a 256×1 LUT texture would need
+// a versioned ABI amendment. 256 entries as 64 `vec4<f32>` is 1 KiB of
+// uniform — well inside any uniform-buffer bound — so the table fits the
+// existing contract with nothing to amend.
+//
+// Sampling is LINEARLY INTERPOLATED between table entries, and that was
+// measured rather than assumed. Nearest-index sampling — which would
+// match `ingest::apply_curve_lut`'s CPU indexing bit for bit — makes the
+// kernel a STEP function, and a step function cannot hold an f16-ULP
+// parity tolerance: the GPU reads f16 texels, so a value sitting on an
+// index boundary rounds to a different entry than the f32 reference
+// picks, and one whole LUT step separates the answers. Measured 61 ULP
+// on the IDENTITY table and 135 on an inverted one, against a declared
+// tolerance of 4.
+//
+// Interpolating makes the transfer continuous, so a small input
+// difference can only produce a small output difference — and it is the
+// better curve anyway (a 256-entry table read with nearest quantizes
+// output to 1/255 steps). Alpha is never remapped either way.
+
+/// A 256-entry LUT as 64 `vec4<f32>` (WGSL uniform arrays need a 16-byte
+/// stride, so four entries share a vector).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustLut1dParams {
+    pub lut: [[f32; 4]; 64],
+}
+
+impl AdjustLut1dParams {
+    /// Build from the same `[u8; 256]` table the panel hands the CPU
+    /// pass, normalized to `[0, 1]`.
+    pub fn new(lut: &[u8; 256]) -> Self {
+        let mut packed = [[0.0f32; 4]; 64];
+        for (i, &v) in lut.iter().enumerate() {
+            packed[i / 4][i % 4] = f32::from(v) / 255.0;
+        }
+        Self { lut: packed }
+    }
+
+    /// The identity table — `lut[i] = i`.
+    pub fn identity() -> Self {
+        let mut lut = [0u8; 256];
+        for (i, v) in lut.iter_mut().enumerate() {
+            *v = i as u8;
+        }
+        Self::new(&lut)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const LUT1D_PARAMS_FIELDS: &[ParamField] = &[ParamField {
+    name: "lut",
+    wgsl_ty: "array<vec4<f32>, 64>",
+}];
+
+/// out.rgb = lut[round(c·255)] per channel on unpremultiplied rgb;
+/// out.a = a.a. Alpha is never remapped (the curves contract).
+pub static ADJUST_LUT1D: KernelDef = KernelDef {
+    id: "adjust.lut1d",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustLut1dParams>(),
+        fields: LUT1D_PARAMS_FIELDS,
+    },
+    wgsl: LUT1D_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const LUT1D_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    lut: array<vec4<f32>, 64>,
+}",
+    "
+fn lut_at(i: i32) -> f32 {
+    let j = clamp(i, 0, 255);
+    return params.lut[j / 4][j % 4];
+}
+
+fn lut_lerp(v: f32) -> f32 {
+    let t = clamp(v, 0.0, 1.0) * 255.0;
+    let lo = i32(floor(t));
+    let hi = min(lo + 1, 255);
+    return mix(lut_at(lo), lut_at(hi), t - floor(t));
+}
+
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = unpremul_rgb(a);
+    let mapped = vec3<f32>(lut_lerp(c.r), lut_lerp(c.g), lut_lerp(c.b));
+    return vec4<f32>(mapped * a.a, a.a);
+}
+"
+);
+
 pub static FAMILY: &[&KernelDef] = &[
+    &ADJUST_LUT1D,
     &ADJUST_EXPOSURE,
     &ADJUST_BRIGHTNESS_CONTRAST,
     &ADJUST_LEVELS,

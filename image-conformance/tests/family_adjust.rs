@@ -52,11 +52,12 @@ use image_kernels::families::adjust::{
     adjust_invert_rgb, AdjustBlackWhiteParams, AdjustBrightnessContrastParams,
     AdjustChannelMixerParams, AdjustColorBalanceParams, AdjustExposureParams,
     AdjustHueRotateParams, AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams,
-    AdjustPhotoFilterParams, AdjustPosterizeParams, AdjustSaturationParams, AdjustThresholdParams,
-    AdjustVibranceParams, AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST,
-    ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE, ADJUST_HUE_ROTATE,
-    ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE,
-    ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE, ADJUST_WHITE_BALANCE,
+    AdjustLut1dParams, AdjustPhotoFilterParams, AdjustPosterizeParams, AdjustSaturationParams,
+    AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE,
+    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE,
+    ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_LUT1D,
+    ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE,
+    ADJUST_WHITE_BALANCE,
 };
 
 /// `unpremul_rgb` — the module preamble helper (a==0 → 0).
@@ -67,6 +68,28 @@ fn unpremul(a: Px) -> [f32; 3] {
     } else {
         [a.0[0] / al, a.0[1] / al, a.0[2] / al]
     }
+}
+
+/// The 1D-LUT reference — LINEARLY INTERPOLATED, matching the kernel.
+/// Nearest indexing was tried first and rejected on measurement: a step
+/// function cannot hold an f16-ULP tolerance (61 ULP on the identity
+/// table, 135 on an inverted one, against a declared 4), because f16
+/// storage flips the chosen entry at index boundaries.
+fn lut1d_ref(a: Px, _b: Px, p: &AdjustLut1dParams) -> Px {
+    let c = unpremul(a);
+    let entry = |i: usize| -> f32 {
+        let i = i.min(255);
+        p.lut[i / 4][i % 4]
+    };
+    let at = |v: f32| -> f32 {
+        let t = v.clamp(0.0, 1.0) * 255.0;
+        let lo = t.floor() as usize;
+        let hi = (lo + 1).min(255);
+        let f = t - t.floor();
+        entry(lo) * (1.0 - f) + entry(hi) * f
+    };
+    let m = [at(c[0]), at(c[1]), at(c[2])];
+    Px([m[0] * a.0[3], m[1] * a.0[3], m[2] * a.0[3], a.0[3]])
 }
 
 fn exposure_ref(a: Px, _b: Px, p: &AdjustExposureParams) -> Px {
@@ -417,6 +440,25 @@ parity_test!(
     photo_filter_ref,
     AdjustPhotoFilterParams::new([0.35, 0.6, 0.93], 0.8, false)
 );
+
+// A NON-trivial table: inverted, so a kernel that silently passed pixels
+// through would fail loudly rather than look plausible.
+fn inverted_lut() -> AdjustLut1dParams {
+    let mut lut = [0u8; 256];
+    for (i, v) in lut.iter_mut().enumerate() {
+        *v = 255 - i as u8;
+    }
+    AdjustLut1dParams::new(&lut)
+}
+
+parity_test!(lut1d_parity, ADJUST_LUT1D, lut1d_ref, inverted_lut());
+parity_test!(
+    lut1d_identity_parity,
+    ADJUST_LUT1D,
+    lut1d_ref,
+    AdjustLut1dParams::identity()
+);
+
 parity_test!(
     channel_mixer_parity,
     ADJUST_CHANNEL_MIXER,
