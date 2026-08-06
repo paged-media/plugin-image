@@ -43,6 +43,7 @@
 interface DecodeWasm {
   default(input?: unknown): Promise<unknown>;
   decode_image(bytes: Uint8Array): {
+    display?: number;
     handle: number;
     width: number;
     height: number;
@@ -109,17 +110,23 @@ async function decode(bytes: Uint8Array): Promise<{
   width: number;
   height: number;
   rgba: Uint8Array;
+  display?: number;
 }> {
   const wasm = await ensureWasm();
   const decoded = wasm.decode_image(bytes);
   const { handle, width, height } = decoded;
+  // CMS rung 1 — the transform ran inside `decode_image` here on the
+  // worker, so the PIXELS are already in working space. Carry the
+  // treatment out too, or the main thread would re-register them through
+  // `ingestRgba8` and label managed pixels "sRGB assumed".
+  const display = decoded.display;
   decoded.free();
   try {
     const rgba = wasm.image_tile_rgba8(handle, 0, 0, width, height);
     // Copy out before freeing the handle (the view aliases wasm memory).
     const out = new Uint8Array(rgba.length);
     out.set(rgba);
-    return { width, height, rgba: out };
+    return { width, height, rgba: out, display };
   } finally {
     wasm.free_image(handle);
   }

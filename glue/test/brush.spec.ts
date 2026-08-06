@@ -289,7 +289,16 @@ describe("the engine facade's brush doors", () => {
   it("commit hands back the engine handle and frees the wrapper", async () => {
     const { engine } = fakeWasm();
     expect(await engine.brushExtend(1, 2, 0.5)).toEqual(new Uint8Array([1, 2, 3, 4]));
-    expect(await engine.brushCommit()).toEqual({ handle: 9, width: 4, height: 2 });
+    // `display` joined DecodedInfo with CMS rung 1. The fake wasm handle
+    // carries no `display` field, which is exactly an older engine build —
+    // so this also pins the fallback: unknown reads as "sRGB assumed",
+    // never as managed.
+    expect(await engine.brushCommit()).toEqual({
+      handle: 9,
+      width: 4,
+      height: 2,
+      display: "assumed-srgb",
+    });
     expect(engine.brushActive()).toBe(true);
   });
 

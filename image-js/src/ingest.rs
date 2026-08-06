@@ -91,6 +91,10 @@ pub struct DecodedImage {
     pub height: u32,
     /// Tightly packed straight RGBA8, row-major.
     pub rgba: Arc<[u8]>,
+    /// What the RGB display transform did at ingest (CMS rung 1). The
+    /// panel surfaces this so "sRGB assumed" is a stated state rather
+    /// than a silent one.
+    pub display: crate::display::DisplayTreatment,
 }
 
 /// Levels parameters (the panel's black/white/gamma + output range).
@@ -451,6 +455,9 @@ impl DecodedImage {
             width,
             height,
             rgba: Arc::from(bytes),
+            // Raw bytes handed in by a caller carry no container and so no
+            // profile; they are taken as already-working-space.
+            display: crate::display::DisplayTreatment::AssumedSrgb,
         })
     }
 
@@ -538,6 +545,10 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, IngestError> {
         width: composite.width,
         height: composite.height,
         rgba: composite.rgba.into(),
+        // PSD carries its profile in the image-resource block, which the
+        // merged-composite decode does not surface yet — stated as
+        // assumed rather than silently claimed as managed.
+        display: crate::display::DisplayTreatment::AssumedSrgb,
     })
 }
 
@@ -618,11 +629,24 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
     // Auto-orient on the straight-RGBA8 buffer. Identity short-circuits
     // (the common case — most images are TopLeft) so non-rotated ingest
     // pays nothing.
-    let (rgba, w, h) = apply_orientation(rgba, w, h, orientation);
+    let (mut rgba, w, h) = apply_orientation(rgba, w, h, orientation);
+
+    // CMS RUNG 1 — the RGB display transform. The kernels' math is
+    // specified over the post-CMS working space, so this belongs at
+    // DECODE and nowhere later. CMYK already arrived colour-managed
+    // above (its cast consumed the same embedded profile), so only the
+    // RGB-ish layouts are transformed here.
+    let display = if matches!(channels, ChannelLayout::Cmyk) {
+        crate::display::DisplayTreatment::Managed
+    } else {
+        crate::display::to_working_srgb(&mut rgba, embedded_icc.as_deref())
+    };
+
     Ok(DecodedImage {
         width: w,
         height: h,
         rgba: rgba.into(),
+        display,
     })
 }
 
@@ -994,6 +1018,9 @@ pub fn crop_rgba8(
         width: cw,
         height: ch,
         rgba: bytes.into(),
+        // A crop of an already-decoded image inherits its treatment; the
+        // pixels were transformed (or not) at ingest.
+        display: image.display,
     })
 }
 

@@ -59,6 +59,7 @@
 //! reachable from this crate (cargo-tree guard, spec §4 dep rule 2).
 
 pub mod cmyk;
+pub mod display;
 pub mod fill;
 pub mod ingest;
 pub mod layers;
@@ -186,6 +187,34 @@ mod wasm {
         pub handle: u32,
         pub width: u32,
         pub height: u32,
+        /// CMS rung 1 — what the RGB display transform did at decode, as a
+        /// discriminant the bundle maps to a label: 0 = ICC managed,
+        /// 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
+        /// because an embedded profile was rejected. Surfaced so the panel
+        /// can STATE the colour treatment instead of leaving the user to
+        /// guess which numbers they are looking at.
+        pub display: u8,
+    }
+
+    /// Map the Rust treatment onto the wire discriminant above.
+    fn display_code(t: crate::display::DisplayTreatment) -> u8 {
+        use crate::display::DisplayTreatment as D;
+        match t {
+            D::Managed => 0,
+            D::AssumedSrgb => 1,
+            D::ProfileRejected => 2,
+        }
+    }
+
+    /// The stored treatment for an engine-held image, defaulting to
+    /// "sRGB assumed" for an unknown handle — a missing image is already
+    /// an error on every path that calls this, and guessing "managed"
+    /// would be the one dishonest answer.
+    fn read_display(handle: u32) -> u8 {
+        IMAGES
+            .with(|m| m.borrow().get(&handle).map(|i| i.display))
+            .map(display_code)
+            .unwrap_or(1)
     }
 
     /// Decode PSD/PNG/JPEG bytes (sniffed by magic) into an engine-held
@@ -199,11 +228,13 @@ mod wasm {
             h
         });
         let (width, height) = (img.width, img.height);
+        let display = display_code(img.display);
         IMAGES.with(|m| m.borrow_mut().insert(handle, img));
         Ok(DecodedHandle {
             handle,
             width,
             height,
+            display,
         })
     }
 
@@ -221,11 +252,13 @@ mod wasm {
             n.set(h + 1);
             h
         });
+        let display = display_code(img.display);
         IMAGES.with(|m| m.borrow_mut().insert(handle, img));
         Ok(DecodedHandle {
             handle,
             width,
             height,
+            display,
         })
     }
 
@@ -515,11 +548,14 @@ mod wasm {
             h
         });
         let (width, height) = (cropped.width, cropped.height);
+        let cropped_display = display_code(cropped.display);
         IMAGES.with(|m| m.borrow_mut().insert(new_handle, cropped));
         Ok(DecodedHandle {
             handle: new_handle,
             width,
             height,
+            // A crop inherits the source image's treatment.
+            display: cropped_display,
         })
     }
 
@@ -1054,11 +1090,14 @@ mod wasm {
             n.set(h + 1);
             h
         });
+        let resized_display = display_code(resized.display);
         IMAGES.with(|m| m.borrow_mut().insert(new_handle, resized));
         Ok(DecodedHandle {
             handle: new_handle,
             width: out_w,
             height: out_h,
+            // A resize inherits the source image's treatment.
+            display: resized_display,
         })
     }
 
@@ -1083,11 +1122,14 @@ mod wasm {
             n.set(h + 1);
             h
         });
+        let img_display = display_code(img.display);
         IMAGES.with(|m| m.borrow_mut().insert(handle, img));
         Ok(DecodedHandle {
             handle,
             width,
             height,
+            // Raw registered pixels carry no container, so no profile.
+            display: img_display,
         })
     }
 
@@ -1129,6 +1171,9 @@ mod wasm {
                         width: d.stack.width(),
                         height: d.stack.height(),
                         rgba: Arc::clone(&d.stack.active().rgba),
+                        // A layer view of an already-ingested image; the
+                        // transform ran at decode, not per layer.
+                        display: crate::display::DisplayTreatment::AssumedSrgb,
                     }))
                 }
                 _ => Ok(None),
@@ -1174,6 +1219,8 @@ mod wasm {
                     handle: doc.handle,
                     width,
                     height,
+                    // The layer composite inherits the document image's treatment.
+                    display: read_display(doc.handle),
                 })
             }
             .await;
@@ -1624,6 +1671,8 @@ mod wasm {
             width: w,
             height: h,
             rgba: Arc::clone(&doc.stack.active().rgba),
+            // Same: the active layer's pixels are post-ingest.
+            display: crate::display::DisplayTreatment::AssumedSrgb,
         };
         let out = adjust_rgba8(ctx, &src, &params, selection)
             .await
@@ -1900,6 +1949,8 @@ mod wasm {
                 handle,
                 width: w,
                 height: h,
+                // A no-op stroke commit leaves the treatment as it was.
+                display: read_display(handle),
             });
         };
         let ctx = GPU.with(|g| g.borrow().clone());
@@ -1927,6 +1978,8 @@ mod wasm {
             handle: doc.handle,
             width: w,
             height: h,
+            // The stroke composite writes back into the same image.
+            display: read_display(doc.handle),
         })
     }
 

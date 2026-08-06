@@ -40,6 +40,9 @@ import {
   type AdjustParams,
   type BrushParams,
   type BrushStats,
+  type DecodedInfo,
+  type DisplayTreatment,
+  displayTreatmentOf,
   type GradientKind,
   type ImageEngine,
   type ImageHistogram,
@@ -102,6 +105,10 @@ export interface SourceImage {
   /** The frame to composite into (null for an import until Apply
    *  targets the current selection). */
   elementId: string | null;
+  /** CMS rung 1 — how the ingest lane treated this source's colour.
+   *  Reported in the panel because "sRGB assumed" is a real state a
+   *  colour-critical user needs to see, not a default to hide. */
+  display: DisplayTreatment;
 }
 
 export type EngineStatus = "idle" | "booting" | "ready" | "unavailable";
@@ -462,9 +469,7 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  and the raw RGBA is registered into the engine here; otherwise the
    *  engine decodes on the main thread. Both yield the same handle the
    *  adjust + tile paths consume. */
-  const decodeToHandle = async (
-    bytes: Uint8Array,
-  ): Promise<{ handle: number; width: number; height: number }> => {
+  const decodeToHandle = async (bytes: Uint8Array): Promise<DecodedInfo> => {
     if (!engine) throw new Error("engine not booted");
     const pool = await ensureDecodePool();
     if (pool) {
@@ -472,7 +477,16 @@ export function createImageSession(host: BundleHost): ImageSession {
       // bytes survive (the importer may reuse them).
       const copy = bytes.slice();
       const decoded = await pool.decode(copy);
-      return engine.ingestRgba8(decoded.width, decoded.height, decoded.rgba);
+      const info = engine.ingestRgba8(
+        decoded.width,
+        decoded.height,
+        decoded.rgba,
+      );
+      // The worker already ran the display transform inside its own
+      // `decode_image`; `ingestRgba8` takes raw pixels and so reports
+      // "sRGB assumed". Restore the treatment the worker measured, or the
+      // panel would understate what happened on the K-3 fast path.
+      return { ...info, display: displayTreatmentOf(decoded.display) };
     }
     return engine.decode(bytes);
   };
@@ -856,6 +870,7 @@ export function createImageSession(host: BundleHost): ImageSession {
         handle: info.handle,
         origin,
         elementId,
+        display: info.display,
       };
       sourceFormat = sniffFormat(bytes);
       state.saveBack = null;

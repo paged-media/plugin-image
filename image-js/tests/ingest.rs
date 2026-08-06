@@ -209,6 +209,7 @@ fn image_editor_resource_tile_window_cuts_and_clamps() {
         width: w,
         height: h,
         rgba: Arc::from(pixels.clone().into_boxed_slice()),
+        display: image_js::display::DisplayTreatment::AssumedSrgb,
     };
 
     // A 4×3 tile at (2,1): row-major copy of the matching window.

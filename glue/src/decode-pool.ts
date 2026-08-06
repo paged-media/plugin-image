@@ -48,6 +48,10 @@ export interface DecodedRGBA {
   width: number;
   height: number;
   rgba: Uint8Array;
+  /** CMS rung 1 — the display-transform code from the worker's own
+   *  `decode_image` call (see `displayTreatmentOf`). Absent on an older
+   *  worker build, which reads as "sRGB assumed". */
+  display?: number;
 }
 
 /** The decode pool surface the session drives. */

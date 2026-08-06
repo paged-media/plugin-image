@@ -421,6 +421,29 @@ export interface DecodedInfo {
   handle: number;
   width: number;
   height: number;
+  /** CMS rung 1 — what the RGB display transform did at decode. The
+   *  panel states this so "sRGB assumed" is a reported state rather than
+   *  a silent one. */
+  display: DisplayTreatment;
+}
+
+/** How the ingest lane treated the source's colour. `managed` means an
+ *  embedded ICC profile compiled and the pixels were transformed into the
+ *  working sRGB space; the other two are honest pass-throughs. */
+export type DisplayTreatment = "managed" | "assumed-srgb" | "profile-rejected";
+
+/** Map the wasm discriminant (image-js `display_code`) to the name. */
+export function displayTreatmentOf(code: number | undefined): DisplayTreatment {
+  return code === 0 ? "managed" : code === 2 ? "profile-rejected" : "assumed-srgb";
+}
+
+/** A short phrase for the panel's colour row. */
+export function displayTreatmentLabel(t: DisplayTreatment): string {
+  return t === "managed"
+    ? "ICC managed"
+    : t === "profile-rejected"
+      ? "sRGB assumed (profile rejected)"
+      : "sRGB assumed";
 }
 
 /** The stable engine contract the bundle codes against. Every method
@@ -834,6 +857,9 @@ interface DecodedHandleWasm {
   handle: number;
   width: number;
   height: number;
+  /** See `displayTreatmentOf` — absent on an older engine build, which
+   *  falls back to "sRGB assumed" rather than claiming management. */
+  display?: number;
   free(): void;
 }
 
@@ -1081,13 +1107,23 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     gpuReady: () => wasm.gpu_ready(),
     decode(bytes) {
       const h = wasm.decode_image(bytes);
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },
     ingestRgba8(width, height, rgba) {
       const h = wasm.ingest_rgba8(width, height, rgba);
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },
@@ -1129,13 +1165,23 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         Float32Array.from(c0),
         Float32Array.from(c1),
       );
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },
     async fillNoise(handle, amount, seed) {
       const h = await wasm.fill_noise(handle, amount, seed);
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },
@@ -1145,7 +1191,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       wasm.psd_apply_adjusted(psdHandle, width, height, rgba),
     resize: async (handle, outW, outH, filter) => {
       const h = await wasm.resize_image(handle, outW, outH, filter);
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },
@@ -1173,7 +1224,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     crop(handle, rect) {
       const h = wasm.crop_image(handle, rect.x, rect.y, rect.w, rect.h);
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },
@@ -1186,7 +1242,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         rect.h,
         degrees,
       );
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },
@@ -1272,7 +1333,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     brushExtend: (x, y, pressure) => wasm.brush_stroke_extend(x, y, pressure),
     async brushCommit() {
       const h = await wasm.brush_stroke_commit();
-      const info = { handle: h.handle, width: h.width, height: h.height };
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
       h.free();
       return info;
     },

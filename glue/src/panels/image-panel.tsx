@@ -45,7 +45,12 @@ import type {
   ResampleFilter,
   Rgba01,
 } from "../engine";
-import { DEFAULT_BW_WEIGHTS, GRADIENT_KINDS, PRESSURE_TARGETS } from "../engine";
+import {
+  DEFAULT_BW_WEIGHTS,
+  displayTreatmentLabel,
+  GRADIENT_KINDS,
+  PRESSURE_TARGETS,
+} from "../engine";
 import type { AspectPreset } from "../crop-machine";
 
 const row: CSSProperties = {
@@ -953,6 +958,19 @@ export function makeImagePanel(session: ImageSession) {
             {s.source ? `${s.source.name} ${s.source.width}×${s.source.height}` : "none"}
           </span>
         </div>
+
+        {/* CMS rung 1 — SAY which colour treatment the ingest applied.
+            "sRGB assumed" is the honest majority case (most PNG/JPEG carry
+            no profile) and a colour-critical user needs to see it, so it
+            is stated rather than defaulted silently. */}
+        {s.source ? (
+          <div style={row}>
+            <span>Colour</span>
+            <span style={mono} data-image-colour-treatment={s.source.display}>
+              {displayTreatmentLabel(s.source.display)}
+            </span>
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", gap: "var(--space-2, 8px)", marginTop: "var(--space-2, 8px)" }}>
           <button type="button" disabled={s.busy} onClick={() => void session.ingestSelection()}>
