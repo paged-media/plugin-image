@@ -95,6 +95,11 @@ pub struct DecodedImage {
     /// panel surfaces this so "sRGB assumed" is a stated state rather
     /// than a silent one.
     pub display: crate::display::DisplayTreatment,
+    /// The source carried 16 bits per channel and was REDUCED to 8 at
+    /// ingest. Same rule as `display`: a lossy step is a state to state,
+    /// not one to hide — and the alternative here used to be refusing
+    /// the file outright, which helped nobody.
+    pub depth_reduced: bool,
 }
 
 /// Levels parameters (the panel's black/white/gamma + output range).
@@ -458,6 +463,7 @@ impl DecodedImage {
             // Raw bytes handed in by a caller carry no container and so no
             // profile; they are taken as already-working-space.
             display: crate::display::DisplayTreatment::AssumedSrgb,
+            depth_reduced: false,
         })
     }
 
@@ -549,6 +555,7 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, IngestError> {
         // merged-composite decode does not surface yet — stated as
         // assumed rather than silently claimed as managed.
         display: crate::display::DisplayTreatment::AssumedSrgb,
+        depth_reduced: composite.depth_reduced,
     })
 }
 
@@ -558,8 +565,18 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
         .probe()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
     if info.format.depth != SampleDepth::U8 {
+        // The PSD lane ACCEPTS 16-bit and reduces it, because PSD's
+        // sample order is spec-documented big-endian and the convention
+        // is established and tested in `image-psd`. This lane does not,
+        // and the reason is evidence rather than effort: no adapter here
+        // documents its 16-bit byte order and there is no 16-bit fixture
+        // to verify a guess against. A wrong guess would decode to a
+        // plausible-looking WRONG image, which is worse than a refusal —
+        // so the refusal stands until a fixture settles it.
         return Err(IngestError::Unsupported(format!(
-            "depth {:?} (8-bit only in the M4 slice)",
+            "depth {:?}: this codec lane is 8-bit (PSD 16-bit IS accepted and \
+             reduced; here the sample byte order is unverified and guessing \
+             it would decode to a wrong-looking image)",
             info.format.depth
         )));
     }
@@ -647,6 +664,9 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
         height: h,
         rgba: rgba.into(),
         display,
+        // This lane is 8-bit only (see the depth gate above), so nothing
+        // was reduced here.
+        depth_reduced: false,
     })
 }
 
@@ -1021,6 +1041,7 @@ pub fn crop_rgba8(
         // A crop of an already-decoded image inherits its treatment; the
         // pixels were transformed (or not) at ingest.
         display: image.display,
+        depth_reduced: false,
     })
 }
 

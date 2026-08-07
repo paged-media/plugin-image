@@ -199,6 +199,10 @@ mod wasm {
         /// can STATE the colour treatment instead of leaving the user to
         /// guess which numbers they are looking at.
         pub display: u8,
+        /// The source was 16 bits per channel and was reduced to 8 at
+        /// ingest. Same reason `display` is here: a lossy step the user
+        /// can see stated is a different thing from one they cannot.
+        pub depth_reduced: bool,
     }
 
     /// Map the Rust treatment onto the wire discriminant above.
@@ -222,6 +226,18 @@ mod wasm {
             .unwrap_or(1)
     }
 
+    /// Whether an engine-held image was reduced from 16 bits at ingest.
+    /// Defaults to `false` for an unknown handle — claiming a reduction
+    /// that may not have happened would be the dishonest direction.
+    fn read_depth_reduced(handle: u32) -> bool {
+        IMAGES.with(|m| {
+            m.borrow()
+                .get(&handle)
+                .map(|i| i.depth_reduced)
+                .unwrap_or(false)
+        })
+    }
+
     /// Decode PSD/PNG/JPEG bytes (sniffed by magic) into an engine-held
     /// RGBA8 image. Free with `free_image`.
     #[wasm_bindgen]
@@ -234,12 +250,14 @@ mod wasm {
         });
         let (width, height) = (img.width, img.height);
         let display = display_code(img.display);
+        let depth_reduced = img.depth_reduced;
         IMAGES.with(|m| m.borrow_mut().insert(handle, img));
         Ok(DecodedHandle {
             handle,
             width,
             height,
             display,
+            depth_reduced,
         })
     }
 
@@ -258,12 +276,16 @@ mod wasm {
             h
         });
         let display = display_code(img.display);
+        // K-3 registers PRE-DECODED 8-bit bytes, so nothing was reduced
+        // on this path — the worker that decoded them owns that fact.
+        let depth_reduced = img.depth_reduced;
         IMAGES.with(|m| m.borrow_mut().insert(handle, img));
         Ok(DecodedHandle {
             handle,
             width,
             height,
             display,
+            depth_reduced,
         })
     }
 
@@ -554,13 +576,17 @@ mod wasm {
         });
         let (width, height) = (cropped.width, cropped.height);
         let cropped_display = display_code(cropped.display);
+        let cropped_reduced = cropped.depth_reduced;
         IMAGES.with(|m| m.borrow_mut().insert(new_handle, cropped));
         Ok(DecodedHandle {
             handle: new_handle,
             width,
             height,
-            // A crop inherits the source image's treatment.
+            // A crop inherits the source image's treatment — and its
+            // provenance: cutting a rectangle out does not un-reduce a
+            // 16-bit source.
             display: cropped_display,
+            depth_reduced: cropped_reduced,
         })
     }
 
@@ -1175,13 +1201,17 @@ mod wasm {
             h
         });
         let resized_display = display_code(resized.display);
+        let resized_reduced = resized.depth_reduced;
         IMAGES.with(|m| m.borrow_mut().insert(new_handle, resized));
         Ok(DecodedHandle {
             handle: new_handle,
             width: out_w,
             height: out_h,
-            // A resize inherits the source image's treatment.
+            // A resize inherits the source image's treatment — and its
+            // provenance: resampling 8-bit pixels does not un-reduce a
+            // 16-bit source.
             display: resized_display,
+            depth_reduced: resized_reduced,
         })
     }
 
@@ -1212,8 +1242,10 @@ mod wasm {
             handle,
             width,
             height,
-            // Raw registered pixels carry no container, so no profile.
+            // Raw registered pixels carry no container, so no profile —
+            // and no depth provenance either.
             display: img_display,
+            depth_reduced: false,
         })
     }
 
@@ -1258,6 +1290,7 @@ mod wasm {
                         // A layer view of an already-ingested image; the
                         // transform ran at decode, not per layer.
                         display: crate::display::DisplayTreatment::AssumedSrgb,
+                        depth_reduced: false,
                     }))
                 }
                 _ => Ok(None),
@@ -1305,6 +1338,7 @@ mod wasm {
                     height,
                     // The layer composite inherits the document image's treatment.
                     display: read_display(doc.handle),
+                    depth_reduced: read_depth_reduced(doc.handle),
                 })
             }
             .await;
@@ -2156,6 +2190,7 @@ mod wasm {
             rgba: Arc::clone(&doc.stack.active().rgba),
             // Same: the active layer's pixels are post-ingest.
             display: crate::display::DisplayTreatment::AssumedSrgb,
+            depth_reduced: false,
         };
         let out = adjust_rgba8(ctx, &src, &params, selection)
             .await
@@ -2461,6 +2496,7 @@ mod wasm {
                 height: h,
                 // A no-op stroke commit leaves the treatment as it was.
                 display: read_display(handle),
+                depth_reduced: read_depth_reduced(handle),
             });
         };
         let ctx = GPU.with(|g| g.borrow().clone());
@@ -2490,6 +2526,7 @@ mod wasm {
             height: h,
             // The stroke composite writes back into the same image.
             display: read_display(doc.handle),
+            depth_reduced: read_depth_reduced(doc.handle),
         })
     }
 

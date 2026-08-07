@@ -2,10 +2,12 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_decodedhandle_free: (a: number, b: number) => void;
+export const __wbg_get_decodedhandle_depth_reduced: (a: number) => number;
 export const __wbg_get_decodedhandle_display: (a: number) => number;
 export const __wbg_get_decodedhandle_handle: (a: number) => number;
 export const __wbg_get_decodedhandle_height: (a: number) => number;
 export const __wbg_get_decodedhandle_width: (a: number) => number;
+export const __wbg_set_decodedhandle_depth_reduced: (a: number, b: number) => void;
 export const __wbg_set_decodedhandle_display: (a: number, b: number) => void;
 export const __wbg_set_decodedhandle_handle: (a: number, b: number) => void;
 export const __wbg_set_decodedhandle_height: (a: number, b: number) => void;

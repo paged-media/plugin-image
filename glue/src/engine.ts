@@ -428,6 +428,11 @@ export interface DecodedInfo {
    *  panel states this so "sRGB assumed" is a reported state rather than
    *  a silent one. */
   display: DisplayTreatment;
+  /** The source carried 16 bits per channel and was REDUCED to 8 at
+   *  ingest. A 16-bit PSD used to be refused outright; opening it and
+   *  saying what happened is the better of the two honest options, since
+   *  the layer stack is 8-bit either way. */
+  depthReduced: boolean;
 }
 
 /** How the ingest lane treated the source's colour. `managed` means an
@@ -1095,6 +1100,11 @@ interface DecodedHandleWasm {
   /** See `displayTreatmentOf` — absent on an older engine build, which
    *  falls back to "sRGB assumed" rather than claiming management. */
   display?: number;
+  /** The source was 16 bits per channel and was reduced to 8 at ingest.
+   *  Absent on an older engine build, which reads as "not reduced" —
+   *  the safe direction, since claiming a reduction that did not happen
+   *  would be the dishonest one. */
+  depth_reduced?: boolean;
   free(): void;
 }
 
@@ -1420,6 +1430,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1431,6 +1442,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1484,6 +1496,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1495,6 +1508,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1506,6 +1520,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1521,6 +1536,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1557,6 +1573,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1575,6 +1592,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1701,6 +1719,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
       h.free();
       return info;
@@ -1755,6 +1774,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
     },
     async applyWarp(handle, kind, amount, frequency = 1) {
@@ -1769,6 +1789,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         width: h.width,
         height: h.height,
         display: displayTreatmentOf(h.display),
+        depthReduced: h.depth_reduced === true,
       };
     },
     layerMakeSmart: (index) => wasm.layers_make_smart(index),

@@ -183,14 +183,17 @@ fn image_psd_global_merged_composite_extra_channel_without_flag_is_opaque() {
 
 #[test]
 fn image_psd_global_merged_composite_unsupported_answers_cleanly() {
-    // Depth 16.
-    let file16 = {
-        let mut f = psd_model(3, 1, 1, ColorMode::Rgb, false, 0, vec![0; 6]);
-        f.header.depth = 16;
+    // Depth 16 is no longer here — it is ACCEPTED and reported (see
+    // `…_sixteen_bit_is_reduced_and_reported`). Depth 1 still is not:
+    // a bitmap composite is a different unpacking problem, not a
+    // precision one.
+    let file1 = {
+        let mut f = psd_model(3, 1, 1, ColorMode::Rgb, false, 0, vec![0; 3]);
+        f.header.depth = 1;
         f
     };
     assert!(matches!(
-        file16.composite_rgba8(),
+        file1.composite_rgba8(),
         Err(PsdError::Unsupported(_))
     ));
 
@@ -214,4 +217,45 @@ fn image_psd_global_merged_composite_unsupported_answers_cleanly() {
         short.composite_rgba8(),
         Err(PsdError::Malformed { .. })
     ));
+}
+
+/// 16-BIT IS ACCEPTED, REDUCED AND REPORTED.
+///
+/// It used to be refused, and the refusal meant a 16-bit scan could not
+/// be opened at all. The layer stack downstream is 8-bit, so the extra
+/// precision cannot survive it either way — which makes "opens, and says
+/// it was reduced" strictly better than "does not open".
+#[test]
+fn image_psd_global_merged_composite_sixteen_bit_is_reduced_and_reported() {
+    // One RGB pixel, big-endian 16-bit: 0xAABB, 0xCCDD, 0xEEFF.
+    let raw = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+    let mut f = psd_model(3, 1, 1, ColorMode::Rgb, false, 0, raw);
+    f.header.depth = 16;
+    let out = f.composite_rgba8().expect("16-bit opens now");
+    assert!(out.depth_reduced, "and it SAYS it was reduced");
+    // The HIGH byte is the correct nearest-8-bit reading.
+    assert_eq!(&out.rgba[0..4], &[0xAA, 0xCC, 0xEE, 255]);
+}
+
+/// An 8-bit file must not claim a reduction that did not happen.
+#[test]
+fn image_psd_global_merged_composite_eight_bit_reports_no_reduction() {
+    let f = psd_model(3, 1, 1, ColorMode::Rgb, false, 0, vec![10, 20, 30]);
+    let out = f.composite_rgba8().expect("8-bit");
+    assert!(!out.depth_reduced);
+    assert_eq!(&out.rgba[0..4], &[10, 20, 30, 255]);
+}
+
+/// 16-bit RLE stays REFUSED, and the refusal cites its evidence: no
+/// corpus fixture is 16-bit, and the row-table semantics are unverified.
+/// A guess would decode to a wrong-looking image, which is the one
+/// outcome worse than a refusal.
+#[test]
+fn image_psd_global_merged_composite_sixteen_bit_rle_is_still_refused() {
+    let mut f = psd_model(3, 1, 1, ColorMode::Rgb, false, 1, vec![0; 8]);
+    f.header.depth = 16;
+    let err = f.composite_rgba8().expect_err("unverified");
+    let msg = err.to_string();
+    assert!(msg.contains("16-bit RLE"), "{msg}");
+    assert!(msg.contains("unverified"), "the refusal cites why: {msg}");
 }

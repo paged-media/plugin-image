@@ -62,6 +62,14 @@ pub struct CompositeRgba8 {
     pub height: u32,
     /// `width * height * 4` bytes, row-major RGBA, straight alpha.
     pub rgba: Vec<u8>,
+    /// The source was 16 bits per channel and was REDUCED to 8 here.
+    ///
+    /// Reported rather than hidden, and reported rather than refused.
+    /// Refusing was the previous behaviour and it meant a 16-bit scan
+    /// simply could not be opened; reducing silently would be worse
+    /// still. The consumer states it, the same way the CMS lane states
+    /// "sRGB assumed" instead of pretending it managed colour.
+    pub depth_reduced: bool,
 }
 
 /// Composite compression codes (Image Data Section). The section is one
@@ -78,9 +86,16 @@ impl PsdFile {
     /// [`PsdError::Unsupported`] (never a wrong-looking image).
     pub fn composite_rgba8(&self) -> Result<CompositeRgba8> {
         let h = &self.header;
-        if h.depth != 8 {
+        // 16-BIT IS ACCEPTED, REDUCED AND REPORTED — not refused. The
+        // layer stack downstream is 8-bit, so the extra precision cannot
+        // survive anyway; what the refusal actually bought was "this
+        // file will not open at all", which is the worse of the two
+        // honest options. The reduction takes the HIGH byte, which is
+        // the correct nearest-8-bit reading of a 16-bit sample.
+        if h.depth != 8 && h.depth != 16 {
             return Err(PsdError::Unsupported(format!(
-                "composite decode at depth {} (8-bit only in the M4 ingest slice)",
+                "composite decode at depth {} (8- and 16-bit only; 1-bit and \
+                 32-bit float are separate lanes)",
                 h.depth
             )));
         }
@@ -105,6 +120,7 @@ impl PsdFile {
         }
 
         let planes = decode_planes(self)?;
+        let depth_reduced = h.depth == 16;
 
         // The first channel BEYOND the color channels is transparency
         // exactly when the layer-count sign flag declared it.
@@ -134,6 +150,7 @@ impl PsdFile {
             width: h.width,
             height: h.height,
             rgba,
+            depth_reduced,
         })
     }
 }
@@ -149,11 +166,17 @@ fn decode_planes(file: &PsdFile) -> Result<Vec<Vec<u8>>> {
         section: "image data",
         detail: format!("plane size {rows}×{cols} overflows usize"),
     })?;
+    // Bytes per SAMPLE on the wire. The planes this returns are always
+    // 8-bit; a 16-bit source is reduced as it is read.
+    let sample_bytes = if h.depth == 16 { 2 } else { 1 };
     let data = &file.composite.raw;
 
     match file.composite.compression {
         COMPRESSION_RAW => {
-            let expect = plane_len
+            let stride = plane_len
+                .checked_mul(sample_bytes)
+                .ok_or_else(|| malformed("RAW composite plane size overflows usize"))?;
+            let expect = stride
                 .checked_mul(channels)
                 .ok_or_else(|| malformed("RAW composite size overflows usize"))?;
             if data.len() != expect {
@@ -163,8 +186,31 @@ fn decode_planes(file: &PsdFile) -> Result<Vec<Vec<u8>>> {
                 )));
             }
             Ok((0..channels)
-                .map(|c| data[c * plane_len..(c + 1) * plane_len].to_vec())
+                .map(|c| {
+                    let plane = &data[c * stride..(c + 1) * stride];
+                    if sample_bytes == 1 {
+                        plane.to_vec()
+                    } else {
+                        // BIG-ENDIAN 16-bit samples; the high byte IS
+                        // the 8-bit value.
+                        plane.chunks_exact(2).map(|s| s[0]).collect()
+                    }
+                })
                 .collect())
+        }
+        COMPRESSION_RLE if h.depth == 16 => {
+            // REFUSED, with the same evidence the per-layer reader
+            // gives: no corpus fixture is 16-bit at all, and whether the
+            // row table counts compressed bytes of 16-bit samples or
+            // Photoshop splits high and low planes is unresolved.
+            // Guessing would produce a wrong-looking image, which is the
+            // one outcome worse than a refusal.
+            Err(PsdError::Unsupported(
+                "16-bit RLE composite: the row-table semantics for 16-bit \
+                 samples are unverified (no corpus fixture), and a guess \
+                 would decode to a wrong-looking image"
+                    .into(),
+            ))
         }
         COMPRESSION_RLE => {
             // ONE count table for all channels' scanlines, then the

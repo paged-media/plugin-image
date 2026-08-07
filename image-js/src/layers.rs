@@ -1342,6 +1342,7 @@ impl LayerStack {
                     rgba: Arc::from(straight8.into_boxed_slice()),
                     // Post-ingest pixels: the display transform already ran.
                     display: crate::display::DisplayTreatment::AssumedSrgb,
+                    depth_reduced: false,
                 };
                 let adjusted = adjust_rgba8(
                     ctx,

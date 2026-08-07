@@ -10,6 +10,12 @@ export class DecodedHandle {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * The source was 16 bits per channel and was reduced to 8 at
+     * ingest. Same reason `display` is here: a lossy step the user
+     * can see stated is a different thing from one they cannot.
+     */
+    depth_reduced: boolean;
+    /**
      * CMS rung 1 — what the RGB display transform did at decode, as a
      * discriminant the bundle maps to a label: 0 = ICC managed,
      * 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
@@ -798,10 +804,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_decodedhandle_free: (a: number, b: number) => void;
+    readonly __wbg_get_decodedhandle_depth_reduced: (a: number) => number;
     readonly __wbg_get_decodedhandle_display: (a: number) => number;
     readonly __wbg_get_decodedhandle_handle: (a: number) => number;
     readonly __wbg_get_decodedhandle_height: (a: number) => number;
     readonly __wbg_get_decodedhandle_width: (a: number) => number;
+    readonly __wbg_set_decodedhandle_depth_reduced: (a: number, b: number) => void;
     readonly __wbg_set_decodedhandle_display: (a: number, b: number) => void;
     readonly __wbg_set_decodedhandle_handle: (a: number, b: number) => void;
     readonly __wbg_set_decodedhandle_height: (a: number, b: number) => void;

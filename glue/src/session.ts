@@ -122,6 +122,10 @@ export interface SourceImage {
    *  Reported in the panel because "sRGB assumed" is a real state a
    *  colour-critical user needs to see, not a default to hide. */
   display: DisplayTreatment;
+  /** The source was 16 bits per channel and was reduced to 8 at ingest.
+   *  A stated lossy step, not a hidden one — and a file that opens,
+   *  where a 16-bit PSD used to be refused outright. */
+  depthReduced: boolean;
 }
 
 export type EngineStatus = "idle" | "booting" | "ready" | "unavailable";
@@ -1084,6 +1088,7 @@ export function createImageSession(host: BundleHost): ImageSession {
         origin,
         elementId,
         display: info.display,
+        depthReduced: info.depthReduced,
       };
       sourceFormat = sniffFormat(bytes);
       state.saveBack = null;

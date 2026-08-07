@@ -338,6 +338,10 @@ describe("the engine facade's brush doors", () => {
       width: 4,
       height: 2,
       display: "assumed-srgb",
+      // Same fallback rule as `display`: an engine build that does not
+      // report the depth reads as NOT reduced, because claiming a
+      // reduction that may not have happened is the dishonest direction.
+      depthReduced: false,
     });
     expect(engine.brushActive()).toBe(true);
   });

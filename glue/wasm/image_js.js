@@ -22,6 +22,16 @@ export class DecodedHandle {
         wasm.__wbg_decodedhandle_free(ptr, 0);
     }
     /**
+     * The source was 16 bits per channel and was reduced to 8 at
+     * ingest. Same reason `display` is here: a lossy step the user
+     * can see stated is a different thing from one they cannot.
+     * @returns {boolean}
+     */
+    get depth_reduced() {
+        const ret = wasm.__wbg_get_decodedhandle_depth_reduced(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * CMS rung 1 — what the RGB display transform did at decode, as a
      * discriminant the bundle maps to a label: 0 = ICC managed,
      * 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
@@ -54,6 +64,15 @@ export class DecodedHandle {
     get width() {
         const ret = wasm.__wbg_get_decodedhandle_width(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * The source was 16 bits per channel and was reduced to 8 at
+     * ingest. Same reason `display` is here: a lossy step the user
+     * can see stated is a different thing from one they cannot.
+     * @param {boolean} arg0
+     */
+    set depth_reduced(arg0) {
+        wasm.__wbg_set_decodedhandle_depth_reduced(this.__wbg_ptr, arg0);
     }
     /**
      * CMS rung 1 — what the RGB display transform did at decode, as a

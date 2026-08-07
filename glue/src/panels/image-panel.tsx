@@ -1611,6 +1611,28 @@ export function makeImagePanel(session: ImageSession) {
           </div>
         ) : null}
 
+        {/* DEPTH, stated for the same reason the colour treatment is: a
+            16-bit source is REDUCED to 8 here, and a user who chose
+            16-bit deliberately deserves to know that rather than to
+            discover it in a gradient. Shown only when it happened — an
+            8-bit file needs no announcement. */}
+        {s.source?.depthReduced ? (
+          <div style={row}>
+            <span>Depth</span>
+            <span style={mono} data-image-depth-reduced>
+              16-bit source, reduced to 8
+            </span>
+          </div>
+        ) : null}
+        {s.source?.depthReduced ? (
+          <div style={note}>
+            The layer stack, the edits and the save-back are 8-bit, so the
+            extra precision could not survive them. This used to be a refusal
+            — the file simply would not open — and opening it while saying
+            what was lost is the better of the two honest answers.
+          </div>
+        ) : null}
+
         <div
           style={{
             display: "flex",
