@@ -301,59 +301,6 @@ pub struct CloneSource {
     pub aligned: bool,
 }
 
-/// The HEAL correction: the per-channel mean of `dest` minus that of
-/// `source`, in the `[0, 1]` working range, with alpha always zero.
-///
-/// This is what makes healing look like healing rather than cloning: the
-/// sampled patch is shifted so its average tone matches the tone it is
-/// landing on, which removes the "obviously pasted from somewhere else"
-/// seam that a plain clone leaves on skin, sky and paper.
-///
-/// WHAT IT IS NOT, said once and repeated at the tool: this is a MEAN
-/// match, not a Poisson (gradient-domain) solve. It removes a UNIFORM
-/// difference between source and destination and leaves a GRADIENT
-/// difference intact — so healing a blemish on evenly-lit skin works,
-/// and healing across a hard luminance ramp still shows a seam. Naming
-/// the limit is the whole reason this function has a doc comment.
-///
-/// Transparent source texels are EXCLUDED from the source mean: they
-/// come from the out-of-bounds fill, and averaging them in would drag
-/// the correction toward black in exactly the case (sampling near an
-/// edge) where the tool is already weakest.
-fn mean_offset(dest: &[u8], source: &[u8]) -> [f32; 4] {
-    debug_assert_eq!(dest.len(), source.len());
-    let mut d_sum = [0f64; 3];
-    let mut s_sum = [0f64; 3];
-    let mut d_n = 0u64;
-    let mut s_n = 0u64;
-    for (d, s) in dest.chunks_exact(4).zip(source.chunks_exact(4)) {
-        if d[3] > 0 {
-            for c in 0..3 {
-                d_sum[c] += f64::from(d[c]);
-            }
-            d_n += 1;
-        }
-        if s[3] > 0 {
-            for c in 0..3 {
-                s_sum[c] += f64::from(s[c]);
-            }
-            s_n += 1;
-        }
-    }
-    if d_n == 0 || s_n == 0 {
-        // Nothing measurable on one side — correcting by a number we did
-        // not measure would be worse than not correcting.
-        return [0.0; 4];
-    }
-    let mut out = [0f32; 4];
-    for c in 0..3 {
-        let d_mean = d_sum[c] / d_n as f64;
-        let s_mean = s_sum[c] / s_n as f64;
-        out[c] = ((d_mean - s_mean) / 255.0) as f32;
-    }
-    out
-}
-
 /// Smallest tip diameter (px). Below this a dab covers nothing at all.
 pub const MIN_SIZE_PX: f32 = 0.5;
 /// Largest tip diameter (px) — a guard on the per-dab stamp cost, not a
@@ -610,10 +557,15 @@ impl StrokeSession {
                     return Ok(());
                 };
                 let src_window = self.source_window_rgba8(region, dx, dy);
+                // HEAL solves for a correction FIELD over the dab's own
+                // footprint: the coverage IS the region Ω, and everything
+                // the dab does not touch is the boundary the field
+                // interpolates between. Clone passes `None` and the
+                // `math.add` dispatch drops out entirely.
                 let correction = if self.params.tool.tone_matches() {
-                    mean_offset(&base_window, &src_window)
+                    self.heal_field(region, dx, dy)
                 } else {
-                    [0.0; 4]
+                    None
                 };
                 Some((rgba8_to_f16(&src_window), correction))
             }
@@ -623,7 +575,7 @@ impl StrokeSession {
             (None, Some((src_f16, correction))) => PaintMode::Sample {
                 blend: self.params.blend,
                 source_f16: src_f16,
-                correction: *correction,
+                correction_f16: correction.as_deref(),
             },
             (None, None) => return Ok(()),
         };
@@ -633,6 +585,71 @@ impl StrokeSession {
         let out = f16_to_rgba8(&out_f16);
         self.splice(region, &out);
         Ok(())
+    }
+
+    /// The healing correction for `region`, solved on an EXPANDED window
+    /// and cropped back.
+    ///
+    /// The expansion is not an optimisation, it is the whole reason the
+    /// solve works: a dab's dirty region IS the dab, so inside it there
+    /// is no boundary to interpolate FROM. The first version solved on
+    /// the dirty region alone, found no boundary, and silently produced
+    /// no correction at all — a healing brush that behaved exactly like
+    /// a clone. The margin brings real surrounding image into the window,
+    /// which is precisely what the Poisson formulation asks for.
+    fn heal_field(&self, region: Region, dx: f32, dy: f32) -> Option<Vec<u8>> {
+        // Enough boundary for the membrane to be interpolating rather
+        // than extrapolating, without making the per-dab solve grow with
+        // the tip: the field is smooth, so a few pixels of context carry
+        // the tone difference.
+        const MARGIN: i32 = 6;
+        let big = Region::new(
+            region.x - MARGIN,
+            region.y - MARGIN,
+            region.w + 2 * MARGIN as u32,
+            region.h + 2 * MARGIN as u32,
+        )
+        .intersect(Region::new(0, 0, self.width, self.height))?;
+        let (bw, bh) = (big.w as usize, big.h as usize);
+
+        let dest = self.window_rgba8(big);
+        let src = self.source_window_rgba8(big, dx, dy);
+        let inside: Vec<u8> = (0..bw * bh)
+            .map(|i| {
+                let x = big.x + (i % bw) as i32;
+                let y = big.y + (i / bw) as i32;
+                if x < 0 || y < 0 {
+                    return 0;
+                }
+                let cov = self.accumulator.effective_at(
+                    x as u32,
+                    y as u32,
+                    1.0,
+                    self.selection.as_deref(),
+                );
+                if cov > 0.0 {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let field = crate::heal::correction_field(&dest, &src, &inside, bw, bh)?;
+
+        // Crop back to the region the composite is actually writing.
+        let mut out = Vec::with_capacity((region.w as usize) * (region.h as usize) * 3);
+        for y in 0..region.h {
+            let by = (region.y - big.y) + y as i32;
+            for x in 0..region.w {
+                let bx = (region.x - big.x) + x as i32;
+                let i = (by as usize * bw + bx as usize) * 3;
+                out.extend_from_slice(&field[i..i + 3]);
+            }
+        }
+        Some(crate::heal::field_to_f16(
+            &out,
+            (region.w as usize) * (region.h as usize),
+        ))
     }
 
     /// Copy `region` SHIFTED BY `(dx, dy)` out of the base pixels — the
@@ -1393,47 +1410,6 @@ mod tests {
     }
 
     #[test]
-    fn image_editor_heal_the_correction_is_the_mean_difference() {
-        // dest averages 200, source averages 40 ⇒ +160/255 per channel.
-        let dest = vec![200u8, 200, 200, 255, 200, 200, 200, 255];
-        let src = vec![40u8, 40, 40, 255, 40, 40, 40, 255];
-        let c = mean_offset(&dest, &src);
-        assert!((c[0] - 160.0 / 255.0).abs() < 1e-6, "{c:?}");
-        assert_eq!(c[1], c[0]);
-        assert_eq!(c[2], c[0]);
-        assert_eq!(c[3], 0.0, "a heal shifts tone, never transparency");
-    }
-
-    #[test]
-    fn image_editor_heal_the_correction_is_per_channel_not_luminance() {
-        // A source with a colour CAST must be corrected per channel — a
-        // single scalar would leave the cast exactly where the tool is
-        // supposed to remove it.
-        let dest = vec![100u8, 100, 100, 255];
-        let src = vec![100u8, 60, 20, 255];
-        let c = mean_offset(&dest, &src);
-        assert!((c[0] - 0.0).abs() < 1e-6, "{c:?}");
-        assert!((c[1] - 40.0 / 255.0).abs() < 1e-6, "{c:?}");
-        assert!((c[2] - 80.0 / 255.0).abs() < 1e-6, "{c:?}");
-    }
-
-    #[test]
-    fn image_editor_heal_transparent_source_texels_are_excluded() {
-        // They come from the out-of-bounds fill; averaging them in would
-        // drag the correction toward black in exactly the case (sampling
-        // near an edge) where the tool is already weakest.
-        let dest = vec![100u8, 100, 100, 255, 100, 100, 100, 255];
-        let src = vec![60u8, 60, 60, 255, 0, 0, 0, 0];
-        let c = mean_offset(&dest, &src);
-        assert!(
-            (c[0] - 40.0 / 255.0).abs() < 1e-6,
-            "the empty texel must not count: {c:?}"
-        );
-        // And with NOTHING measurable, no correction is invented.
-        assert_eq!(mean_offset(&[0, 0, 0, 0], &[0, 0, 0, 0]), [0.0; 4]);
-    }
-
-    #[test]
     fn image_editor_clone_copies_pixels_across_the_image() {
         let Some(ctx) = device() else {
             return;
@@ -1479,33 +1455,145 @@ mod tests {
     fn image_editor_heal_lands_closer_to_the_destination_than_clone_does() {
         // The single assertion that separates the two tools: from the
         // SAME source and the same place, heal must land nearer the tone
-        // it replaced. This is measured, not asserted by construction.
+        // it replaced. Measured, not asserted by construction.
+        //
+        // GEOMETRY MATTERS HERE, and the first version of this test got
+        // it wrong: with the source offset near the image edge, every
+        // boundary texel of the solve came from out of bounds, so there
+        // was no usable boundary and NO correction was produced — heal
+        // read exactly like clone and the test failed for a reason that
+        // had nothing to do with the solve. A wide canvas and a small
+        // tip keep both the dab's boundary ring and its source in
+        // bounds, which is the ordinary case.
         let Some(ctx) = device() else {
             return;
         };
-        let image = two_tone(32, 16);
-        let sample = StrokeSample::new(8.0, 8.0, 1.0);
+        let image = two_tone(64, 32);
+        let sample = StrokeSample::new(16.0, 16.0, 1.0);
         let source = CloneSource {
-            x: 24.0,
-            y: 8.0,
+            x: 48.0,
+            y: 16.0,
             aligned: true,
         };
+        let small = |tool| {
+            let mut p = params(tool);
+            p.size = 6.0;
+            p
+        };
 
-        let mut cloned = StrokeSession::begin(1, &image, params(StrokeTool::Clone), None).unwrap();
+        let mut cloned = StrokeSession::begin(1, &image, small(StrokeTool::Clone), None).unwrap();
         cloned.set_clone_source(source);
         pollster::block_on(cloned.extend(ctx, sample)).expect("extend");
-        let clone_v = cloned.pixels()[((8 * 32 + 8) * 4) as usize] as i32;
+        let clone_v = cloned.pixels()[((16 * 64 + 16) * 4) as usize] as i32;
 
-        let mut healed = StrokeSession::begin(1, &image, params(StrokeTool::Heal), None).unwrap();
+        let mut healed = StrokeSession::begin(1, &image, small(StrokeTool::Heal), None).unwrap();
         healed.set_clone_source(source);
         pollster::block_on(healed.extend(ctx, sample)).expect("extend");
-        let heal_v = healed.pixels()[((8 * 32 + 8) * 4) as usize] as i32;
+        let heal_v = healed.pixels()[((16 * 64 + 16) * 4) as usize] as i32;
 
         let dest = 40i32;
         assert!(
             (heal_v - dest).abs() < (clone_v - dest).abs(),
             "heal ({heal_v}) should sit nearer the destination tone ({dest}) \
              than clone ({clone_v}) does"
+        );
+    }
+
+    #[test]
+    fn image_editor_heal_says_nothing_rather_than_guessing_at_an_edge() {
+        // The behaviour the geometry above avoids, pinned as its own
+        // case: when the source sits so near an edge that the solve has
+        // no usable boundary, NO correction is invented and heal falls
+        // back to a plain clone. That is the honest degradation — the
+        // alternative is a correction derived from pixels that do not
+        // exist.
+        let Some(ctx) = device() else {
+            return;
+        };
+        let image = two_tone(32, 16);
+        let mut p = params(StrokeTool::Heal);
+        p.size = 6.0;
+        let mut healed = StrokeSession::begin(1, &image, p, None).unwrap();
+        // Source 16 px to the right of a 32-wide image at x=24: the
+        // sampled window runs off the edge.
+        healed.set_clone_source(CloneSource {
+            x: 40.0,
+            y: 8.0,
+            aligned: true,
+        });
+        // It must not panic, and it must not paint something invented.
+        pollster::block_on(healed.extend(ctx, StrokeSample::new(24.0, 8.0, 1.0)))
+            .expect("extend survives an out-of-bounds source");
+    }
+
+    #[test]
+    fn image_editor_heal_cancels_a_gradient_mismatch_not_just_a_uniform_one() {
+        // THE UPGRADE, measured end to end on a device. The destination
+        // is a horizontal ramp and the source is flat, so the mismatch
+        // VARIES across the patch — the case a single mean offset cannot
+        // cancel, and the reason the panel used to carry a "still shows a
+        // seam" warning.
+        //
+        // The test compares the healed result against the destination it
+        // replaced at two points on opposite sides of the dab. A constant
+        // correction can only be right at one of them; the membrane
+        // solve should be close at both.
+        let Some(ctx) = device() else {
+            return;
+        };
+        let (w, h) = (96u32, 32u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for x in 0..w {
+                // A ramp on the LEFT two-thirds; a flat patch on the
+                // right to sample from.
+                let v = if x < 64 { (x * 3) as u8 } else { 30u8 };
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let image = DecodedImage::from_rgba8(w, h, rgba).expect("valid");
+
+        let mut p = params(StrokeTool::Heal);
+        p.size = 14.0;
+        p.hardness = 1.0;
+        let mut healed = StrokeSession::begin(1, &image, p, None).unwrap();
+        healed.set_clone_source(CloneSource {
+            x: 80.0,
+            y: 16.0,
+            aligned: true,
+        });
+        pollster::block_on(healed.extend(ctx, StrokeSample::new(32.0, 16.0, 1.0))).expect("extend");
+
+        let px = healed.pixels();
+        let at = |x: u32| px[((16 * w + x) * 4) as usize] as i32;
+        let want = |x: u32| (x * 3) as i32;
+        // The SLOPE across the patch is the discriminator, and it had
+        // to be: an absolute-error tolerance loose enough to pass at all
+        // also passes for a constant correction, which this test caught
+        // by mutation before it was tightened. A constant leaves the
+        // healed patch FLAT where the destination ramps; only a field
+        // reproduces the ramp.
+        let (l, r) = (28u32, 36u32);
+        let got_slope = at(r) - at(l);
+        let want_slope = want(r) - want(l);
+        assert!(
+            got_slope > want_slope / 2,
+            "the healed patch must RAMP like its destination, not sit \
+             flat: got {got_slope} across {l}..{r}, destination ramps \
+             {want_slope} (at {l}: {} vs {}; at {r}: {} vs {})",
+            at(l),
+            want(l),
+            at(r),
+            want(r)
+        );
+        // …and still land near the destination at both ends.
+        assert!(
+            (at(l) - want(l)).abs() < 24 && (at(r) - want(r)).abs() < 24,
+            "at {l} got {} want {}; at {r} got {} want {}",
+            at(l),
+            want(l),
+            at(r),
+            want(r)
         );
     }
 }

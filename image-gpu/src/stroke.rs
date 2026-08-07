@@ -130,22 +130,22 @@ pub enum PaintMode<'a> {
     /// existing coverage, spacing, pressure and selection masking all
     /// apply unchanged.
     ///
-    /// `correction` is the per-channel additive term applied to the
-    /// source before compositing, and it is the ONLY difference between
-    /// the two tools: zero for CLONE, and the destination−source mean
-    /// for HEAL, which is what makes a healed patch take on the
+    /// `correction_f16` is an additive FIELD applied to the source
+    /// before compositing (`math.add`), and it is the only difference
+    /// between the two tools: `None` for CLONE, and for HEAL the
+    /// gradient-domain correction that makes a healed patch take on the
     /// surrounding tone instead of pasting a visibly different one.
     ///
-    /// It runs as `gen.solid` → `math.add` rather than `math.add_const`
-    /// because `add_const` broadcasts ONE scalar to every channel, and a
-    /// heal that could only shift luminance would leave a colour cast
-    /// exactly where the tool is supposed to remove one. Two registered
-    /// dispatches, no new kernel.
+    /// A field rather than a constant, because a constant can only
+    /// cancel a UNIFORM mismatch — healing across a luminance ramp with
+    /// one number leaves the seam it exists to remove. It is a straight
+    /// rgba16float window like the source, so applying it is one
+    /// registered dispatch and no new kernel.
     Sample {
         blend: &'static KernelDef,
         /// A STRAIGHT rgba16float window, the same size as the base.
         source_f16: &'a [u8],
-        correction: [f32; 4],
+        correction_f16: Option<&'a [u8]>,
     },
 }
 
@@ -166,11 +166,12 @@ impl PaintMode<'_> {
             ],
             PaintMode::Erase => vec![BAND_SET_ALPHA.id],
             PaintMode::Sample {
-                blend, correction, ..
+                blend,
+                correction_f16,
+                ..
             } => {
-                let mut ids = Vec::with_capacity(6);
-                if correction.iter().any(|c| *c != 0.0) {
-                    ids.push(GEN_SOLID.id);
+                let mut ids = Vec::with_capacity(5);
+                if correction_f16.is_some() {
                     ids.push(MATH_ADD.id);
                 }
                 // Both windows enter the blend premultiplied.
@@ -189,13 +190,14 @@ impl PaintMode<'_> {
         match self {
             PaintMode::Paint { blend, .. } if opaque_window => vec![GEN_SOLID.id, blend.id],
             PaintMode::Sample {
-                blend, correction, ..
+                blend,
+                correction_f16,
+                ..
             } if opaque_window => {
                 // Both windows come from the same opaque image, so the
                 // premultiply bracket is the identity on each.
-                let mut ids = Vec::with_capacity(3);
-                if correction.iter().any(|c| *c != 0.0) {
-                    ids.push(GEN_SOLID.id);
+                let mut ids = Vec::with_capacity(2);
+                if correction_f16.is_some() {
                     ids.push(MATH_ADD.id);
                 }
                 ids.push(blend.id);
@@ -300,7 +302,7 @@ pub async fn composite_stroke_window(
         PaintMode::Sample {
             blend,
             source_f16,
-            correction,
+            correction_f16,
         } => {
             if source_f16.len() != texels * 8 {
                 return Err(GpuError::Kernel {
@@ -312,42 +314,37 @@ pub async fn composite_stroke_window(
                     ),
                 });
             }
-            let corrected = if correction.iter().any(|c| *c != 0.0) {
-                // `gen.solid` builds the per-channel constant; `math.add`
-                // applies it. Alpha's correction is always 0 — a heal
-                // shifts tone, never transparency.
-                let konst = execute_tile_once_async(
-                    ctx,
-                    &GEN_SOLID,
-                    &[TileInput {
-                        f16_bytes: source_f16,
-                    }],
-                    GenSolidParams::new(0, 0, correction[0], correction[1], correction[2], 0.0)
-                        .as_bytes(),
-                    None,
-                    w,
-                    h,
-                )
-                .await?;
-                Some(
-                    execute_tile_once_async(
-                        ctx,
-                        &MATH_ADD,
-                        &[
-                            TileInput {
-                                f16_bytes: source_f16,
-                            },
-                            TileInput { f16_bytes: &konst },
-                        ],
-                        MathAddParams::new().as_bytes(),
-                        None,
-                        w,
-                        h,
+            let corrected = match correction_f16 {
+                Some(field) => {
+                    if field.len() != texels * 8 {
+                        return Err(GpuError::Kernel {
+                            kernel: "stroke",
+                            detail: format!(
+                                "heal correction is {} bytes, expected {}",
+                                field.len(),
+                                texels * 8
+                            ),
+                        });
+                    }
+                    Some(
+                        execute_tile_once_async(
+                            ctx,
+                            &MATH_ADD,
+                            &[
+                                TileInput {
+                                    f16_bytes: source_f16,
+                                },
+                                TileInput { f16_bytes: field },
+                            ],
+                            MathAddParams::new().as_bytes(),
+                            None,
+                            w,
+                            h,
+                        )
+                        .await?,
                     )
-                    .await?,
-                )
-            } else {
-                None
+                }
+                None => None,
             };
             let source = corrected.as_deref().unwrap_or(source_f16);
 
