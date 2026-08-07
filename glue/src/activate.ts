@@ -26,7 +26,12 @@
 // on first ingest — the GPU device is created THERE, not inside
 // loadBundleWasm's no-authority sandbox (BREAKAGE I-07).
 
-import type { BundleHandle, BundleHost } from "@paged-media/plugin-api";
+import type {
+  BindingProviderHandle,
+  BundleHandle,
+  BundleHost,
+  Disposable,
+} from "@paged-media/plugin-api";
 import { contributePanel, contributeTool } from "@paged-media/plugin-sdk";
 
 import manifest from "../manifest.json";
@@ -37,6 +42,8 @@ import { makeCropGesture } from "./crop-tool";
 import { makeSelectionGesture } from "./selection-tool";
 import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 import { makeTypeGesture } from "./type-tool";
+import { makeLayersBindingProvider } from "./binding-provider/layers-provider";
+import { makeTextBindingProvider } from "./binding-provider/text-provider";
 
 const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
@@ -53,6 +60,16 @@ const TYPE_TOOL_ID = "media.paged.image.tool.type";
 
 export function activate(host: BundleHost): BundleHandle {
   const session = createImageSession(host);
+  /** Whether the raster type tool is the one in hand. See the type
+   *  tool's gesture wrapper below for why this is tracked here. */
+  let typeToolActive = false;
+  /** ADR-023 provider handles, and the subscription that tells the host
+   *  their values moved. Disposed with the bundle — and disposable
+   *  INDIVIDUALLY, which is what makes phase D a migration rather than a
+   *  deletion: a duplicate panel retires behind the seam one at a time
+   *  and rolls back by dropping one handle. */
+  const providerHandles: BindingProviderHandle[] = [];
+  let providerInvalidate: Disposable | null = null;
 
   contributePanel(host, {
     id: PANEL_ID,
@@ -459,7 +476,27 @@ export function activate(host: BundleHost): BundleHandle {
     group: TYPE_TOOL_ID,
     section: "drawType",
     shortcut: "shift+z",
-    gesture: () => makeTypeGesture(host, session),
+    // Tracked here because the CONTRACT HAS NO DOOR for it: a bundle
+    // can contribute a tool but cannot ask the host which tool is
+    // active. The ADR-023 Character provider needs exactly that — its
+    // answers are only meaningful while the type tool is in hand — so
+    // the flag is kept from the gesture's own activation, which the
+    // plugin does own. Filed as an RFI gap; this is the local answer,
+    // not a preferred one.
+    gesture: () => {
+      const g = makeTypeGesture(host, session);
+      return {
+        ...g,
+        onActivate(paged) {
+          typeToolActive = true;
+          g.onActivate?.(paged);
+        },
+        onDeactivate(reason) {
+          typeToolActive = false;
+          g.onDeactivate?.(reason);
+        },
+      };
+    },
   });
 
   host.contribute.command({
@@ -599,10 +636,37 @@ export function activate(host: BundleHost): BundleHandle {
       // the document and steal a gesture that belongs to the host. The
       // marker is written at ingest (session `stampOwnership`).
       matches: (c) => c.metadata !== null,
-      // No toolIds restriction: entering a raster frame should not take
-      // tools away. The rail is already the honest surface here, and a
-      // restriction would be a behaviour change smuggled in behind a
-      // panel-retargeting feature.
+      // THE SURFACE FOLLOWS THE CONTEXT. Inside a raster frame the
+      // editing surface should be the RASTER one — its tools, its
+      // panel, and (through the binding providers below) its layers.
+      // A context that changes what you are editing without changing
+      // what you are editing it WITH is only half a context.
+      //
+      // This is not a trap: the rail treats a non-context tool as an
+      // EXIT rather than a dead end (ToolRail commits the context, then
+      // activates), so picking the host's pointer walks you back out.
+      // Order matters — `toolIds[0]` is the tool the shell focuses on
+      // entry, and brush is the one a user who just double-clicked an
+      // image almost always wants.
+      toolIds: [
+        BRUSH_TOOL_ID,
+        PENCIL_TOOL_ID,
+        ERASER_TOOL_ID,
+        CLONE_TOOL_ID,
+        HEAL_TOOL_ID,
+        TYPE_TOOL_ID,
+        MARQUEE_RECT_TOOL_ID,
+        MARQUEE_ELLIPSE_TOOL_ID,
+        LASSO_TOOL_ID,
+        MAGIC_WAND_TOOL_ID,
+        CROP_TOOL_ID,
+      ],
+      // The context's OWN panel. Deliberately NOT the host panels it
+      // serves (Layers, Character) — naming those here would put host
+      // panel IDs in plugin code, the exact coupling ADR-023 removed
+      // from the value lane, and the host already infers "serves" from
+      // `provides` to decide whether to withhold a raise.
+      panelIds: [PANEL_ID],
       onEnter: () => {
         host.log.debug("rasterImage context entered");
       },
@@ -610,6 +674,46 @@ export function activate(host: BundleHost): BundleHandle {
         host.log.debug("rasterImage context exited");
       },
     });
+
+    // ADR-023 phase D — the two providers that make the HOST panels
+    // show RASTER content while this context is active.
+    //
+    // Registered INSIDE the editContext branch on purpose, following
+    // paged.sheet: a provider's lifetime is BORROWED from the context's
+    // enter/exit, so a host that cannot host the context must not get a
+    // provider either. The door is probed separately and degrades to
+    // "no provider" — on a pre-ADR host the panels keep reading core,
+    // which is the old behaviour and not a failure.
+    if (host.supports("contribute.bindingProvider@1")) {
+      // LAYERS — the collection axis. The host Layers panel shows the
+      // RASTER stack (groups as tree rows) instead of the document's,
+      // which is ADR 024's rule for a plugin content type.
+      providerHandles.push(
+        host.contribute.bindingProvider(
+          "rasterImage",
+          makeLayersBindingProvider(session).provider,
+        ),
+      );
+      // CHARACTER — the value axis, and the first provider anywhere
+      // with a non-empty `writablePaths` (see its module header).
+      providerHandles.push(
+        host.contribute.bindingProvider(
+          "rasterImage",
+          makeTextBindingProvider(session, () =>
+            typeToolActive ? TYPE_TOOL_ID : null,
+          ).provider,
+        ),
+      );
+      // A provider's values change without an ENGINE mutation — a layer
+      // toggled inside the plugin's own wasm stack moves nothing on the
+      // document, so `host.document.onDidChange` never fires and a
+      // panel bound through the seam would show a stale row until
+      // something unrelated happened. The handle's own invalidate is
+      // the signal for exactly this.
+      providerInvalidate = session.onDidChange(() => {
+        for (const h of providerHandles) h.invalidate?.();
+      });
+    }
   }
 
   // The probe behind the save-back delivery seam (see the applyToFile
@@ -626,6 +730,13 @@ export function activate(host: BundleHost): BundleHandle {
 
   return {
     dispose() {
+      // Providers first, then the subscription that feeds them, then
+      // the session they read. Reverse registration order: a handle
+      // disposed after its session would be a live provider over a
+      // closed engine for however long the host takes to notice.
+      providerInvalidate?.dispose();
+      providerInvalidate = null;
+      for (const h of providerHandles.splice(0)) h.dispose();
       session.dispose();
     },
   };
