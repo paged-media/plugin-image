@@ -963,6 +963,31 @@ export function layers_duplicate(index) {
 }
 
 /**
+ * Toggle whether the attached mask applies, RETAINING it either way
+ * — losing painted coverage to a toggle would be a real loss.
+ * Clip a layer to the one beneath it — the mechanism "smart
+ * filters" wanted: an adjustment layer clipped to a smart object IS
+ * a smart filter. Confines the layer to its base's ALPHA, and
+ * multiplies with any mask it already has rather than replacing it.
+ * Group the CONTIGUOUS run `from..=to`. Returns the new group id.
+ * Refuses a range that is out of bounds or already grouped —
+ * nesting needs a tree and this stack is a list.
+ * @param {number} from
+ * @param {number} to
+ * @param {string} name
+ * @returns {number}
+ */
+export function layers_group(from, to, name) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_group(from, to, ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] >>> 0;
+}
+
+/**
  * The undo/redo readout as JSON — including the BOUND and how much
  * of it is used, so "history is a window" is stated rather than
  * discovered. `null` when no stack is open.
@@ -1148,17 +1173,59 @@ export function layers_set_blend(index, blend) {
 }
 
 /**
- * Toggle whether the attached mask applies, RETAINING it either way
- * — losing painted coverage to a toggle would be a real loss.
- * Clip a layer to the one beneath it — the mechanism "smart
- * filters" wanted: an adjustment layer clipped to a smart object IS
- * a smart filter. Confines the layer to its base's ALPHA, and
- * multiplies with any mask it already has rather than replacing it.
  * @param {number} index
  * @param {boolean} clipped
  */
 export function layers_set_clipped(index, clipped) {
     const ret = wasm.layers_set_clipped(index, clipped);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {number} id
+ * @param {string} blend
+ */
+export function layers_set_group_blend(id, blend) {
+    const ptr0 = passStringToWasm0(blend, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_set_group_blend(id, ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {number} id
+ * @param {string} name
+ */
+export function layers_set_group_name(id, name) {
+    const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_set_group_name(id, ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {number} id
+ * @param {number} opacity
+ */
+export function layers_set_group_opacity(id, opacity) {
+    const ret = wasm.layers_set_group_opacity(id, opacity);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {number} id
+ * @param {boolean} visible
+ */
+export function layers_set_group_visible(id, visible) {
+    const ret = wasm.layers_set_group_visible(id, visible);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
@@ -1234,6 +1301,17 @@ export function layers_set_visible(index, visible) {
 export function layers_undo() {
     const ret = wasm.layers_undo();
     return ret;
+}
+
+/**
+ * Dissolve a group. Its layers stay, in place and unchanged.
+ * @param {number} id
+ */
+export function layers_ungroup(id) {
+    const ret = wasm.layers_ungroup(id);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
 }
 
 /**

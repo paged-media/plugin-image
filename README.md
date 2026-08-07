@@ -71,6 +71,18 @@ pnpm test && pnpm validate:manifest
   in-frame composite, the selection and paint tool layers, the layer graph
   and undo journal, and save-back. This rung is what the code calls M4; the
   ladder above stopped at M3 while the shipped slice already used the name.
+- **M5** (2026-08-06) — the Photoshop-catalog Phase-2 wave: the
+  non-destructive spine (layer masks, adjustment layers, smart objects,
+  clipping, groups), four new kernel classes, the four missing panels,
+  the retouching family (clone, gradient-domain heal, content-aware
+  fill), CMS rung 1 and the K-10 save-file adoption.
+
+  The living status is NOT here — it is
+  `thoughts/docs/paged/plugin-image/photoshop_clone_capability_catalog_with_paged_reuse.md`
+  §36.4/§36.5 for the capability ledger and the `paged-media/state`
+  registry for per-feature status. A milestone list in a README is a
+  claim that goes stale the week after it is written; those two do not,
+  because CI reads them.
 
 ## License
 

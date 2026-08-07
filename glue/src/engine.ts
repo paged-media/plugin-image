@@ -606,12 +606,16 @@ export interface LayerInfo {
    *  is opaque. Multiplies with the layer's own mask rather than
    *  replacing it, so a clipped-and-masked layer is confined by both. */
   clipped: boolean;
+  /** The GROUP this layer belongs to, or null. */
+  group: number | null;
 }
 
 export interface LayerStackInfo {
   /** Index of the layer edits land in; -1 when no stack is open. */
   active: number;
   layers: LayerInfo[];
+  /** Groups, keyed by the `group` field on each layer. */
+  groups: LayerGroupInfo[];
 }
 
 /** The undo readout (`layers_history`). The BOUND is part of it on
@@ -638,7 +642,25 @@ export interface LayerHistory {
   redoSteps: readonly string[];
 }
 
-export const EMPTY_LAYER_STACK: LayerStackInfo = { active: -1, layers: [] };
+/** A layer GROUP — a named, contiguous run that composites into its own
+ *  accumulator before blending in. That isolation is what makes a group
+ *  more than a folder: group opacity fades the COMPOSITE of its members,
+ *  not each member. Photoshop's non-isolating "Pass Through" mode is not
+ *  offered, and the panel says so rather than implying Normal behaves
+ *  like it. */
+export interface LayerGroupInfo {
+  id: number;
+  name: string;
+  visible: boolean;
+  opacity: number;
+  blend: string;
+}
+
+export const EMPTY_LAYER_STACK: LayerStackInfo = {
+  active: -1,
+  layers: [],
+  groups: [],
+};
 
 /** One PSD layer-record row (`psd_layer_list`), record order. */
 export interface PsdLayerInfo {
@@ -1038,6 +1060,16 @@ export interface ImageEngine {
   /** Clip a layer to the one beneath it — the mechanism smart filters
    *  wanted: an adjustment clipped to a smart object IS a smart filter. */
   layerSetClipped(index: number, clipped: boolean): void;
+  /** Group the CONTIGUOUS run `from..=to`; returns the new group id.
+   *  Throws for an out-of-range or already-grouped run — nesting needs a
+   *  tree and the stack is a list. */
+  layersGroup(from: number, to: number, name: string): number;
+  /** Dissolve a group; its layers stay, in place and unchanged. */
+  layersUngroup(id: number): void;
+  layerSetGroupVisible(id: number, visible: boolean): void;
+  layerSetGroupOpacity(id: number, opacity: number): void;
+  layerSetGroupName(id: number, name: string): void;
+  layerSetGroupBlend(id: number, blend: string): void;
   /** Fold the stack and write the result into the bound image; returns
    *  the straight RGBA8. GPU-only whenever there is anything to blend; a
    *  single plain visible layer needs no device at all. */
@@ -1332,6 +1364,12 @@ export interface ImageWasmModule {
   layers_clear_mask(index: number): void;
   layers_set_mask_enabled(index: number, enabled: boolean): void;
   layers_set_clipped(index: number, clipped: boolean): void;
+  layers_group(from: number, to: number, name: string): number;
+  layers_ungroup(id: number): void;
+  layers_set_group_visible(id: number, visible: boolean): void;
+  layers_set_group_opacity(id: number, opacity: number): void;
+  layers_set_group_name(id: number, name: string): void;
+  layers_set_group_blend(id: number, blend: string): void;
   layers_composite(): Promise<Uint8Array>;
   layers_bake_adjust(
     exposure_ev: number,
@@ -1740,6 +1778,12 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layerSetMaskEnabled: (index, enabled) =>
       wasm.layers_set_mask_enabled(index, enabled),
     layerSetClipped: (index, clipped) => wasm.layers_set_clipped(index, clipped),
+    layersGroup: (from, to, name) => wasm.layers_group(from, to, name),
+    layersUngroup: (id) => wasm.layers_ungroup(id),
+    layerSetGroupVisible: (id, v) => wasm.layers_set_group_visible(id, v),
+    layerSetGroupOpacity: (id, o) => wasm.layers_set_group_opacity(id, o),
+    layerSetGroupName: (id, n) => wasm.layers_set_group_name(id, n),
+    layerSetGroupBlend: (id, b) => wasm.layers_set_group_blend(id, b),
     layersComposite: () => wasm.layers_composite(),
     layersAddAdjustment: (name, p) =>
       // The SAME wire block the bake and the preview use — one decode,

@@ -405,6 +405,14 @@ export interface ImageSession {
   /** Clip a layer to the one beneath it (or release it). Confines it to
    *  the base's ALPHA, multiplied with any mask it already has. */
   setLayerClipped(index: number, clipped: boolean): Promise<boolean>;
+  /** Group the CONTIGUOUS run `from..=to`. */
+  groupLayers(from: number, to: number, name?: string): Promise<boolean>;
+  /** Dissolve a group; its layers stay. */
+  ungroupLayers(id: number): Promise<boolean>;
+  setGroupVisible(id: number, visible: boolean): Promise<boolean>;
+  setGroupOpacity(id: number, opacity: number): Promise<boolean>;
+  setGroupName(id: number, name: string): Promise<boolean>;
+  setGroupBlend(id: number, blend: string): Promise<boolean>;
   /** Delete the mask outright. */
   clearLayerMask(index: number): Promise<boolean>;
   /** Convert a pixel layer into a smart object (one-way — the source is
@@ -753,6 +761,20 @@ export function createImageSession(host: BundleHost): ImageSession {
   const finishMaskEdit = async (): Promise<boolean> => {
     refreshLayers();
     return recomposite();
+  };
+
+  /** One shape for the four group-property setters: they differ only in
+   *  which door they call, and duplicating the guard and the recomposite
+   *  four times is how they drift apart. */
+  const groupEdit = async (run: () => void): Promise<boolean> => {
+    if (!engine || !state.source) return false;
+    try {
+      run();
+    } catch (err) {
+      setStatus(`Group edit failed: ${err instanceof Error ? err.message : err}`);
+      return false;
+    }
+    return finishMaskEdit();
   };
 
   /** Undo/redo one journaled PIXEL edit. An empty label means the
@@ -2280,6 +2302,43 @@ export function createImageSession(host: BundleHost): ImageSession {
         return false;
       }
       return finishMaskEdit();
+    },
+
+    async groupLayers(from, to, name = "Group") {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layersGroup(from, to, name);
+      } catch (err) {
+        // The engine's refusal names its reason (out of range, already
+        // grouped) — a generic message would hide which.
+        setStatus(`Group failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      return finishMaskEdit();
+    },
+
+    async ungroupLayers(id) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layersUngroup(id);
+      } catch (err) {
+        setStatus(`Ungroup failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      return finishMaskEdit();
+    },
+
+    async setGroupVisible(id, visible) {
+      return groupEdit(() => engine!.layerSetGroupVisible(id, visible));
+    },
+    async setGroupOpacity(id, opacity) {
+      return groupEdit(() => engine!.layerSetGroupOpacity(id, opacity));
+    },
+    async setGroupName(id, name) {
+      return groupEdit(() => engine!.layerSetGroupName(id, name));
+    },
+    async setGroupBlend(id, blend) {
+      return groupEdit(() => engine!.layerSetGroupBlend(id, blend));
     },
 
     async makeLayerSmart(index) {

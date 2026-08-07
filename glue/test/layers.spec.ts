@@ -326,6 +326,7 @@ describe("the panel's Layers section", () => {
     hasMask: false,
     maskEnabled: true,
     clipped: false,
+    group: null,
     ...over,
   });
 
@@ -382,6 +383,11 @@ describe("the panel's Layers section", () => {
         onMaskFromSelection: () => {},
         onMaskToggle: () => {},
         onClip: () => {},
+        groups: [],
+        onGroup: () => {},
+        onUngroup: () => {},
+        onGroupVisible: () => {},
+        onGroupOpacity: () => {},
         onMaskClear: () => {},
         onBake: () => {},
         onUndo: () => {},
@@ -487,6 +493,7 @@ describe("the layer row's clip toggle", () => {
     hasMask: false,
     maskEnabled: true,
     clipped: false,
+    group: null,
     ...over,
   });
   const history = () => ({
@@ -529,6 +536,11 @@ describe("the layer row's clip toggle", () => {
         onMaskFromSelection: () => {},
         onMaskToggle: () => {},
         onClip: () => {},
+        groups: [],
+        onGroup: () => {},
+        onUngroup: () => {},
+        onGroupVisible: () => {},
+        onGroupOpacity: () => {},
         onMaskClear: () => {},
         onBake: () => {},
         onUndo: () => {},
@@ -572,6 +584,11 @@ describe("the layer row's clip toggle", () => {
       onMaskFromSelection: () => {},
       onMaskToggle: () => {},
       onClip: () => {},
+      groups: [],
+      onGroup: () => {},
+      onUngroup: () => {},
+      onGroupVisible: () => {},
+      onGroupOpacity: () => {},
       onMaskClear: () => {},
       onBake: () => {},
       onUndo: () => {},
@@ -600,3 +617,121 @@ function collectTitles(node: unknown, out: string[] = []): string[] {
   if (el.props) collectTitles(el.props.children, out);
   return out;
 }
+
+// ── groups (2026-08-06) ──────────────────────────────────────────────
+
+describe("the layers panel's groups", () => {
+  const layer = (over: Partial<import("../src/engine").LayerInfo> = {}) => ({
+    index: 0,
+    id: 1,
+    name: "Background",
+    visible: true,
+    locked: false,
+    opacity: 1,
+    blend: "normal",
+    kind: "pixels" as const,
+    hasMask: false,
+    maskEnabled: true,
+    clipped: false,
+    group: null,
+    ...over,
+  });
+  const history = () => ({
+    canUndo: false,
+    canRedo: false,
+    depth: 0,
+    redoDepth: 0,
+    bytes: 0,
+    maxBytes: 1024,
+    maxEntries: 8,
+    dropped: 0,
+    generation: 0,
+    undoLabel: null,
+    redoLabel: null,
+    undoSteps: [],
+    redoSteps: [],
+  });
+  const base = {
+    active: 1,
+    history: history(),
+    blendModes: ["normal"],
+    layersNote: null,
+    gpu: true,
+    disabled: false,
+    onSelect: () => {},
+    onAdd: () => {},
+    onDuplicate: () => {},
+    onRemove: () => {},
+    onMove: () => {},
+    onVisible: () => {},
+    onOpacity: () => {},
+    onBlend: () => {},
+    onLock: () => {},
+    onUndoTo: () => {},
+    onRedoTo: () => {},
+    onAddAdjustment: () => {},
+    onMaskFromSelection: () => {},
+    onMaskToggle: () => {},
+    onClip: () => {},
+    onGroup: () => {},
+    onUngroup: () => {},
+    onGroupVisible: () => {},
+    onGroupOpacity: () => {},
+    onMaskClear: () => {},
+    onBake: () => {},
+    onUndo: () => {},
+    onRedo: () => {},
+  };
+
+  const render = (over: Record<string, unknown> = {}) =>
+    textOf(
+      LayersSection({
+        ...base,
+        layers: [layer()],
+        groups: [],
+        ...over,
+      } as never),
+    )
+      .join(" ")
+      .replace(/\s+/g, " ");
+
+  it("offers grouping once there is more than one layer", () => {
+    expect(render()).toContain("Group");
+  });
+
+  it("renders a group header ONCE for its run, not per member", () => {
+    const text = render({
+      layers: [
+        layer(),
+        layer({ index: 1, id: 2, name: "A", group: 7 }),
+        layer({ index: 2, id: 3, name: "B", group: 7 }),
+      ],
+      groups: [
+        { id: 7, name: "Set", visible: true, opacity: 1, blend: "normal" },
+      ],
+    });
+    // Once — a header per member would read as three groups.
+    expect(text.split("Set").length - 1).toBe(1);
+    expect(text).toContain("A");
+    expect(text).toContain("B");
+  });
+
+  it("states the isolation semantics and the two things it does not do", () => {
+    // The three sentences a designer needs: group opacity fades the
+    // RESULT, Pass Through is not offered, and groups do not nest.
+    const text = render({
+      layers: [layer(), layer({ index: 1, id: 2, group: 7 })],
+      groups: [
+        { id: 7, name: "Set", visible: true, opacity: 0.5, blend: "normal" },
+      ],
+    });
+    expect(text).toContain("fades the RESULT");
+    expect(text).toContain("Pass Through");
+    expect(text).toContain("do not nest");
+  });
+
+  it("says nothing about groups when there are none", () => {
+    // The note is guidance for a feature in use, not a permanent lecture.
+    expect(render()).not.toContain("Pass Through");
+  });
+});

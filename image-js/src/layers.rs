@@ -221,6 +221,10 @@ pub struct Layer {
     /// conversion. It lowers to the ABI's `@group(2)` r16float mask that
     /// every dispatch already takes.
     pub mask: Option<Arc<SelectionCoverage>>,
+    /// The GROUP this layer belongs to, if any. Membership is stored on
+    /// the layer rather than as a member list on the group, because the
+    /// fold walks layers and this is the lookup it actually needs.
+    pub group: Option<u32>,
     /// A DISABLED mask is retained, not discarded — Photoshop's
     /// shift-click. Toggling it off must not lose the painted coverage,
     /// which is the whole reason it is a separate flag rather than
@@ -381,11 +385,46 @@ pub struct HistoryStats {
 
 /// An ordered stack of pixel layers over one canvas, with the COW undo
 /// journal for its pixel edits.
+/// A LAYER GROUP: a named, contiguous run of layers that composites into
+/// its own accumulator before blending into the stack.
+///
+/// That isolation is what makes a group more than a folder — a group at
+/// 50% opacity fades the COMPOSITE of its members, which is a different
+/// picture from fading each member to 50% individually, and it is the
+/// reason designers reach for groups at all.
+///
+/// CONTIGUOUS, and enforced. The stack is a Vec and the fold walks it
+/// once; a group whose members were scattered would composite as two
+/// separate runs, which is not what any of its properties would then
+/// mean. NESTING is out of scope and stated rather than half-built: a
+/// group inside a group needs a tree, and this is a list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerGroup {
+    pub id: u32,
+    pub name: String,
+    pub visible: bool,
+    /// 0–1, applied to the group's COMPOSITE.
+    pub opacity: f32,
+    /// How the group's composite blends into what is beneath it.
+    pub blend: &'static KernelDef,
+}
+
+impl LayerGroup {
+    pub fn blend_name(&self) -> &'static str {
+        self.blend
+            .id
+            .strip_prefix("compose.")
+            .unwrap_or(self.blend.id)
+    }
+}
+
 pub struct LayerStack {
     width: u32,
     height: u32,
     /// Bottom-first (index 0 is the bottom-most layer).
     layers: Vec<Layer>,
+    /// Groups, in no particular order — membership is on the layers.
+    groups: Vec<LayerGroup>,
     active: usize,
     next_id: u32,
     journal: TileJournal,
@@ -404,6 +443,7 @@ impl LayerStack {
             )));
         }
         Ok(LayerStack {
+            groups: Vec::new(),
             width,
             height,
             layers: vec![Layer {
@@ -418,6 +458,7 @@ impl LayerStack {
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
+                group: None,
                 clipped: false,
             }],
             active: 0,
@@ -464,11 +505,13 @@ impl LayerStack {
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
+                group: None,
                 clipped: false,
             });
         }
         let next_id = layers.len() as u32 + 1;
         Ok(LayerStack {
+            groups: Vec::new(),
             width,
             height,
             active: layers.len() - 1,
@@ -548,6 +591,7 @@ impl LayerStack {
                 rgba: pixels,
                 mask: None,
                 mask_enabled: true,
+                group: None,
                 clipped: false,
             },
         );
@@ -672,6 +716,7 @@ impl LayerStack {
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
                 mask_enabled: true,
+                group: None,
                 clipped: false,
             },
         );
@@ -820,6 +865,141 @@ impl LayerStack {
     pub fn set_mask_enabled(&mut self, index: usize, enabled: bool) -> Result<(), IngestError> {
         self.layer_mut(index)?.mask_enabled = enabled;
         Ok(())
+    }
+
+    // ── groups ───────────────────────────────────────────────────────
+
+    pub fn groups(&self) -> &[LayerGroup] {
+        &self.groups
+    }
+
+    pub fn group_of(&self, index: usize) -> Option<&LayerGroup> {
+        let gid = self.layers.get(index)?.group?;
+        self.groups.iter().find(|g| g.id == gid)
+    }
+
+    /// Group the CONTIGUOUS run `from..=to` under `name`.
+    ///
+    /// Contiguity is a requirement rather than something to work around:
+    /// the fold walks the stack once, so a scattered group would
+    /// composite as several runs and its opacity, blend and visibility
+    /// would each mean something different from what the panel showed.
+    /// A range containing a layer that already belongs to another group
+    /// is refused for the same reason — nesting needs a tree.
+    pub fn group_range(&mut self, from: usize, to: usize, name: &str) -> Result<u32, IngestError> {
+        let (lo, hi) = (from.min(to), from.max(to));
+        if hi >= self.layers.len() {
+            return Err(IngestError::Unsupported(format!(
+                "cannot group {lo}..={hi}: the stack has {} layers",
+                self.layers.len()
+            )));
+        }
+        if self.layers[lo..=hi].iter().any(|l| l.group.is_some()) {
+            return Err(IngestError::Unsupported(
+                "a layer already in a group cannot be grouped again — nested \
+                 groups need a tree and this stack is a list"
+                    .into(),
+            ));
+        }
+        let id = self.fresh_id();
+        self.groups.push(LayerGroup {
+            id,
+            name: name.to_string(),
+            visible: true,
+            opacity: 1.0,
+            blend: &COMPOSE_NORMAL,
+        });
+        for l in &mut self.layers[lo..=hi] {
+            l.group = Some(id);
+        }
+        Ok(id)
+    }
+
+    /// Dissolve a group. Its layers STAY, in place and unchanged — the
+    /// group was a compositing wrapper, not a container, so removing it
+    /// cannot lose pixels.
+    pub fn ungroup(&mut self, id: u32) -> Result<(), IngestError> {
+        if !self.groups.iter().any(|g| g.id == id) {
+            return Err(IngestError::Unsupported(format!("unknown group {id}")));
+        }
+        for l in &mut self.layers {
+            if l.group == Some(id) {
+                l.group = None;
+            }
+        }
+        self.groups.retain(|g| g.id != id);
+        Ok(())
+    }
+
+    fn group_mut(&mut self, id: u32) -> Result<&mut LayerGroup, IngestError> {
+        self.groups
+            .iter_mut()
+            .find(|g| g.id == id)
+            .ok_or_else(|| IngestError::Unsupported(format!("unknown group {id}")))
+    }
+
+    pub fn set_group_visible(&mut self, id: u32, visible: bool) -> Result<(), IngestError> {
+        self.group_mut(id)?.visible = visible;
+        Ok(())
+    }
+
+    pub fn set_group_opacity(&mut self, id: u32, opacity: f32) -> Result<(), IngestError> {
+        self.group_mut(id)?.opacity = opacity.clamp(0.0, 1.0);
+        Ok(())
+    }
+
+    pub fn set_group_name(&mut self, id: u32, name: &str) -> Result<(), IngestError> {
+        self.group_mut(id)?.name = name.to_string();
+        Ok(())
+    }
+
+    pub fn set_group_blend(&mut self, id: u32, blend: &str) -> Result<(), IngestError> {
+        let k = crate::stroke::blend_kernel(blend)
+            .ok_or_else(|| IngestError::Unsupported(format!("unknown blend mode {blend:?}")))?;
+        self.group_mut(id)?.blend = k;
+        Ok(())
+    }
+
+    /// Does this group contribute at all? Hidden or at zero opacity it
+    /// contributes exactly nothing, by the same argument the per-layer
+    /// check makes: `over(a, b·0)` reduces to the backdrop for all 26
+    /// blend modes, so skipping is exact and not an approximation.
+    fn group_enabled(&self, id: u32) -> bool {
+        self.groups
+            .iter()
+            .find(|g| g.id == id)
+            .is_some_and(|g| g.visible && g.opacity > 0.0)
+    }
+
+    /// Blend a group's finished composite into the outer stack.
+    async fn blend_group(
+        &self,
+        ctx: &GpuContext,
+        id: u32,
+        stack: Vec<u8>,
+        inner: Vec<u8>,
+        w: u32,
+        h: u32,
+    ) -> Result<Vec<u8>, IngestError> {
+        let Some(g) = self.groups.iter().find(|g| g.id == id) else {
+            return Ok(stack);
+        };
+        // One dispatch, the same one a layer takes — a group is a plate
+        // like any other once its members have been folded.
+        image_gpu::execute_tile_once_async(
+            ctx,
+            g.blend,
+            &[
+                TileInput { f16_bytes: &stack },
+                TileInput { f16_bytes: &inner },
+            ],
+            ComposeParams::new(g.opacity).as_bytes(),
+            None,
+            w,
+            h,
+        )
+        .await
+        .map_err(|e| IngestError::Pipeline(e.to_string()))
     }
 
     /// Clip `index` to the layer beneath it (or release it).
@@ -1086,7 +1266,44 @@ impl LayerStack {
         // top of it. Kept as one byte per pixel, because that is already
         // the coverage representation everything else here speaks.
         let mut clip_base: Option<Vec<u8>> = None;
+        // GROUPS: a run of layers sharing a group id composites into its
+        // OWN accumulator, which is then blended in as one plate. That
+        // isolation is the whole difference between a group and a
+        // folder — a group at 50% fades the composite of its members,
+        // not each member individually.
+        //
+        // `stack` is the outer accumulator, parked while a group is
+        // open; `acc` is always whichever one is being written.
+        let mut open_group: Option<u32> = None;
+        let mut stack: Option<Vec<u8>> = None;
         for (layer, px) in plates {
+            // Close a group when the run ends (a different group, or
+            // none) and blend its composite into the outer stack.
+            if open_group.is_some() && layer.group != open_group {
+                let gid = open_group.take().expect("open");
+                let inner = std::mem::replace(&mut acc, stack.take().expect("parked"));
+                acc = self.blend_group(ctx, gid, acc, inner, w, h).await?;
+                clip_base = None;
+            }
+            // Open one when a run begins.
+            match layer.group {
+                Some(gid) if !self.group_enabled(gid) => {
+                    // A hidden group contributes nothing, and skipping
+                    // its members is exact rather than an approximation
+                    // — the same argument the per-layer `enabled` check
+                    // makes.
+                    continue;
+                }
+                Some(gid) if open_group != Some(gid) => {
+                    open_group = Some(gid);
+                    stack = Some(std::mem::replace(
+                        &mut acc,
+                        vec![0u8; (w as usize) * (h as usize) * 8],
+                    ));
+                    clip_base = None;
+                }
+                _ => {}
+            }
             if layer.clipped {
                 // A clipped layer with NOTHING to clip to contributes
                 // nothing. Compositing it unclipped would be the one
@@ -1181,6 +1398,12 @@ impl LayerStack {
             )
             .await
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+        }
+
+        // A group still open at the top of the stack closes here.
+        if let Some(gid) = open_group.take() {
+            let inner = std::mem::replace(&mut acc, stack.take().expect("parked"));
+            acc = self.blend_group(ctx, gid, acc, inner, w, h).await?;
         }
 
         // …and back out of premultiplied space, once — skipped where the
@@ -2354,5 +2577,183 @@ mod tests {
         // The panel keys its toggle off this; a missing field would make
         // the row render as released while the engine clips.
         assert!(s.layers()[at].clipped);
+    }
+
+    // ── groups ───────────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_layers_grouping_requires_a_contiguous_run() {
+        let mut s = stack(8, 8);
+        s.add("A");
+        s.add("B");
+        let id = s.group_range(1, 2, "Set").expect("grouped");
+        assert_eq!(s.layers()[1].group, Some(id));
+        assert_eq!(s.layers()[2].group, Some(id));
+        assert_eq!(s.layers()[0].group, None, "the background stayed out");
+        // Out of range is an error, not a clamp.
+        assert!(s.group_range(1, 99, "Nope").is_err());
+    }
+
+    #[test]
+    fn image_editor_layers_a_group_cannot_contain_a_group() {
+        // Nesting needs a tree and this is a list; refusing is honest,
+        // silently flattening would not be.
+        let mut s = stack(8, 8);
+        s.add("A");
+        s.add("B");
+        s.group_range(1, 2, "Outer").expect("grouped");
+        let err = s.group_range(1, 2, "Inner").expect_err("refused");
+        assert!(
+            format!("{err}").contains("nested"),
+            "the refusal must SAY why: {err}"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_ungrouping_keeps_every_layer() {
+        // A group is a compositing wrapper, not a container — dissolving
+        // it cannot lose pixels.
+        let mut s = stack(8, 8);
+        s.add("A");
+        s.add("B");
+        let id = s.group_range(1, 2, "Set").expect("grouped");
+        let before = s.layers().len();
+        s.ungroup(id).expect("ungrouped");
+        assert_eq!(s.layers().len(), before);
+        assert!(s.layers().iter().all(|l| l.group.is_none()));
+        assert!(s.groups().is_empty());
+        assert!(s.ungroup(id).is_err(), "twice is an error, not a no-op");
+    }
+
+    #[test]
+    fn image_editor_layers_group_properties_clamp_and_report() {
+        let mut s = stack(8, 8);
+        s.add("A");
+        let id = s.group_range(1, 1, "Set").expect("grouped");
+        s.set_group_opacity(id, 5.0).expect("set");
+        assert_eq!(s.groups()[0].opacity, 1.0, "opacity is clamped");
+        s.set_group_opacity(id, -1.0).expect("set");
+        assert_eq!(s.groups()[0].opacity, 0.0);
+        s.set_group_blend(id, "multiply").expect("set");
+        assert_eq!(s.groups()[0].blend_name(), "multiply");
+        assert!(s.set_group_blend(id, "nonsense").is_err());
+        s.set_group_name(id, "Renamed").expect("set");
+        assert_eq!(s.groups()[0].name, "Renamed");
+        assert!(s.set_group_visible(999, false).is_err());
+    }
+
+    /// GROUPS ISOLATE, and this is the test that says so.
+    ///
+    /// An adjustment layer inside a group affects its group-MATES and
+    /// nothing beneath them. The first version of this test grouped an
+    /// adjustment on its own and expected the composite to change; it
+    /// did not, and the code was right — an isolated group starts from a
+    /// transparent accumulator, so an adjustment alone in one has
+    /// nothing to adjust. Photoshop calls the non-isolating alternative
+    /// "Pass Through" and makes it the default; this stack does not
+    /// offer it, and says so rather than pretending Normal behaves like
+    /// it.
+    #[test]
+    fn image_editor_layers_a_group_isolates_what_it_contains() {
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+
+        // A real pixel layer, then an adjustment ON it, both in a group.
+        let px = s.add("Inner");
+        s.layer_mut(px).expect("inner").rgba =
+            Arc::from(vec![80u8; 16 * 16 * 4].into_boxed_slice());
+        let adj = s.add_adjustment("Brighten", bright(0.5));
+        let id = s.group_range(px, adj, "Set").expect("grouped");
+
+        let visible = pollster::block_on(s.composite(Some(ctx), None)).expect("visible");
+        assert_ne!(
+            visible.to_vec(),
+            base.to_vec(),
+            "the group's contents reached the composite"
+        );
+        assert!(
+            visible[0] > 80,
+            "the adjustment brightened its group-mate: got {}",
+            visible[0]
+        );
+
+        s.set_group_visible(id, false).expect("hide");
+        let hidden = pollster::block_on(s.composite(Some(ctx), None)).expect("hidden");
+        assert_eq!(
+            hidden.to_vec(),
+            base.to_vec(),
+            "a hidden group is exactly the identity — contents and all"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_an_adjustment_alone_in_a_group_adjusts_nothing() {
+        // The corollary, pinned so nobody "fixes" it later: isolation
+        // means the group starts from transparent, so an adjustment with
+        // no group-mates has nothing beneath it to transform. That is
+        // the semantic, not a bug.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+        let at = s.add_adjustment("Brighten", bright(0.5));
+        s.group_range(at, at, "Set").expect("grouped");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("out");
+        assert_eq!(
+            out.to_vec(),
+            base.to_vec(),
+            "an isolated group's adjustment cannot reach below it"
+        );
+    }
+
+    /// THE POINT OF GROUPS, and the assertion that separates one from a
+    /// folder: a group at 50% fades the COMPOSITE of its members, which
+    /// is a different picture from fading each member individually.
+    #[test]
+    fn image_editor_layers_group_opacity_fades_the_composite_not_each_member() {
+        let Some(ctx) = device() else { return };
+
+        // Two stacked opaque-ish layers, faded two different ways.
+        let build = || {
+            let mut s = stack(16, 16);
+            let a = s.add("A");
+            s.layer_mut(a).expect("a").rgba =
+                Arc::from(vec![255u8; 16 * 16 * 4].into_boxed_slice());
+            let b = s.add("B");
+            s.layer_mut(b).expect("b").rgba = Arc::from(vec![0u8; 16 * 16 * 4].into_boxed_slice());
+            // B is transparent black, so it must not hide A; give it real
+            // alpha in its left half only.
+            let mut px = vec![0u8; 16 * 16 * 4];
+            for y in 0..16 {
+                for x in 0..8 {
+                    let i = (y * 16 + x) * 4;
+                    px[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+            s.layer_mut(b).expect("b").rgba = Arc::from(px.into_boxed_slice());
+            (s, a, b)
+        };
+
+        // PER-MEMBER: each layer at 50%.
+        let (mut per_member, a, b) = build();
+        per_member.set_opacity(a, 0.5).expect("set");
+        per_member.set_opacity(b, 0.5).expect("set");
+        let m = pollster::block_on(per_member.composite(Some(ctx), None)).expect("m");
+
+        // AS A GROUP: both at full, the group at 50%.
+        let (mut grouped, a2, b2) = build();
+        let id = grouped.group_range(a2, b2, "Set").expect("grouped");
+        grouped.set_group_opacity(id, 0.5).expect("set");
+        let g = pollster::block_on(grouped.composite(Some(ctx), None)).expect("g");
+
+        // Where B covers A, the two differ: fading members lets the
+        // faded A show through the faded B, while fading the group fades
+        // an already-opaque composite.
+        let idx = ((8 * 16 + 4) * 4) as usize;
+        assert_ne!(
+            (g[idx], g[idx + 3]),
+            (m[idx], m[idx + 3]),
+            "group opacity must fade the COMPOSITE, not each member"
+        );
     }
 }

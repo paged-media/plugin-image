@@ -1669,7 +1669,7 @@ mod wasm {
                 .enumerate()
                 .map(|(index, layer)| {
                     format!(
-                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\",\"hasMask\":{},\"maskEnabled\":{},\"clipped\":{},\"kind\":\"{}\"}}",
+                        "{{\"index\":{index},\"id\":{},\"name\":{},\"visible\":{},\"locked\":{},\"opacity\":{},\"blend\":\"{}\",\"hasMask\":{},\"maskEnabled\":{},\"clipped\":{},\"group\":{},\"kind\":\"{}\"}}",
                         layer.id,
                         json_escape(&layer.name),
                         layer.visible,
@@ -1679,6 +1679,9 @@ mod wasm {
                         layer.mask.is_some(),
                         layer.mask_enabled,
                         layer.clipped,
+                        layer
+                            .group
+                            .map_or_else(|| "null".to_string(), |g| g.to_string()),
                         if layer.adjust_params().is_some() {
                             "adjustment"
                         } else if layer.smart_source().is_some() {
@@ -1689,10 +1692,26 @@ mod wasm {
                     )
                 })
                 .collect();
+            let groups: Vec<String> = doc
+                .stack
+                .groups()
+                .iter()
+                .map(|g| {
+                    format!(
+                        "{{\"id\":{},\"name\":{},\"visible\":{},\"opacity\":{},\"blend\":\"{}\"}}",
+                        g.id,
+                        json_escape(&g.name),
+                        g.visible,
+                        g.opacity,
+                        g.blend_name()
+                    )
+                })
+                .collect();
             format!(
-                "{{\"active\":{},\"layers\":[{}]}}",
+                "{{\"active\":{},\"layers\":[{}],\"groups\":[{}]}}",
                 doc.stack.active_index(),
-                rows.join(",")
+                rows.join(","),
+                groups.join(",")
             )
         })
     }
@@ -1835,6 +1854,46 @@ mod wasm {
     /// filters" wanted: an adjustment layer clipped to a smart object IS
     /// a smart filter. Confines the layer to its base's ALPHA, and
     /// multiplies with any mask it already has rather than replacing it.
+    /// Group the CONTIGUOUS run `from..=to`. Returns the new group id.
+    /// Refuses a range that is out of bounds or already grouped —
+    /// nesting needs a tree and this stack is a list.
+    #[wasm_bindgen]
+    pub fn layers_group(from: usize, to: usize, name: &str) -> Result<u32, JsValue> {
+        LAYERS.with(|l| {
+            let mut b = l.borrow_mut();
+            let doc = b
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("no layer stack is open"))?;
+            doc.stack.group_range(from, to, name).map_err(ingest_err)
+        })
+    }
+
+    /// Dissolve a group. Its layers stay, in place and unchanged.
+    #[wasm_bindgen]
+    pub fn layers_ungroup(id: u32) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.ungroup(id).map_err(ingest_err))
+    }
+
+    #[wasm_bindgen]
+    pub fn layers_set_group_visible(id: u32, visible: bool) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_group_visible(id, visible).map_err(ingest_err))
+    }
+
+    #[wasm_bindgen]
+    pub fn layers_set_group_opacity(id: u32, opacity: f32) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_group_opacity(id, opacity).map_err(ingest_err))
+    }
+
+    #[wasm_bindgen]
+    pub fn layers_set_group_name(id: u32, name: &str) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_group_name(id, name).map_err(ingest_err))
+    }
+
+    #[wasm_bindgen]
+    pub fn layers_set_group_blend(id: u32, blend: &str) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_group_blend(id, blend).map_err(ingest_err))
+    }
+
     #[wasm_bindgen]
     pub fn layers_set_clipped(index: usize, clipped: bool) -> Result<(), JsValue> {
         with_stack(|d| d.stack.set_clipped(index, clipped).map_err(ingest_err))

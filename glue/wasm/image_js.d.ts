@@ -433,6 +433,19 @@ export function layers_composite(): Promise<Uint8Array>;
 export function layers_duplicate(index: number): number;
 
 /**
+ * Toggle whether the attached mask applies, RETAINING it either way
+ * — losing painted coverage to a toggle would be a real loss.
+ * Clip a layer to the one beneath it — the mechanism "smart
+ * filters" wanted: an adjustment layer clipped to a smart object IS
+ * a smart filter. Confines the layer to its base's ALPHA, and
+ * multiplies with any mask it already has rather than replacing it.
+ * Group the CONTIGUOUS run `from..=to`. Returns the new group id.
+ * Refuses a range that is out of bounds or already grouped —
+ * nesting needs a tree and this stack is a list.
+ */
+export function layers_group(from: number, to: number, name: string): number;
+
+/**
  * The undo/redo readout as JSON — including the BOUND and how much
  * of it is used, so "history is a window" is stated rather than
  * discovered. `null` when no stack is open.
@@ -526,15 +539,15 @@ export function layers_set_active(index: number): void;
  */
 export function layers_set_blend(index: number, blend: string): void;
 
-/**
- * Toggle whether the attached mask applies, RETAINING it either way
- * — losing painted coverage to a toggle would be a real loss.
- * Clip a layer to the one beneath it — the mechanism "smart
- * filters" wanted: an adjustment layer clipped to a smart object IS
- * a smart filter. Confines the layer to its base's ALPHA, and
- * multiplies with any mask it already has rather than replacing it.
- */
 export function layers_set_clipped(index: number, clipped: boolean): void;
+
+export function layers_set_group_blend(id: number, blend: string): void;
+
+export function layers_set_group_name(id: number, name: string): void;
+
+export function layers_set_group_opacity(id: number, opacity: number): void;
+
+export function layers_set_group_visible(id: number, visible: boolean): void;
 
 /**
  * Lock a layer's PIXELS: paint / fill / bake refuse on it. Its
@@ -560,6 +573,11 @@ export function layers_set_visible(index: number, visible: boolean): void;
  * not journaled (see the section docs).
  */
 export function layers_undo(): Promise<string>;
+
+/**
+ * Dissolve a group. Its layers stay, in place and unchanged.
+ */
+export function layers_ungroup(id: number): void;
 
 /**
  * PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
@@ -826,6 +844,7 @@ export interface InitOutput {
     readonly layers_close: () => void;
     readonly layers_composite: () => any;
     readonly layers_duplicate: (a: number) => [number, number, number];
+    readonly layers_group: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly layers_history: () => [number, number];
     readonly layers_list: () => [number, number];
     readonly layers_make_smart: (a: number) => [number, number];
@@ -839,12 +858,17 @@ export interface InitOutput {
     readonly layers_set_active: (a: number) => [number, number];
     readonly layers_set_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_clipped: (a: number, b: number) => [number, number];
+    readonly layers_set_group_blend: (a: number, b: number, c: number) => [number, number];
+    readonly layers_set_group_name: (a: number, b: number, c: number) => [number, number];
+    readonly layers_set_group_opacity: (a: number, b: number) => [number, number];
+    readonly layers_set_group_visible: (a: number, b: number) => [number, number];
     readonly layers_set_locked: (a: number, b: number) => [number, number];
     readonly layers_set_mask_enabled: (a: number, b: number) => [number, number];
     readonly layers_set_name: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_opacity: (a: number, b: number) => [number, number];
     readonly layers_set_visible: (a: number, b: number) => [number, number];
     readonly layers_undo: () => any;
+    readonly layers_ungroup: (a: number) => [number, number];
     readonly psd_apply_adjusted: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly psd_close: (a: number) => void;
     readonly psd_layer_list: (a: number) => [number, number, number, number];

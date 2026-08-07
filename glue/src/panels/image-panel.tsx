@@ -26,7 +26,7 @@
 // crop geometry are the engine's deterministic Rust (image_core / the
 // reduce histogram); this leaf only renders + forwards.
 
-import { useEffect, useReducer, useState } from "react";
+import { Fragment, useEffect, useReducer, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import manifest from "../../manifest.json";
@@ -39,6 +39,7 @@ import type {
   BrushPresetInfo,
   BrushStats,
   ChannelStatsInfo,
+  LayerGroupInfo,
   GradientKind,
   ImageHistogram,
   LayerHistory,
@@ -1045,6 +1046,11 @@ export function LayersSection({
   onMaskFromSelection,
   onMaskToggle,
   onClip,
+  groups,
+  onGroup,
+  onUngroup,
+  onGroupVisible,
+  onGroupOpacity,
   onMaskClear,
   onBake,
   onUndoTo,
@@ -1077,6 +1083,11 @@ export function LayersSection({
   /** Toggle whether the mask applies (the coverage is retained). */
   onMaskToggle: (index: number, enabled: boolean) => void;
   onClip: (index: number, clipped: boolean) => void;
+  groups: readonly LayerGroupInfo[];
+  onGroup: () => void;
+  onUngroup: (id: number) => void;
+  onGroupVisible: (id: number, visible: boolean) => void;
+  onGroupOpacity: (id: number, opacity: number) => void;
   /** Delete the mask outright. */
   onMaskClear: (index: number) => void;
   /** Walk BACK `n` journal steps (n undos — the journal is a stack). */
@@ -1098,12 +1109,53 @@ export function LayersSection({
       {layers.length === 0 ? (
         <div style={note}>Ingest an image to open its layer stack.</div>
       ) : null}
-      {rows.map((l) => (
+      {rows.map((l, i) => (
+        <Fragment key={l.id}>
+          {/* A GROUP HEADER, emitted once at the top of its run (rows
+              read top-down, so that is the FIRST row of the group we
+              meet). Groups own their own visibility, opacity and blend
+              because they composite in isolation — the header is where
+              those live. */}
+          {l.group !== null && rows[i - 1]?.group !== l.group
+            ? (() => {
+                const g = groups.find((x) => x.id === l.group);
+                return g ? (
+                  <div style={{ ...row, fontWeight: 600 }} data-image-group-row={g.id}>
+                    <input
+                      type="checkbox"
+                      data-image-group-visible={g.id}
+                      checked={g.visible}
+                      disabled={disabled}
+                      onChange={(e) => onGroupVisible(g.id, e.target.checked)}
+                    />
+                    <span data-image-group-name={g.id}>{g.name}</span>
+                    <Slider
+                      label=""
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={g.opacity}
+                      disabled={disabled}
+                      onChange={(v) => onGroupOpacity(g.id, v)}
+                    />
+                    <button
+                      type="button"
+                      title="Dissolve this group (its layers stay)"
+                      data-image-group-ungroup={g.id}
+                      disabled={disabled}
+                      onClick={() => onUngroup(g.id)}
+                    >
+                      ⌧
+                    </button>
+                  </div>
+                ) : null;
+              })()
+            : null}
         <div
-          key={l.id}
           data-image-layer-row={l.index}
           style={{
             ...row,
+            paddingLeft: l.group !== null ? "var(--space-3, 12px)" : undefined,
             background:
               l.index === active
                 ? "var(--pg-accent-soft, rgba(127,127,255,0.12))"
@@ -1279,10 +1331,30 @@ export function LayersSection({
             </button>
           </span>
         </div>
+        </Fragment>
       ))}
+      {groups.length > 0 ? (
+        <div style={note} data-image-groups-note>
+          A group composites its members into their own buffer first, so its
+          opacity fades the RESULT rather than each member — that is what makes
+          it more than a folder, and why an adjustment inside a group reaches
+          only its group-mates. Photoshop&apos;s non-isolating &ldquo;Pass
+          Through&rdquo; mode is not offered. Groups do not nest: that needs a
+          tree and this stack is a list.
+        </div>
+      ) : null}
       <div
         style={{ display: "flex", gap: 6, marginTop: "var(--space-1, 4px)" }}
       >
+        <button
+          type="button"
+          title="Group the two layers below the active one"
+          data-image-layers-group
+          disabled={disabled || layers.length < 2}
+          onClick={onGroup}
+        >
+          Group
+        </button>
         <button
           type="button"
           data-image-layer-add
@@ -2295,6 +2367,17 @@ export function makeImagePanel(session: ImageSession) {
           onMaskFromSelection={(i) => void session.layerMaskFromSelection(i)}
           onMaskToggle={(i, v) => void session.setLayerMaskEnabled(i, v)}
           onClip={(i, v) => void session.setLayerClipped(i, v)}
+          groups={s.layers.groups}
+          onGroup={() => {
+            // The active layer and the one below it — the smallest
+            // group that means anything, and the one a designer reaches
+            // for first.
+            const a = s.layers.active;
+            if (a > 0) void session.groupLayers(a - 1, a);
+          }}
+          onUngroup={(id) => void session.ungroupLayers(id)}
+          onGroupVisible={(id, v) => void session.setGroupVisible(id, v)}
+          onGroupOpacity={(id, o) => void session.setGroupOpacity(id, o)}
           onMaskClear={(i) => void session.clearLayerMask(i)}
           onUndoTo={(n) => void session.undoSteps(n)}
           onRedoTo={(n) => void session.redoSteps(n)}
