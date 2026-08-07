@@ -259,7 +259,8 @@ describe("the panel's Retouch section", () => {
     const text = render();
     expect(text).toContain("Content-aware fill");
     expect(text).toContain("copied from real image data");
-    expect(text).toContain("windowed and single-scale");
+    expect(text).toContain("coarse to fine");
+    expect(text).toContain("still WINDOWED");
     expect(text).not.toContain("is not offered");
   });
 

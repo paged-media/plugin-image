@@ -733,10 +733,11 @@ export function RetouchSection({
         Fills the SELECTION with texture found elsewhere in the same image,
         patch by patch from the edge inward — so it keeps grain and continues
         edges rather than blurring across them. Every pixel it writes was
-        copied from real image data, never averaged into existence. Its
-        search is windowed and single-scale: a large hole reproduces texture
-        faithfully but can lose large-scale structure, and a match on the far
-        side of a big image will not be found.
+        copied from real image data, never averaged into existence. It works
+        coarse to fine, deciding large-scale structure at half resolution
+        before matching texture at full, so a big hole keeps its shape as
+        well as its grain. Its search is still WINDOWED: a match on the far
+        side of a large image will not be found.
       </div>
     </>
   );

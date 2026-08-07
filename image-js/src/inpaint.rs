@@ -66,6 +66,10 @@ use image_gpu::SelectionCoverage;
 /// paper uses and the one that holds texture without over-smoothing.
 const R: i32 = 4;
 
+/// A pass's output: the filled pixels, and WHERE each filled pixel came
+/// from. The shift map is what a finer pass starts from.
+type PassResult = (Vec<u8>, Vec<(i32, i32)>);
+
 /// How far from a target patch to look for its exemplar.
 ///
 /// Bounded because an exhaustive search is quadratic in image area, and
@@ -73,12 +77,33 @@ const R: i32 = 4;
 /// making. Plausible replacement texture is almost always local.
 const SEARCH: i32 = 96;
 
+/// The window the FINE pass searches when the coarse pass has already
+/// named an offset. Small on purpose: the coarse decision is the answer,
+/// and this only lets the fine pass pick the best texture match near it.
+const REFINE: i32 = 12;
+
+/// Below this the half-resolution pass has nothing useful to say — a
+/// 9×9 patch at half res would cover most of the picture — so the
+/// single-scale path runs directly.
+const MIN_PYRAMID: u32 = 64;
+
 /// Fill every pixel the coverage marks, synthesising from the rest of
 /// the image.
 ///
 /// `rgba` is canvas-extent straight RGBA8 and is returned MODIFIED.
 /// `coverage` marks the hole (any value at or above `threshold`).
 /// Returns `None` when there is nothing to fill, or nothing to fill FROM.
+///
+/// COARSE-TO-FINE. A 9×9 patch sees twice as much of the picture at half
+/// resolution, so large-scale structure is decided there and the full-
+/// resolution pass only has to get the texture right. The coarse pass
+/// records WHERE each filled pixel came from — a shift map — and the
+/// fine pass centres its search on twice that offset, which is both
+/// better (the coarse decision is honoured) and cheaper (a small window
+/// around a known-good offset instead of a wide blind one).
+///
+/// Below `MIN_PYRAMID` the image is too small for a half-resolution pass
+/// to mean anything and the single-scale path runs directly.
 pub fn fill(
     rgba: &[u8],
     width: u32,
@@ -86,6 +111,108 @@ pub fn fill(
     coverage: &SelectionCoverage,
     threshold: u8,
 ) -> Option<Vec<u8>> {
+    let mask = coverage_bytes(coverage, width, height, threshold);
+    if width < MIN_PYRAMID || height < MIN_PYRAMID {
+        return fill_pass(rgba, width, height, &mask, None).map(|(px, _)| px);
+    }
+    let (cw, ch) = (width / 2, height / 2);
+    let coarse_rgba = downsample2(rgba, width, height);
+    let coarse_mask = downsample_mask2(&mask, width, height);
+    // A coarse pass that finds nothing to do is not a failure — it just
+    // means the hole vanished at half resolution, and the fine pass has
+    // the whole job.
+    let bias = fill_pass(&coarse_rgba, cw, ch, &coarse_mask, None)
+        .map(|(_, shifts)| upsample_shifts(&shifts, cw, ch, width, height));
+    fill_pass(rgba, width, height, &mask, bias.as_deref()).map(|(px, _)| px)
+}
+
+/// The coverage as one byte per pixel: non-zero where the hole is.
+fn coverage_bytes(coverage: &SelectionCoverage, width: u32, height: u32, threshold: u8) -> Vec<u8> {
+    let mut v = vec![0u8; (width as usize) * (height as usize)];
+    for y in 0..height {
+        for x in 0..width {
+            if coverage.coverage_at(x, y) >= threshold {
+                v[(y * width + x) as usize] = 255;
+            }
+        }
+    }
+    v
+}
+
+/// Box-filter halving. Straight RGBA8 in, straight RGBA8 out.
+fn downsample2(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let (cw, ch) = ((width / 2) as usize, (height / 2) as usize);
+    let mut out = vec![0u8; cw * ch * 4];
+    for y in 0..ch {
+        for x in 0..cw {
+            for c in 0..4 {
+                let mut sum = 0u32;
+                for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    let sy = (y * 2 + dy).min(height as usize - 1);
+                    let sx = (x * 2 + dx).min(width as usize - 1);
+                    sum += u32::from(rgba[(sy * width as usize + sx) * 4 + c]);
+                }
+                out[(y * cw + x) * 4 + c] = (sum / 4) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Halve the mask. A coarse pixel is a hole when ANY of its four is —
+/// growing the hole at the coarse scale rather than shrinking it, so the
+/// coarse pass never treats a hole pixel as source material.
+fn downsample_mask2(mask: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let (cw, ch) = ((width / 2) as usize, (height / 2) as usize);
+    let mut out = vec![0u8; cw * ch];
+    for y in 0..ch {
+        for x in 0..cw {
+            let any = [(0, 0), (0, 1), (1, 0), (1, 1)].iter().any(|(dy, dx)| {
+                let sy = (y * 2 + dy).min(height as usize - 1);
+                let sx = (x * 2 + dx).min(width as usize - 1);
+                mask[sy * width as usize + sx] != 0
+            });
+            if any {
+                out[y * cw + x] = 255;
+            }
+        }
+    }
+    out
+}
+
+/// Scale a coarse shift map up to full resolution. Offsets DOUBLE with
+/// the resolution, which is the whole reason a coarse decision is worth
+/// carrying: it names a place, and the place is twice as far at twice
+/// the size.
+fn upsample_shifts(
+    shifts: &[(i32, i32)],
+    cw: u32,
+    ch: u32,
+    width: u32,
+    height: u32,
+) -> Vec<(i32, i32)> {
+    let mut out = vec![(0i32, 0i32); (width as usize) * (height as usize)];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let cy = (y / 2).min(ch as usize - 1);
+            let cx = (x / 2).min(cw as usize - 1);
+            let (dx, dy) = shifts[cy * cw as usize + cx];
+            out[y * width as usize + x] = (dx * 2, dy * 2);
+        }
+    }
+    out
+}
+
+/// One scale's fill. `bias`, when present, is a per-pixel offset the
+/// exemplar search centres on — the coarse pass's decision, carried
+/// down. Returns the filled pixels AND the shift map it used.
+fn fill_pass(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    mask: &[u8],
+    bias: Option<&[(i32, i32)]>,
+) -> Option<PassResult> {
     let (w, h) = (width as i32, height as i32);
     let n = (width as usize) * (height as usize);
     if n == 0 || rgba.len() < n * 4 {
@@ -98,16 +225,17 @@ pub fn fill(
     let mut out = rgba.to_vec();
     let mut known = vec![true; n];
     let mut conf = vec![1f32; n];
+    let mut shifts = vec![(0i32, 0i32); n];
     let mut remaining = 0usize;
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) as usize;
-            if coverage.coverage_at(x as u32, y as u32) >= threshold {
-                known[i] = false;
-                conf[i] = 0.0;
-                remaining += 1;
-            }
+    for i in 0..n {
+        if mask.get(i).copied().unwrap_or(0) != 0 {
+            known[i] = false;
+            conf[i] = 0.0;
+            remaining += 1;
         }
+    }
+    if mask.len() < n {
+        return None;
     }
     if remaining == 0 || remaining == n {
         // Nothing selected, or everything is: with no source region
@@ -125,7 +253,9 @@ pub fn fill(
             break;
         };
         let (tx, ty) = target;
-        let Some((sx, sy)) = best_exemplar(&out, &known, w, h, tx, ty) else {
+        // The coarse pass's offset for this pixel, if there was one.
+        let hint = bias.and_then(|b| b.get((ty * w + tx) as usize).copied());
+        let Some((sx, sy)) = best_exemplar(&out, &known, w, h, tx, ty, hint) else {
             // No usable exemplar anywhere in range. Rather than leave the
             // hole (an infinite loop) or invent a colour, mark this
             // patch known at its current value and move on — the result
@@ -169,11 +299,14 @@ pub fn fill(
                 out[pi * 4..pi * 4 + 4].copy_from_slice(&texel);
                 known[pi] = true;
                 conf[pi] = patch_conf;
+                // Where this pixel came FROM, so a finer pass can start
+                // where this one finished.
+                shifts[pi] = (sx - tx, sy - ty);
                 remaining -= 1;
             }
         }
     }
-    Some(out)
+    Some((out, shifts))
 }
 
 fn rgba_at(buf: &[u8], i: usize) -> [u8; 4] {
@@ -308,12 +441,19 @@ fn best_exemplar(
     h: i32,
     tx: i32,
     ty: i32,
+    hint: Option<(i32, i32)>,
 ) -> Option<(i32, i32)> {
     let mut best: Option<((i32, i32), f64)> = None;
-    let x0 = (tx - SEARCH).max(R);
-    let x1 = (tx + SEARCH).min(w - 1 - R);
-    let y0 = (ty - SEARCH).max(R);
-    let y1 = (ty + SEARCH).min(h - 1 - R);
+    // With a coarse hint, search a SMALL window around where the coarse
+    // pass went; without one, the wide blind window.
+    let (cx, cy, radius) = match hint {
+        Some((dx, dy)) if (dx, dy) != (0, 0) => (tx + dx, ty + dy, REFINE),
+        _ => (tx, ty, SEARCH),
+    };
+    let x0 = (cx - radius).max(R);
+    let x1 = (cx + radius).min(w - 1 - R);
+    let y0 = (cy - radius).max(R);
+    let y1 = (cy + radius).min(h - 1 - R);
     for sy in y0..=y1 {
         'candidate: for sx in x0..=x1 {
             let mut ssd = 0f64;
@@ -516,5 +656,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── the pyramid ──────────────────────────────────────────────────
+
+    #[test]
+    fn image_editor_inpaint_the_coarse_mask_grows_the_hole() {
+        // A coarse pixel is a hole when ANY of its four is. Growing
+        // rather than shrinking is the safe direction: the coarse pass
+        // must never mistake a hole pixel for source material, and one
+        // extra coarse pixel of hole costs nothing.
+        let (w, h) = (4u32, 4u32);
+        let mut mask = vec![0u8; 16];
+        mask[0] = 255; // only the top-left of the first 2×2 block
+        let coarse = downsample_mask2(&mask, w, h);
+        assert_eq!(coarse.len(), 4);
+        assert_eq!(coarse[0], 255, "one hole pixel makes the block a hole");
+        assert_eq!(coarse[1], 0);
+    }
+
+    #[test]
+    fn image_editor_inpaint_shifts_double_with_the_resolution() {
+        // An offset names a PLACE, and the place is twice as far at twice
+        // the size — carrying a coarse offset down unscaled would point
+        // the fine search at the wrong half of the image.
+        let shifts = vec![(3i32, -5i32); 4];
+        let up = upsample_shifts(&shifts, 2, 2, 4, 4);
+        assert_eq!(up.len(), 16);
+        assert!(up.iter().all(|&s| s == (6, -10)));
+    }
+
+    #[test]
+    fn image_editor_inpaint_the_pyramid_path_still_only_copies() {
+        // Big enough to take the coarse-to-fine path (MIN_PYRAMID), so
+        // this is the multi-scale code under test rather than the
+        // single-scale one the earlier specs cover.
+        let (w, h) = (128u32, 128u32);
+        assert!(
+            w >= MIN_PYRAMID && h >= MIN_PYRAMID,
+            "exercises the pyramid"
+        );
+        let src = img(w, h, |x, _| {
+            let v = if (x / 8) % 2 == 0 { 10 } else { 245 };
+            [v, v, v]
+        });
+        let sel = hole(w, h, 50, 50, 78, 78);
+        let out = fill(&src, w, h, &sel, 128).expect("filled");
+        let mut intermediate = 0;
+        for y in 50..78 {
+            for x in 50..78 {
+                let v = out[((y * w + x) * 4) as usize];
+                if v > 20 && v < 235 {
+                    intermediate += 1;
+                }
+            }
+        }
+        assert_eq!(
+            intermediate, 0,
+            "the coarse pass DOWNSAMPLES (which averages), so the risk here \
+             is that averaged pixels leak into the output; they must not — \
+             the fine pass writes only full-resolution copies"
+        );
+    }
+
+    #[test]
+    fn image_editor_inpaint_the_pyramid_path_is_deterministic_too() {
+        let (w, h) = (96u32, 96u32);
+        let src = img(w, h, |x, y| [(x * 2) as u8, (y * 2) as u8, 90]);
+        let sel = hole(w, h, 40, 40, 56, 56);
+        let a = fill(&src, w, h, &sel, 128).expect("a");
+        let b = fill(&src, w, h, &sel, 128).expect("b");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn image_editor_inpaint_a_small_image_skips_the_pyramid() {
+        // Below MIN_PYRAMID a half-resolution 9×9 patch would cover most
+        // of the picture, so the coarse pass has nothing useful to say
+        // and the single-scale path runs directly. Asserted through
+        // behaviour: a small fill still works.
+        let (w, h) = (32u32, 32u32);
+        assert!(w < MIN_PYRAMID);
+        let src = img(w, h, |x, _| [(x * 7) as u8, 60, 60]);
+        let sel = hole(w, h, 12, 12, 20, 20);
+        assert!(fill(&src, w, h, &sel, 128).is_some());
     }
 }
