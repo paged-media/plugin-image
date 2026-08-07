@@ -144,13 +144,23 @@ fn image_psd_layer_pixel_import_declines_a_grouped_psd() {
     );
 }
 
+/// CLIPPING IS NO LONGER A REFUSAL — it is imported.
+///
+/// This test used to assert the opposite, and it was right to: the layer
+/// model had no clipping, so accepting a clipped PSD would have
+/// composited it wrong. The model gained clipping on 2026-08-06, so the
+/// refusal became a lie about our own capability and the plate now
+/// carries the record's `clipping` byte across.
 #[test]
-fn image_psd_layer_pixel_import_declines_a_clipping_layer() {
+fn image_psd_layer_pixel_import_carries_clipping_across() {
     let (bytes, _m) = fixtures::blend_opacity();
-    let err = parse(&bytes)
+    let import = parse(&bytes)
         .layer_plates_rgba8()
-        .expect_err("clipping is not modeled");
-    assert!(err.to_string().contains("CLIPPING"), "{err}");
+        .expect("a clipped PSD imports now");
+    assert!(
+        import.layers.iter().any(|l| l.clipped),
+        "the fixture's clipped layer arrived marked as clipped"
+    );
 }
 
 #[test]

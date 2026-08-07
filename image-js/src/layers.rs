@@ -506,7 +506,7 @@ impl LayerStack {
                 mask: None,
                 mask_enabled: true,
                 group: None,
-                clipped: false,
+                clipped: plate.clipped,
             });
         }
         let next_id = layers.len() as u32 + 1;
@@ -2029,6 +2029,7 @@ mod tests {
     #[test]
     fn image_editor_layers_a_psd_import_becomes_a_stack_bottom_first() {
         let plate = |name: &str, key: &[u8; 4], opacity: u8, hidden: bool| image_psd::LayerPlate {
+            clipped: false,
             name: name.to_string(),
             blend_key: *key,
             opacity,
@@ -2059,6 +2060,7 @@ mod tests {
             width: 4,
             height: 4,
             layers: vec![image_psd::LayerPlate {
+                clipped: false,
                 name: "short".into(),
                 blend_key: *b"norm",
                 opacity: 255,

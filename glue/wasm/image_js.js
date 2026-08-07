@@ -1076,12 +1076,18 @@ export function layers_open(handle) {
  * layer count.
  *
  * This DECLINES (with the engine's stated reason) for every PSD
- * whose structure the layer model does not reproduce — groups,
- * clipping layers, layer masks, non-8-bit-RGB, or an over-budget
- * canvas — because swapping Photoshop's own composite for a
- * different-looking one of ours would be worse than flattening. On a
- * refusal the caller keeps `layers_open` (the flatten) and shows the
- * reason.
+ * whose structure the layer model does not reproduce, because
+ * swapping Photoshop's own composite for a different-looking one of
+ * ours would be worse than flattening. On a refusal the caller keeps
+ * `layers_open` (the flatten) and shows the reason.
+ *
+ * The refusal list SHRANK on 2026-08-06: CLIPPING is imported now
+ * that the model has it. Still refused: groups (this stack has
+ * them, but PSD groups nest and default to pass-through and this
+ * one does neither), layer masks, non-8-bit-RGB and an over-budget
+ * canvas. A refusal for a capability we since gained is a lie about
+ * ourselves, so the list is worth re-reading whenever the model
+ * grows.
  *
  * `image_handle` must be the composite already ingested from the
  * same file (same extent); `psd_handle` is a `psd_open` handle.

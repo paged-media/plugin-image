@@ -97,6 +97,11 @@ pub struct LayerPlate {
     /// Canvas-extent, tightly packed straight RGBA8. Pixels outside the
     /// layer's own rect are transparent black.
     pub rgba: Vec<u8>,
+    /// The record's `clipping` byte: this layer is CLIPPED to the one
+    /// below it. Carried across because the consumer models clipping —
+    /// it did not when this importer was written, and the refusal that
+    /// used to live here said so.
+    pub clipped: bool,
 }
 
 /// The whole importable layer tree.
@@ -157,13 +162,6 @@ impl PsdFile {
                         .into(),
                 ));
             }
-            if layer.clipping != 0 {
-                return Err(PsdError::Unsupported(format!(
-                    "layer import of a PSD with a CLIPPING layer (\"{}\"): a clipped \
-                     layer is masked by the one below it, which is not modeled",
-                    layer.name()
-                )));
-            }
             if layer.channels.iter().any(|c| c.id == -2 || c.id == -3) {
                 return Err(PsdError::Unsupported(format!(
                     "layer import of a PSD with a LAYER MASK (\"{}\"): a mask changes \
@@ -200,6 +198,7 @@ impl PsdFile {
                 blend_key: layer.blend_key,
                 opacity: layer.opacity,
                 hidden: (layer.flags & 0x02) != 0,
+                clipped: layer.clipping != 0,
                 rgba: self.layer_canvas_rgba8(layer, cw, ch)?,
             });
         }
