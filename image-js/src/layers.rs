@@ -2148,6 +2148,7 @@ mod tests {
             rgba: vec![0u8; 4 * 4 * 4],
         };
         let import = image_psd::LayerImport {
+            depth_reduced: false,
             width: 4,
             height: 4,
             layers: vec![
@@ -2168,6 +2169,7 @@ mod tests {
     #[test]
     fn image_editor_layers_a_psd_import_with_a_mis_sized_plate_is_a_clean_error() {
         let import = image_psd::LayerImport {
+            depth_reduced: false,
             width: 4,
             height: 4,
             layers: vec![image_psd::LayerPlate {

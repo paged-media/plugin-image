@@ -120,7 +120,21 @@ impl ChannelData {
             .checked_mul(cols as usize)
             .ok_or_else(|| malformed(format!("plane size {rows}×{cols} overflows usize")))?;
         match self.compression {
-            Compression::Raw => self.decode_raw(plane_len),
+            Compression::Raw => self.decode_raw(plane_len, depth),
+            // 16-bit RLE is REFUSED, and on evidence rather than effort:
+            // no corpus fixture is 16-bit, and whether the row table
+            // counts compressed bytes of 16-bit samples or Photoshop
+            // splits high and low byte planes is genuinely unknown (spec
+            // §2.4 GAP). RAW has no such ambiguity — its samples are
+            // big-endian, the same convention the merged composite reads
+            // and a test verifies — which is why one ships and the other
+            // does not.
+            Compression::Rle if depth == 16 => Err(PsdError::Unsupported(
+                "16-bit RLE channel: the row-table semantics for 16-bit samples \
+                 are unverified (no corpus fixture), and a guess would decode to \
+                 a wrong-looking image"
+                    .into(),
+            )),
             Compression::Rle => self.decode_rle(container, rows, cols, plane_len),
             Compression::Zip => inflate(&self.bytes, plane_len),
             Compression::ZipPrediction => {
@@ -137,14 +151,27 @@ impl ChannelData {
         }
     }
 
-    fn decode_raw(&self, plane_len: usize) -> Result<Vec<u8>> {
-        if self.bytes.len() != plane_len {
+    /// RAW samples, reduced to 8 bits.
+    ///
+    /// At depth 16 the samples are BIG-ENDIAN and the high byte is the
+    /// correct nearest-8-bit reading — the same convention the merged
+    /// composite reads, verified there by test. The returned plane is
+    /// always one byte per pixel, because the layer stack downstream is
+    /// 8-bit; this is what lets a 16-bit PSD's LAYERS import at all
+    /// instead of the whole file falling back to a flattened composite.
+    fn decode_raw(&self, plane_len: usize, depth: u16) -> Result<Vec<u8>> {
+        let sample_bytes = if depth == 16 { 2 } else { 1 };
+        let want = plane_len * sample_bytes;
+        if self.bytes.len() != want {
             return Err(malformed(format!(
-                "RAW channel is {} byte(s), expected {plane_len}",
+                "RAW channel is {} byte(s), expected {want}",
                 self.bytes.len()
             )));
         }
-        Ok(self.bytes.clone())
+        if sample_bytes == 1 {
+            return Ok(self.bytes.clone());
+        }
+        Ok(self.bytes.chunks_exact(2).map(|s| s[0]).collect())
     }
 
     fn decode_rle(
@@ -305,5 +332,52 @@ fn malformed(detail: String) -> PsdError {
     PsdError::Malformed {
         section: "channel image data",
         detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 16-bit RAW reduces by the HIGH byte — the same convention the
+    /// merged composite reads, and the reason this one ships while RLE
+    /// does not: RAW's sample order is unambiguous, RLE's row-table
+    /// semantics for 16-bit are not.
+    #[test]
+    fn image_psd_layer_channel_data_raw_sixteen_bit_reduces_by_the_high_byte() {
+        let ch = ChannelData {
+            compression: Compression::Raw,
+            // Two big-endian 16-bit samples: 0xAABB, 0xCCDD.
+            bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        };
+        let plane = ch.decode(Container::Psd, 1, 2, 16).expect("16-bit RAW");
+        assert_eq!(plane, vec![0xAA, 0xCC]);
+    }
+
+    /// The length check counts SAMPLES, not bytes — a 16-bit plane that
+    /// is short must be a clean error, never a half-read image.
+    #[test]
+    fn image_psd_layer_channel_data_raw_sixteen_bit_length_is_checked_in_samples() {
+        let ch = ChannelData {
+            compression: Compression::Raw,
+            bytes: vec![0xAA, 0xBB],
+        };
+        assert!(ch.decode(Container::Psd, 1, 2, 16).is_err());
+        // …and the same bytes ARE a valid 2-pixel 8-bit plane.
+        assert!(ch.decode(Container::Psd, 1, 2, 8).is_ok());
+    }
+
+    /// 16-bit RLE stays refused, and the refusal cites its evidence
+    /// rather than reading as "nobody got to it".
+    #[test]
+    fn image_psd_layer_channel_data_rle_sixteen_bit_is_refused_with_its_reason() {
+        let ch = ChannelData {
+            compression: Compression::Rle,
+            bytes: vec![0; 16],
+        };
+        let err = ch.decode(Container::Psd, 1, 2, 16).expect_err("unverified");
+        let msg = err.to_string();
+        assert!(msg.contains("16-bit RLE"), "{msg}");
+        assert!(msg.contains("unverified"), "{msg}");
     }
 }

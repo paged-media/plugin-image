@@ -1671,6 +1671,17 @@ mod wasm {
             )));
         }
         let stack = LayerStack::from_psd_plates(&import).map_err(ingest_err)?;
+        // A 16-bit layered import reduced every plate, and the image the
+        // stack composites into inherits that fact — the panel's Depth
+        // row reads it from the image, so a layered open must not lose
+        // what the composite open already reported.
+        if import.depth_reduced {
+            IMAGES.with(|m| {
+                if let Some(i) = m.borrow_mut().get_mut(&image_handle) {
+                    i.depth_reduced = true;
+                }
+            });
+        }
         let n = stack.len();
         LAYERS.with(|l| {
             *l.borrow_mut() = Some(LayerDoc {

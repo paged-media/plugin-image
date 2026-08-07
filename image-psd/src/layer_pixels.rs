@@ -109,6 +109,11 @@ pub struct LayerPlate {
 pub struct LayerImport {
     pub width: u32,
     pub height: u32,
+    /// The source was 16 bits per channel and every plate was REDUCED to
+    /// 8. Reported for the same reason the composite reports it: a lossy
+    /// step the user can see stated is a different thing from one they
+    /// cannot.
+    pub depth_reduced: bool,
     /// BOTTOM-first, the order PSD stores them in and the order the
     /// layer stack composites in.
     pub layers: Vec<LayerPlate>,
@@ -131,9 +136,16 @@ impl PsdFile {
     /// of files this declines (and why declining is the right answer).
     pub fn layer_plates_rgba8(&self) -> Result<LayerImport> {
         let h = &self.header;
-        if h.depth != 8 {
+        // 16-bit is ACCEPTED and reduced, as the merged composite already
+        // is. The per-channel decode refuses 16-bit RLE on its own, with
+        // its own evidence, so a 16-bit RLE file still declines — but a
+        // 16-bit RAW one now imports its LAYERS instead of the whole file
+        // falling back to a flattened composite. The refusal that used to
+        // live here was broader than the actual limitation.
+        if h.depth != 8 && h.depth != 16 {
             return Err(PsdError::Unsupported(format!(
-                "layer import at depth {} (8-bit only; 16/32-bit is the M2 cast lane)",
+                "layer import at depth {} (8- and 16-bit only; 1-bit and 32-bit \
+                 float are separate lanes)",
                 h.depth
             )));
         }
@@ -205,6 +217,7 @@ impl PsdFile {
         Ok(LayerImport {
             width: cw,
             height: ch,
+            depth_reduced: h.depth == 16,
             layers,
         })
     }
