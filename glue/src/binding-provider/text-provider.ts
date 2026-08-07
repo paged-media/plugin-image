@@ -82,31 +82,42 @@ export const VALUED_PATHS: readonly PropertyPath[] = ["characterFontFamily"];
  * grows a style axis this row moves up and nothing else changes.
  */
 export const ABSENT_PATHS: readonly PropertyPath[] = [
-  // THE UNIT MISMATCH, and it is a genuine one rather than a shortcut.
+  // THE UNIT MISMATCH — a real one, but NOT for the reason first given
+  // here, and the correction matters because it changes what unblocks
+  // this row.
   //
-  // `characterFontSize` is a TYPOGRAPHIC size — the host binds it to a
-  // `PAGED_INPUT_LENGTH` widget, which formats in the document's length
-  // units (points). Raster type's size is `sizePx`: a count of PIXELS
-  // in the image raster. These are not the same quantity, and there is
-  // no conversion between them here, because the image model carries no
-  // DPI — the plugin has width, height and pixels, and nothing that
-  // says how big a pixel is.
+  // `characterFontSize` is a TYPOGRAPHIC size: the host binds it to a
+  // `PAGED_INPUT_LENGTH` widget and a length on the wire is a bare
+  // number whose unit is points BY CONVENTION (core has no unit type at
+  // all — `DocumentMeta.units` is hard-coded empty). Raster type's size
+  // is `sizePx`, a count of pixels in the image raster.
   //
-  // A frame-derived conversion would be worse than none: the same run
-  // would report a different "size" after the frame was scaled, while
-  // the underlying raster had not changed by one pixel.
+  // WHAT WAS WRONG: this comment claimed the conversion was impossible
+  // because "the image model carries no DPI". It does — under another
+  // name, in production, a few hundred lines away. `frameBox()` returns
+  // the frame's content box IN PAGE PT and the composite path computes
+  // `scale = min(box.w/width, box.h/height)`, which is points per
+  // pixel. Every submitted frame already uses it. A grep for "dpi"
+  // found nothing and I stopped there.
   //
-  // So serving it would put a pixel count into a control labelled in
-  // points — the plausible-looking-wrong failure this codebase keeps
-  // catching, and one a user could not detect by looking. It is owned
-  // and ABSENT instead, and the px control stays in the image panel
-  // where the unit is stated.
+  // Nor is the fit-dependence disqualifying, which was the second wrong
+  // reason. Scaling the frame really does change the type's physical
+  // size — that is a fact about placed rasters, not an artifact of the
+  // conversion, and Photoshop models exactly it.
   //
-  // THIS IS THE OPEN PRODUCT QUESTION, not a settled one: whether the
-  // Character panel's size field means "points, absolutely" or "the
-  // size unit of whatever you are editing". Photoshop takes the second
-  // reading. If paged does too, this row moves to VALUED_PATHS and the
-  // widget needs a unit that follows the provider.
+  // WHAT IS ACTUALLY UNRESOLVED is a PRODUCT question: does this field
+  // mean "points, absolutely" or "the size unit of whatever you are
+  // editing"? Under the first reading this row stays absent forever and
+  // px belongs only in the image panel. Under the second, the provider
+  // converts through the scale above and serves points (no contract
+  // change), or the seam grows a declared unit per path (a contract
+  // change, designed but deliberately unbuilt — the governing rule puts
+  // every other content type in the document-units family, so this axis
+  // has a population of one).
+  //
+  // Until that is answered, ABSENT is the honest position: it shows no
+  // value rather than a pixel count in a control labelled in points.
+  // The blocker is a decision, not a missing capability.
   "characterFontSize",
   "characterFontStyle",
   "characterLeading",

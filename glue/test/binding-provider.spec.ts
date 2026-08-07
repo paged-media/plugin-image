@@ -219,14 +219,15 @@ describe("the character provider", () => {
   });
 
   it("declines the FONT SIZE — the unit mismatch, asserted not assumed", () => {
-    // `characterFontSize` binds to a length widget that formats in
-    // document units; raster type's size is a pixel count, and the
-    // image model carries no DPI to convert with. Serving it would put
-    // pixels into a control labelled in points. It is owned-and-absent
-    // instead, which is a DIFFERENT claim from "not mine".
+    // `characterFontSize` binds to a length widget formatting in
+    // points; raster type measures in pixels. The conversion IS
+    // available (the composite path already computes points-per-pixel
+    // from the frame box) — what is unresolved is the PRODUCT question
+    // of what that field means. So this is owned-and-absent, a
+    // different claim from "not mine".
     //
-    // This test is here so the day someone adds an effective-resolution
-    // bridge, it fails and makes them state the decision.
+    // The test exists so that the day someone wires the bridge, it
+    // fails and makes them state the decision rather than inherit it.
     const { registry, bundle, handle } = boot();
     const text = registry
       .activeProviders()
