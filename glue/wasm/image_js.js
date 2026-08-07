@@ -1790,6 +1790,39 @@ export function straighten_crop_image(handle, x, y, w, h, degrees) {
     const ret = wasm.straighten_crop_image(handle, x, y, w, h, degrees);
     return ret;
 }
+
+/**
+ * RASTER TYPE: shape `text` with `font_bytes`, rasterize it, and
+ * paint it into the image at `(x, y)` in `rgba`.
+ *
+ * The glyph run becomes a `SelectionCoverage` and the paint is the
+ * ORDINARY masked solid fill — no new kernel and no new compositing
+ * path, because coverage is coverage. `(x, y)` is the run's
+ * BASELINE ORIGIN, which is where type is positioned from; the
+ * rasterizer reports its own ink offset and this places it.
+ *
+ * Returns the number of glyphs the font had no coverage for
+ * (`.notdef`), so a caller can say "3 characters are missing from
+ * this font" instead of silently dropping them.
+ * @param {number} handle
+ * @param {Uint8Array} font_bytes
+ * @param {string} text
+ * @param {number} size_px
+ * @param {number} x
+ * @param {number} y
+ * @param {Float32Array} color
+ * @returns {Promise<number>}
+ */
+export function text_paint(handle, font_bytes, text, size_px, x, y, color) {
+    const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayF32ToWasm0(color, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.text_paint(handle, ptr0, len0, ptr1, len1, size_px, x, y, ptr2, len2);
+    return ret;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -2485,12 +2518,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 347, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 486, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 382, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 521, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

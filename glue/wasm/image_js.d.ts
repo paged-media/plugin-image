@@ -808,6 +808,22 @@ export function selection_transfer(handle: number): boolean;
  */
 export function straighten_crop_image(handle: number, x: number, y: number, w: number, h: number, degrees: number): Promise<DecodedHandle>;
 
+/**
+ * RASTER TYPE: shape `text` with `font_bytes`, rasterize it, and
+ * paint it into the image at `(x, y)` in `rgba`.
+ *
+ * The glyph run becomes a `SelectionCoverage` and the paint is the
+ * ORDINARY masked solid fill — no new kernel and no new compositing
+ * path, because coverage is coverage. `(x, y)` is the run's
+ * BASELINE ORIGIN, which is where type is positioned from; the
+ * rasterizer reports its own ink offset and this places it.
+ *
+ * Returns the number of glyphs the font had no coverage for
+ * (`.notdef`), so a caller can say "3 characters are missing from
+ * this font" instead of silently dropping them.
+ */
+export function text_paint(handle: number, font_bytes: Uint8Array, text: string, size_px: number, x: number, y: number, color: Float32Array): Promise<number>;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -918,6 +934,7 @@ export interface InitOutput {
     readonly selection_to_paths: (a: number, b: number) => [number, number, number, number];
     readonly selection_transfer: (a: number) => [number, number, number];
     readonly straighten_crop_image: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+    readonly text_paint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => any;
     readonly qcms_enable_iccv4: () => void;
     readonly qcms_profile_precache_output_transform: (a: number) => void;
     readonly qcms_transform_data_bgra_out_lut: (a: number, b: number, c: number, d: number) => void;

@@ -31,6 +31,9 @@ image-cms = { path = "../image-cms" }
 image-graph = { path = "../image-graph" }
 half = { workspace = true }
 thiserror = { workspace = true }
+harfrust = "0.6"
+skrifa = "0.42"
+ab_glyph_rasterizer = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }

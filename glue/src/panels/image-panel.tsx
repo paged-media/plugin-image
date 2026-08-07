@@ -663,6 +663,82 @@ export function BrushSection({
   );
 }
 
+// ── raster type ──────────────────────────────────────────────────────
+
+/** The TYPE section — the string, face and size the type tool paints on
+ *  its next click. PURE, like the sections around it.
+ *
+ *  What it is NOT, stated here and in the panel: a text box. This paints
+ *  a run of shaped glyphs at a point and commits them as pixels. The
+ *  host's text frame is the live, editable, wrapping, styleable thing,
+ *  and duplicating it here would be the same mistake the Paths panel was
+ *  deliberately not built to make. */
+export function TypeSection({
+  type,
+  disabled,
+  onChange,
+}: {
+  type: { text: string; family: string; sizePx: number };
+  disabled: boolean;
+  onChange: (patch: Partial<{ text: string; family: string; sizePx: number }>) => void;
+}) {
+  return (
+    <>
+      <div style={sectionTitle}>Type</div>
+      <div style={row}>
+        <label htmlFor="pg-image-type-text">Text</label>
+        <input
+          id="pg-image-type-text"
+          type="text"
+          data-image-type-text
+          value={type.text}
+          disabled={disabled}
+          placeholder="type here, then click the canvas"
+          onChange={(e) => onChange({ text: e.target.value })}
+        />
+      </div>
+      <div style={row}>
+        <label htmlFor="pg-image-type-family">Face</label>
+        <input
+          id="pg-image-type-family"
+          type="text"
+          data-image-type-family
+          value={type.family}
+          disabled={disabled}
+          onChange={(e) => onChange({ family: e.target.value })}
+        />
+      </div>
+      <Slider
+        label="Size (px)"
+        min={4}
+        max={512}
+        step={1}
+        value={type.sizePx}
+        disabled={disabled}
+        onChange={(sizePx) => onChange({ sizePx })}
+      />
+      <div style={note} data-image-type-note>
+        Click the canvas to set the BASELINE and paint the run. Glyphs are
+        shaped by the font&apos;s own tables — joining, reordering, ligatures
+        and kerning — so scripts that need it come out right rather than
+        merely plausible. The colour is the brush colour.
+      </div>
+      <div style={note}>
+        Faces come from the DOCUMENT: only fonts it already embeds can be
+        used, and nothing is ever fetched from the network. A character with
+        no glyph in the chosen face is reported and left undrawn rather than
+        replaced with a box.
+      </div>
+      <div style={note}>
+        This paints PIXELS, not a text object — one run on one line, no
+        wrapping and no styles. For live, editable, wrapping text use the
+        host&apos;s text frame, which is a real text engine; a second one
+        living in here would drift from it.
+      </div>
+    </>
+  );
+}
+
 // ── retouching (clone / heal) ────────────────────────────────────────
 
 /** The RETOUCH section: the clone source, and the honest limit of the
@@ -2445,6 +2521,14 @@ export function makeImagePanel(session: ImageSession) {
           gpu={s.gpu}
           disabled={disabled}
           onChange={(patch) => session.setBrushParams(patch)}
+        />
+
+        {/* RASTER TYPE — the string, face and size the type tool paints
+            on its next click. */}
+        <TypeSection
+          type={s.type}
+          disabled={disabled}
+          onChange={(patch) => session.setType(patch)}
         />
 
         {/* RETOUCH — the clone/heal source and the healing brush's

@@ -189,6 +189,10 @@ export interface ImageSessionState {
    *  layers, or the honest reason the layered import was DECLINED and
    *  the flattened composite kept. Null for non-PSD sources. */
   layersNote: string | null;
+  /** RASTER TYPE settings. Session state rather than tool state: the
+   *  string and face survive between clicks, which is what makes setting
+   *  several runs of the same type usable. */
+  type: { text: string; family: string; sizePx: number };
   /** The clone/heal source anchor in IMAGE px, or null before one is
    *  set. Session state rather than stroke state: the anchor SURVIVES a
    *  stroke, which is what makes repeated retouching strokes usable. */
@@ -338,6 +342,21 @@ export interface ImageSession {
   /** PATH → SELECTION: read the selected vector element's anchors through
    *  the host, flatten its curves, and make it the selection. */
   selectionFromPath(): Promise<boolean>;
+  /** Update the type settings the tool reads on its next click. */
+  setType(p: Partial<{ text: string; family: string; sizePx: number }>): void;
+  /** RASTER TYPE: paint shaped, rasterized text into the active layer at
+   *  the BASELINE origin `point` (image px).
+   *
+   *  The font comes from the HOST — `assets.getFontFace` serves bytes the
+   *  document already embeds, never a network fetch — so a bundle
+   *  renders exactly the faces the document has and stays offline by
+   *  construction. */
+  paintText(
+    point: [number, number],
+    text: string,
+    family: string,
+    sizePx: number,
+  ): Promise<boolean>;
   /** Set the clone/heal anchor (the alt-click). Image px. */
   setCloneSource(point: [number, number]): void;
   /** Aligned: the source keeps a fixed offset from the cursor and tracks
@@ -547,6 +566,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     layers: EMPTY_LAYER_STACK,
     history: null,
     layersNote: null,
+    type: { text: "", family: "Helvetica", sizePx: 48 },
     cloneSource: null,
     channels: null,
     brushLibrary: null,
@@ -1927,6 +1947,63 @@ export function createImageSession(host: BundleHost): ImageSession {
       setStatus(
         `Selection loaded from a ${a.length}-anchor path ` +
           `(${flat.length} points after flattening).`,
+      );
+      return true;
+    },
+
+    setType(p) {
+      state.type = { ...state.type, ...p };
+      emit();
+    },
+
+    async paintText([x, y], text, family, sizePx) {
+      const src = state.source;
+      if (!engine || !src) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      if (!host.supports("assets.fonts@1")) {
+        // PROBED, not assumed. Without the probe an unwired asset door
+        // and a font the document does not carry look identical, and
+        // they need different sentences.
+        setStatus("This host serves no fonts (assets.fonts@1).");
+        return false;
+      }
+      const face = await host.assets.getFontFace(family);
+      if (!face) {
+        setStatus(
+          `The document carries no bytes for "${family}" — type renders ` +
+            "the faces the document already embeds, never a web fetch.",
+        );
+        return false;
+      }
+      state.busy = true;
+      emit();
+      let missing = 0;
+      try {
+        missing = await engine.textPaint(
+          src.handle,
+          face.bytes,
+          text,
+          sizePx,
+          x,
+          y,
+          state.brush.color,
+        );
+      } catch (err) {
+        setStatus(`Type failed: ${err instanceof Error ? err.message : err}`);
+        state.busy = false;
+        emit();
+        return false;
+      }
+      refreshSourceReadout();
+      state.busy = false;
+      setStatus(
+        missing > 0
+          ? `Type set in ${family} — ${missing} character${
+              missing === 1 ? " has" : "s have"
+            } no glyph in this font and ${missing === 1 ? "was" : "were"} not drawn.`
+          : `Type set in ${family}.`,
       );
       return true;
     },

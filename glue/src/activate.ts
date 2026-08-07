@@ -36,6 +36,7 @@ import { makeImagePanel } from "./panels/image-panel";
 import { makeCropGesture } from "./crop-tool";
 import { makeSelectionGesture } from "./selection-tool";
 import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
+import { makeTypeGesture } from "./type-tool";
 
 const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
@@ -48,6 +49,7 @@ const PENCIL_TOOL_ID = "media.paged.image.tool.pencil";
 const ERASER_TOOL_ID = "media.paged.image.tool.eraser";
 const CLONE_TOOL_ID = "media.paged.image.tool.clone";
 const HEAL_TOOL_ID = "media.paged.image.tool.heal";
+const TYPE_TOOL_ID = "media.paged.image.tool.type";
 
 export function activate(host: BundleHost): BundleHandle {
   const session = createImageSession(host);
@@ -432,6 +434,40 @@ export function activate(host: BundleHost): BundleHandle {
     handler: () => {
       host.shell.openPanel(PANEL_ID);
       session.selectionFromChannel("luma");
+    },
+  });
+
+  // ── RASTER TYPE ──
+  //
+  // A click sets the BASELINE origin and the panel's Type section
+  // supplies the string, family and size. Deliberately a click and not a
+  // drag: this paints a run at a point, it does not author a text BOX —
+  // the host's text frame is the thing that does that, and it is better
+  // at it.
+  //
+  // SHORTCUT: `shift+z`, the only free slot in the shift register. `t`
+  // (Photoshop's type key) is taken by the host's own type tool, and the
+  // free single letters (d/i/k/w/x) are all Photoshop-meaningful for
+  // something else — leaving them free is politer than taking one for a
+  // plugin tool. Verified against the editor built-ins and every plugin
+  // manifest at pick time, as INV-REG-1 requires; the first pick was
+  // `shift+u` and it COLLIDED, which the check caught.
+  contributeTool(host, {
+    id: TYPE_TOOL_ID,
+    title: "Type (raster)",
+    icon: "tool-type",
+    group: TYPE_TOOL_ID,
+    section: "drawType",
+    shortcut: "shift+z",
+    gesture: () => makeTypeGesture(host, session),
+  });
+
+  host.contribute.command({
+    id: "media.paged.image.command.setType",
+    title: "Set type (image)",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
     },
   });
 

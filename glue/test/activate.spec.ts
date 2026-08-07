@@ -74,6 +74,7 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.selectionToPath",
       "media.paged.image.command.pathToSelection",
       "media.paged.image.command.channelToSelection",
+      "media.paged.image.command.setType",
       "media.paged.image.command.contentAwareFill",
       "media.paged.image.command.selectAll",
       "media.paged.image.command.deselect",
@@ -92,6 +93,7 @@ describe("imageBundle.activate", () => {
       // The retouching pair — the brush with a sampled paint layer.
       "media.paged.image.tool.clone",
       "media.paged.image.tool.heal",
+      "media.paged.image.tool.type",
     ]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);
   });

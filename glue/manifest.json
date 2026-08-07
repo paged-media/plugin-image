@@ -16,7 +16,8 @@
       "overlay"
     ],
     "assets": [
-      "images"
+      "images",
+      "fonts"
     ],
     "network": false,
     "workers": {
@@ -48,6 +49,7 @@
       "media.paged.image.command.fillSelection",
       "media.paged.image.command.fillNoise",
       "media.paged.image.command.contentAwareFill",
+      "media.paged.image.command.setType",
       "media.paged.image.command.applyToFile",
       "media.paged.image.command.saveToFile",
       "media.paged.image.command.loadBrushLibrary",
@@ -73,7 +75,8 @@
       "media.paged.image.tool.pencil",
       "media.paged.image.tool.eraser",
       "media.paged.image.tool.clone",
-      "media.paged.image.tool.heal"
+      "media.paged.image.tool.heal",
+      "media.paged.image.tool.type"
     ],
     "importers": [
       "media.paged.image.importer.raster"

@@ -119,9 +119,9 @@ use image_kernels::families::cast::{
 use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
 use image_kernels::families::gen::{
     GenAngularGradientParams, GenDiamondGradientParams, GenLinearGradientParams, GenNoiseParams,
-    GenRadialGradientParams, GenReflectedGradientParams, GEN_ANGULAR_GRADIENT,
+    GenRadialGradientParams, GenReflectedGradientParams, GenSolidParams, GEN_ANGULAR_GRADIENT,
     GEN_DIAMOND_GRADIENT, GEN_LINEAR_GRADIENT, GEN_NOISE, GEN_RADIAL_GRADIENT,
-    GEN_REFLECTED_GRADIENT,
+    GEN_REFLECTED_GRADIENT, GEN_SOLID,
 };
 
 use crate::ingest::{DecodedImage, IngestError};
@@ -172,6 +172,12 @@ pub enum FillSpec {
     },
     /// Deterministic monochrome noise (`hash(x, y, seed) · amount`).
     Noise { amount: f32, seed: u32 },
+    /// One colour everywhere, through `gen.solid` — the generator the
+    /// paint lane already dispatches. Added for RASTER TYPE, whose glyph
+    /// run is a coverage field over a single colour; expressing it as a
+    /// two-stop gradient with identical stops would produce the same
+    /// pixels and read as a bug.
+    Solid { color: [f32; 4] },
 }
 
 /// The pixel-space frame the gradient geometry is derived from: the
@@ -302,6 +308,18 @@ pub async fn fill_rgba8(
         FillSpec::Noise { amount, seed } => {
             let p = GenNoiseParams::new(0, 0, seed, amount);
             dispatch_unary(ctx, &GEN_NOISE, p.as_bytes(), &src_f16, w, h).await?
+        }
+        FillSpec::Solid { color } => {
+            // Premultiplied, like every other colour handed to a
+            // generator here.
+            let c = [
+                color[0] * color[3],
+                color[1] * color[3],
+                color[2] * color[3],
+                color[3],
+            ];
+            let p = GenSolidParams::new(0, 0, c[0], c[1], c[2], c[3]);
+            dispatch_unary(ctx, &GEN_SOLID, p.as_bytes(), &src_f16, w, h).await?
         }
     };
 

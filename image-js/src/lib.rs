@@ -72,6 +72,7 @@ pub mod paths;
 pub mod saveback;
 pub mod selection;
 pub mod stroke;
+pub mod text;
 
 /// The frozen kernel ABI version this artifact was built against.
 pub fn abi_version() -> u32 {
@@ -1397,6 +1398,84 @@ mod wasm {
         land_fill(img.width, img.height, out, layered).await
     }
 
+    /// RASTER TYPE: shape `text` with `font_bytes`, rasterize it, and
+    /// paint it into the image at `(x, y)` in `rgba`.
+    ///
+    /// The glyph run becomes a `SelectionCoverage` and the paint is the
+    /// ORDINARY masked solid fill — no new kernel and no new compositing
+    /// path, because coverage is coverage. `(x, y)` is the run's
+    /// BASELINE ORIGIN, which is where type is positioned from; the
+    /// rasterizer reports its own ink offset and this places it.
+    ///
+    /// Returns the number of glyphs the font had no coverage for
+    /// (`.notdef`), so a caller can say "3 characters are missing from
+    /// this font" instead of silently dropping them.
+    #[wasm_bindgen]
+    pub async fn text_paint(
+        handle: u32,
+        font_bytes: &[u8],
+        text: &str,
+        size_px: f32,
+        x: f32,
+        y: f32,
+        color: Vec<f32>,
+    ) -> Result<usize, JsValue> {
+        if color.len() != 4 {
+            return Err(JsValue::from_str(
+                "text colour must be 4 floats (straight RGBA in [0,1])",
+            ));
+        }
+        let run = crate::text::rasterize_run(font_bytes, text, size_px).ok_or_else(|| {
+            JsValue::from_str(
+                "could not shape this text: the font did not parse, or the size \
+                 is not a positive finite number",
+            )
+        })?;
+        if run.width == 0 || run.height == 0 {
+            // Legal and empty — whitespace, or every glyph missing. The
+            // caller still gets the missing count, which is the useful
+            // half of the answer.
+            return Ok(run.missing);
+        }
+
+        let (img, ctx, _sel, layered) = fill_prelude(handle)?;
+        // Place the run's coverage on a canvas-extent field. Everything
+        // outside it is zero, which is exactly "do not paint here".
+        let (iw, ih) = (img.width as i64, img.height as i64);
+        let mut field = vec![0u8; (iw as usize) * (ih as usize)];
+        let ox = x.round() as i64 + run.dx as i64;
+        let oy = y.round() as i64 + run.dy as i64;
+        for ry in 0..run.height as i64 {
+            let py = oy + ry;
+            if py < 0 || py >= ih {
+                continue;
+            }
+            for rx in 0..run.width as i64 {
+                let px = ox + rx;
+                if px < 0 || px >= iw {
+                    continue;
+                }
+                field[(py * iw + px) as usize] =
+                    run.coverage[(ry * run.width as i64 + rx) as usize];
+            }
+        }
+        let coverage = SelectionCoverage::from_data(img.width, img.height, field)
+            .ok_or_else(|| JsValue::from_str("text coverage did not match the image"))?;
+
+        let out = fill_rgba8(
+            &ctx,
+            &img,
+            &FillSpec::Solid {
+                color: [color[0], color[1], color[2], color[3]],
+            },
+            Some(std::sync::Arc::new(coverage)),
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        land_fill(img.width, img.height, out, layered).await?;
+        Ok(run.missing)
+    }
+
     /// CONTENT-AWARE FILL: synthesise the selection from the rest of the
     /// image (exemplar-based inpainting).
     ///
@@ -2017,7 +2096,10 @@ mod wasm {
         use half::f16;
         use image_kernels::families::resample::{ResampleParams, RESAMPLE_MITCHELL};
 
-        if !(scale > 0.0) || scale > 16.0 {
+        // `is_finite` first, so NaN is refused by NAME rather than by the
+        // side effect of failing `> 0.0`. Same verdict, but a reader no
+        // longer has to reconstruct why the comparison was negated.
+        if !scale.is_finite() || scale <= 0.0 || scale > 16.0 {
             return Err(JsValue::from_str(
                 "smart re-render scale must be in (0, 16]",
             ));

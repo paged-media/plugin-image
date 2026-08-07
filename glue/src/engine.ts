@@ -887,6 +887,21 @@ export interface ImageEngine {
    *  not a dispatch; the result lands through the same journaled layer
    *  write as any other fill. Throws without a selection. */
   fillContentAware(handle: number): Promise<DecodedInfo>;
+  /** RASTER TYPE — shape `text` with `fontBytes`, rasterize it, and paint
+   *  it at the BASELINE origin `(x, y)` in image px. Resolves the number
+   *  of glyphs the font had no coverage for, so a caller can report
+   *  "3 characters are missing from this font" rather than dropping them
+   *  silently. The run composites as an ordinary masked solid fill: a
+   *  glyph run is a coverage field, so type needed no new kernel. */
+  textPaint(
+    handle: number,
+    fontBytes: Uint8Array,
+    text: string,
+    sizePx: number,
+    x: number,
+    y: number,
+    color: Rgba01,
+  ): Promise<number>;
   /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
    *  image as tightly packed RGBA8. Edge tiles are clamped to the image
    *  extent; a fully-outside window returns an empty buffer. The honest
@@ -1196,6 +1211,15 @@ export interface ImageWasmModule {
     seed: number,
   ): Promise<DecodedHandleWasm>;
   fill_content_aware(handle: number): Promise<DecodedHandleWasm>;
+  text_paint(
+    handle: number,
+    fontBytes: Uint8Array,
+    text: string,
+    sizePx: number,
+    x: number,
+    y: number,
+    color: Float32Array,
+  ): Promise<number>;
   encode_image(
     rgba: Uint8Array,
     width: number,
@@ -1517,6 +1541,16 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       h.free();
       return info;
     },
+    textPaint: (handle, fontBytes, text, sizePx, x, y, color) =>
+      wasm.text_paint(
+        handle,
+        fontBytes,
+        text,
+        sizePx,
+        x,
+        y,
+        Float32Array.from(color),
+      ),
     async fillContentAware(handle) {
       const h = await wasm.fill_content_aware(handle);
       const info = {
