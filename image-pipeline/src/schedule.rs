@@ -547,8 +547,19 @@ fn read_pixel_rgba(
             };
             Ok([f(0), f(1), f(2), f(3)])
         }
+        // F16 is the WORKING depth, so this is a widen and not a cast —
+        // the mirror of the f16 sink, and the reason a caller that is
+        // already holding working pixels (the layer fold) can run a
+        // chain without dropping to 8 bits and back.
+        (ChannelLayout::Rgba, SampleDepth::F16) => {
+            let f = |i: usize| {
+                half::f16::from_le_bytes([raw[off + i * 2], raw[off + i * 2 + 1]]).to_f32()
+            };
+            Ok([f(0), f(1), f(2), f(3)])
+        }
         other => Err(PipelineError::Graph(format!(
-            "M0 decode bridge handles RGBA U8/F32 only, got {other:?} (cast lane is M1)"
+            "M0 decode bridge handles RGBA U8/F16/F32 only, got {other:?} \
+             (other casts are the M1 lane)"
         ))),
     }
 }

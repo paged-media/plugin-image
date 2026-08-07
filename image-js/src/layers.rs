@@ -138,7 +138,7 @@ use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
 use image_kernels::KernelDef;
 
 use crate::fill::{f16_to_rgba8, rgba8_to_f16};
-use crate::ingest::{adjust_rgba8, AdjustParams, DecodedImage, IngestError};
+use crate::ingest::{AdjustParams, IngestError};
 use crate::stroke::blend_kernel;
 
 /// How deeply groups may nest. Each open level parks a full-canvas
@@ -1444,23 +1444,23 @@ impl LayerStack {
                 None
             };
             if let Some(params) = layer.adjust_params() {
-                let straight8 = f16_to_rgba8(&unpremultiply(ctx, &acc, w, h).await?);
-                let image = DecodedImage {
-                    width: w,
-                    height: h,
-                    rgba: Arc::from(straight8.into_boxed_slice()),
-                    // Post-ingest pixels: the display transform already ran.
-                    display: crate::display::DisplayTreatment::AssumedSrgb,
-                    depth_reduced: false,
-                };
-                let adjusted = adjust_rgba8(
+                // STAYS IN f16. This used to unpremultiply, drop to
+                // 8-bit, adjust, and lift back — quantizing the backdrop
+                // TWICE per adjustment layer. Three stacked adjustments
+                // meant three round trips through 256 levels, which is
+                // where banding in a gradient actually came from; the
+                // kernels were always f16 and only this bridge was not.
+                let straight = unpremultiply(ctx, &acc, w, h).await?;
+                let adjusted = crate::ingest::adjust_f16(
                     ctx,
-                    &image,
+                    w,
+                    h,
+                    &straight,
                     params,
                     effective_coverage(layer.live_mask(), clip, w, h),
                 )
                 .await?;
-                acc = premultiply(ctx, &rgba8_to_f16(&adjusted), w, h).await?;
+                acc = premultiply(ctx, &adjusted, w, h).await?;
                 continue;
             }
 
@@ -3027,6 +3027,92 @@ mod tests {
             out.to_vec(),
             base.to_vec(),
             "hiding an ancestor hides everything nested inside it"
+        );
+    }
+
+    // ── precision: the fold stays in f16 ─────────────────────────────
+
+    /// THE POINT, measured. A stack of adjustment layers used to quantize
+    /// to 8 bits between each one, so a smooth ramp came back with fewer
+    /// distinct levels than it went in with. Banding, literally counted.
+    ///
+    /// Four stacked adjustments over a 256-level ramp: the f16 fold must
+    /// preserve more distinct output levels than an 8-bit round trip per
+    /// layer could. The assertion is a LEVEL COUNT rather than a
+    /// tolerance, because that is what banding actually is.
+    #[test]
+    fn image_editor_layers_stacked_adjustments_do_not_band_the_backdrop() {
+        let Some(ctx) = device() else { return };
+        let (w, h) = (256u32, 4u32);
+        // A horizontal ramp: every one of the 256 levels appears.
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for x in 0..w {
+                let v = x as u8;
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut s =
+            LayerStack::from_image(w, h, Arc::from(rgba.into_boxed_slice())).expect("valid");
+
+        // COMPRESS then EXPAND. This is the shape that exposes
+        // quantization: squeezing the ramp into a fraction of the range
+        // and pulling it back is lossless in f16 and irreversibly
+        // destructive through 8 bits, because the compressed state has
+        // fewer than 256 distinct values to round to.
+        //
+        // Four gentle nudges did NOT expose it — a mutation check
+        // (reinstating the 8-bit round trip) still passed, because a
+        // small shift on already-8-bit values collapses almost nothing.
+        // The test had to measure the mechanism, not merely exercise it.
+        s.add_adjustment(
+            "Compress",
+            AdjustParams {
+                contrast: 0.1,
+                ..Default::default()
+            },
+        );
+        s.add_adjustment(
+            "Expand",
+            AdjustParams {
+                contrast: 10.0,
+                ..Default::default()
+            },
+        );
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+
+        let mut seen = [false; 256];
+        for px in out.chunks_exact(4) {
+            seen[px[0] as usize] = true;
+        }
+        let levels = seen.iter().filter(|b| **b).count();
+        // An 8-bit round trip per layer collapses neighbouring levels on
+        // every pass; staying in f16 keeps them apart. The bar is set
+        // well below the ideal so it measures the mechanism, not the
+        // exact rounding of one GPU.
+        assert!(
+            levels > 120,
+            "a compress/expand pair kept only {levels} distinct levels of 256 — \
+             the fold is quantizing between layers"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_an_identity_adjustment_is_still_exactly_the_identity() {
+        // The f16 path must not perturb pixels it was asked to leave
+        // alone. This is the guard against the new sink or source bridge
+        // quietly changing the working semantics — a transfer or
+        // premultiply mistake there would show up here as drift, not as
+        // a crash.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+        s.add_adjustment("Nothing", AdjustParams::default());
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("identity");
+        assert_eq!(
+            out.to_vec(),
+            base.to_vec(),
+            "an identity adjustment through the f16 path changes nothing"
         );
     }
 }

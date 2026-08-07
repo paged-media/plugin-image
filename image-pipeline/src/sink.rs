@@ -108,9 +108,14 @@ pub(crate) fn to_encoder(
     fmt: PixelFormat,
     selection: Option<&PipelineSelection>,
 ) -> Result<EncodedStats, PipelineError> {
-    if fmt.depth != SampleDepth::U8 {
+    // U8 or F16. F16 is the working depth itself, so that path is a
+    // verbatim write-out rather than a cast — it exists so a caller that
+    // is going to keep compositing (the layer fold) does not have to
+    // quantize to 8 bits and back on the way through. Every OTHER depth
+    // is still the M1 cast lane's job.
+    if !matches!(fmt.depth, SampleDepth::U8 | SampleDepth::F16) {
         return Err(PipelineError::Graph(format!(
-            "to_encoder is U8 only (got {:?}); the depth cast lane is M1",
+            "to_encoder is U8 or F16 (got {:?}); other depths are the M1 cast lane",
             fmt.depth
         )));
     }
@@ -172,9 +177,14 @@ pub(crate) async fn to_encoder_async(
     fmt: PixelFormat,
     selection: Option<&PipelineSelection>,
 ) -> Result<EncodedStats, PipelineError> {
-    if fmt.depth != SampleDepth::U8 {
+    // U8 or F16. F16 is the working depth itself, so that path is a
+    // verbatim write-out rather than a cast — it exists so a caller that
+    // is going to keep compositing (the layer fold) does not have to
+    // quantize to 8 bits and back on the way through. Every OTHER depth
+    // is still the M1 cast lane's job.
+    if !matches!(fmt.depth, SampleDepth::U8 | SampleDepth::F16) {
         return Err(PipelineError::Graph(format!(
-            "to_encoder is U8 only (got {:?}); the depth cast lane is M1",
+            "to_encoder is U8 or F16 (got {:?}); other depths are the M1 cast lane",
             fmt.depth
         )));
     }
@@ -254,7 +264,14 @@ fn convert_strip(
                 let ox = (work.x - strip_roi.x) as usize + rx;
                 let oy = (work.y - strip_roi.y) as usize + ry;
                 let op = (oy * strip_roi.w as usize + ox) * out_bpp;
-                write_u8_pixel(&mut out[op..op + out_bpp], rgba, fmt.channels, out_channels);
+                match fmt.depth {
+                    SampleDepth::F16 => {
+                        write_f16_pixel(&mut out[op..op + out_bpp], rgba, out_channels)
+                    }
+                    _ => {
+                        write_u8_pixel(&mut out[op..op + out_bpp], rgba, fmt.channels, out_channels)
+                    }
+                }
             }
         }
     }
@@ -269,6 +286,22 @@ fn read_working_rgba(bytes: &[u8], off: usize) -> [f32; 4] {
         *slot = f16::from_bits(u16::from_le_bytes([bytes[o], bytes[o + 1]])).to_f32();
     }
     px
+}
+
+/// Write a working pixel back out as f16 — the working depth, so this
+/// quantizes nothing.
+///
+/// Deliberately the SAME semantics as [`write_u8_pixel`] minus the
+/// `*255` round: no transfer conversion, no unpremultiply, alpha kept
+/// for alpha-carrying layouts. The point of this path is "identical
+/// result, more precision", and any semantic difference here would be
+/// the one failure that does not announce itself.
+fn write_f16_pixel(dst: &mut [u8], rgba: [f32; 4], out_channels: usize) {
+    for c in 0..out_channels.min(4) {
+        let b = f16::from_f32(rgba[c]).to_le_bytes();
+        dst[c * 2] = b[0];
+        dst[c * 2 + 1] = b[1];
+    }
 }
 
 /// Convert a working rgba f32 pixel to the requested U8 layout. The

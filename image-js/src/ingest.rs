@@ -508,6 +508,20 @@ const RGBA8: PixelFormat = PixelFormat {
     space: ColorSpaceRef::Named(NamedSpace::LinearSrgb),
 };
 
+/// [`RGBA8`]'s f16 twin — the SAME straight, linear space, differing
+/// only in depth.
+///
+/// It exists so the layer fold can run an adjustment chain without
+/// quantizing to 8 bits on the way in and again on the way out. Every
+/// other field is copied deliberately rather than re-derived: a
+/// different transfer or alpha mode here would not fail, it would
+/// produce a plausible-looking WRONG image, which is the failure mode
+/// this whole crate is arranged to avoid.
+const RGBA16F: PixelFormat = PixelFormat {
+    depth: SampleDepth::F16,
+    ..RGBA8
+};
+
 /// Decode PSD / PNG / JPEG bytes (sniffed by magic) to straight RGBA8.
 /// The honest M4 subset: what the codec adapters + the PSD merged-
 /// composite decode carry today — 8-bit, non-CMYK. Everything else is a
@@ -765,6 +779,282 @@ fn apply_orientation(rgba: Vec<u8>, w: u32, h: u32, o: Orientation) -> (Vec<u8>,
 /// multi-stage chain compounds slightly differently than one final blend
 /// of the fully adjusted image — the standard "each op runs through the
 /// selection" semantics; {0,1} regions are unaffected by the difference.
+/// The adjustment chain over STRAIGHT rgba16float, in and out.
+///
+/// # Why this exists
+///
+/// The layer fold's accumulator is f16. Running an adjustment layer used
+/// to mean f16 → 8-bit → adjust → 8-bit → f16, which quantized the
+/// backdrop TWICE per adjustment layer. In a non-destructive stack —
+/// exactly the thing the spine built for — three stacked adjustments
+/// meant three round trips through 256 levels, and that is where banding
+/// in a gradient actually comes from. The kernels were always f16; only
+/// the bridge was not.
+///
+/// # The one stage that still quantizes, and why
+///
+/// A CURVE is a 256-entry table. Applying it quantizes its input by
+/// construction, whatever the buffer's depth — so the curve stage is
+/// applied on the f16 values by the same table, and the honest statement
+/// is that a curve is 8-bit-precise while everything around it is not.
+/// Skipping the quantization there would mean inventing an interpolation
+/// the panel's LUT does not define.
+pub async fn adjust_f16(
+    ctx: &GpuContext,
+    width: u32,
+    height: u32,
+    straight_f16: &[u8],
+    params: &AdjustParams,
+    selection: Option<Arc<SelectionCoverage>>,
+) -> Result<Vec<u8>, IngestError> {
+    if params.is_identity() {
+        return Ok(straight_f16.to_vec());
+    }
+    let mut pixels = if params.has_gpu_stage() {
+        let src = RawSource::new(width, height, RGBA16F, straight_f16.to_vec())
+            .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+        let image = DecodedImage {
+            width,
+            height,
+            // Unused by `build_adjust_chain` — it reads only the params.
+            rgba: Arc::from(Vec::new().into_boxed_slice()),
+            display: crate::display::DisplayTreatment::AssumedSrgb,
+            depth_reduced: false,
+        };
+        let _ = &image;
+        let mut pipe = Pipeline::new();
+        pipe.set_selection(selection.clone());
+        let node = pipe.source(Box::new(src));
+        let node = build_adjust_chain(&mut pipe, node, params);
+        let roi = Region::new(0, 0, width, height);
+        let mut target = RawTarget::new();
+        pipe.to_encoder_async(node, roi, ctx, &mut target, RGBA16F)
+            .await
+            .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+        target.into_pixels()
+    } else {
+        straight_f16.to_vec()
+    };
+
+    // The curve, on f16 values, by the same 256-entry table. It
+    // quantizes its own stage — a table has 256 entries whatever the
+    // buffer holds — and leaves every other stage's precision intact,
+    // which is the whole gain.
+    if let Some(lut) = &params.curve_lut {
+        apply_curve_lut_f16(&mut pixels, lut, selection.as_deref(), width, height);
+    }
+    Ok(pixels)
+}
+
+/// A 256-entry tone LUT over straight rgba16float RGB (alpha untouched),
+/// optionally masked by the same coverage the GPU stages honour.
+fn apply_curve_lut_f16(
+    pixels: &mut [u8],
+    lut: &[u8; 256],
+    selection: Option<&SelectionCoverage>,
+    width: u32,
+    height: u32,
+) {
+    for (i, texel) in pixels.chunks_exact_mut(8).enumerate() {
+        let cov = match selection {
+            Some(c) => {
+                let x = (i as u32) % width;
+                let y = (i as u32) / width;
+                if y >= height {
+                    continue;
+                }
+                f32::from(c.coverage_at(x, y)) / 255.0
+            }
+            None => 1.0,
+        };
+        if cov <= 0.0 {
+            continue;
+        }
+        for ch in 0..3 {
+            let o = ch * 2;
+            let v = half::f16::from_le_bytes([texel[o], texel[o + 1]]).to_f32();
+            let idx = (v.clamp(0.0, 1.0) * 255.0).round() as usize;
+            let mapped = f32::from(lut[idx.min(255)]) / 255.0;
+            let out = v + (mapped - v) * cov;
+            let b = half::f16::from_f32(out).to_le_bytes();
+            texel[o] = b[0];
+            texel[o + 1] = b[1];
+        }
+    }
+}
+
+/// THE adjustment chain, built once and shared by both depths.
+///
+/// Extracted when the f16 path was added, and extracted rather than
+/// copied for the obvious reason: two transcriptions of a thirteen-stage
+/// ordered chain drift, and the drift would show up as an 8-bit preview
+/// that does not match its own 16-bit composite.
+fn build_adjust_chain(
+    pipe: &mut Pipeline,
+    node: image_pipeline::NodeId,
+    params: &AdjustParams,
+) -> image_pipeline::NodeId {
+    let mut node = node;
+    if params.exposure_ev != 0.0 {
+        node = pipe.apply(
+            node,
+            &ADJUST_EXPOSURE,
+            Arc::<[u8]>::from(AdjustExposureParams::new(params.exposure_ev).as_bytes()),
+        );
+    }
+    if params.temp != 0.0 || params.tint != 0.0 {
+        node = pipe.apply(
+            node,
+            &ADJUST_WHITE_BALANCE,
+            Arc::<[u8]>::from(AdjustWhiteBalanceParams::new(params.temp, params.tint).as_bytes()),
+        );
+    }
+    if !params.levels.is_identity() {
+        let l = &params.levels;
+        node = pipe.apply(
+            node,
+            &ADJUST_LEVELS,
+            Arc::<[u8]>::from(
+                AdjustLevelsParams::new(l.in_black, l.in_white, l.gamma, l.out_black, l.out_white)
+                    .as_bytes(),
+            ),
+        );
+    }
+    // 4 — per-channel levels (the composite output range stays on
+    // stage 3; this one is the input/gamma remap per r, g, b).
+    if !params.levels_rgb.is_identity() {
+        let l = &params.levels_rgb;
+        node = pipe.apply(
+            node,
+            &ADJUST_LEVELS_RGB,
+            Arc::<[u8]>::from(AdjustLevelsRgbParams::new(l.r, l.g, l.b).as_bytes()),
+        );
+    }
+    if params.brightness != 0.0 || params.contrast != 1.0 {
+        node = pipe.apply(
+            node,
+            &ADJUST_BRIGHTNESS_CONTRAST,
+            Arc::<[u8]>::from(
+                AdjustBrightnessContrastParams::new(params.brightness, params.contrast).as_bytes(),
+            ),
+        );
+    }
+    // 6, 7, 8 — the colour-grading trio.
+    if !params.color_balance.is_identity() {
+        let c = &params.color_balance;
+        node = pipe.apply(
+            node,
+            &ADJUST_COLOR_BALANCE,
+            Arc::<[u8]>::from(
+                AdjustColorBalanceParams::new(c.shadows, c.midtones, c.highlights).as_bytes(),
+            ),
+        );
+    }
+    if !params.photo_filter.is_identity() {
+        let f = &params.photo_filter;
+        node = pipe.apply(
+            node,
+            &ADJUST_PHOTO_FILTER,
+            Arc::<[u8]>::from(
+                AdjustPhotoFilterParams::new(f.color, f.density, f.preserve_luminosity).as_bytes(),
+            ),
+        );
+    }
+    if !params.channel_mixer.is_identity() {
+        let m = &params.channel_mixer;
+        node = pipe.apply(
+            node,
+            &ADJUST_CHANNEL_MIXER,
+            Arc::<[u8]>::from(AdjustChannelMixerParams::new(m.r, m.g, m.b).as_bytes()),
+        );
+    }
+    // 9 — vibrance BEFORE the global saturation (it reads the
+    // still-unsaturated chroma to weight its own boost). The kernel's
+    // second term is the global saturation offset; we keep it 0 so
+    // stage 10 stays the single global control.
+    if params.vibrance != 0.0 {
+        node = pipe.apply(
+            node,
+            &ADJUST_VIBRANCE,
+            Arc::<[u8]>::from(AdjustVibranceParams::new(params.vibrance, 0.0).as_bytes()),
+        );
+    }
+    if params.saturation != 1.0 {
+        node = pipe.apply(
+            node,
+            &ADJUST_SATURATION,
+            Arc::<[u8]>::from(AdjustSaturationParams::new(params.saturation).as_bytes()),
+        );
+    }
+    // 11, 12, 13 — the range-destroying stages, LAST among the point
+    // adjustments (posterize/threshold quantize, so anything after
+    // them would work on a collapsed range).
+    if params.black_white.enabled {
+        let w = params.black_white.weights;
+        node = pipe.apply(
+            node,
+            &ADJUST_BLACK_WHITE,
+            Arc::<[u8]>::from(
+                AdjustBlackWhiteParams::new(w[0], w[1], w[2], w[3], w[4], w[5]).as_bytes(),
+            ),
+        );
+    }
+    if let Some(levels) = params.posterize {
+        node = pipe.apply(
+            node,
+            &ADJUST_POSTERIZE,
+            Arc::<[u8]>::from(AdjustPosterizeParams::new(levels).as_bytes()),
+        );
+    }
+    if let Some(t) = params.threshold {
+        node = pipe.apply(
+            node,
+            &ADJUST_THRESHOLD,
+            Arc::<[u8]>::from(AdjustThresholdParams::new(t).as_bytes()),
+        );
+    }
+    // FILTER stages (first wasm reach for the registered T1/T2
+    // kernels — same registry-driven dispatch, nothing new): hue
+    // rotation, per-color invert, separable Gaussian blur, and
+    // unsharp masking (the classic a + amount·(a − blur(a)) blend —
+    // CONV_UNSHARP is the 2-input point kernel; its blur input is a
+    // fixed σ1.5 Gaussian of the current node).
+    if params.hue_degrees != 0.0 {
+        node = pipe.apply(
+            node,
+            &ADJUST_HUE_ROTATE,
+            Arc::<[u8]>::from(AdjustHueRotateParams::new(params.hue_degrees).as_bytes()),
+        );
+    }
+    if params.invert {
+        node = pipe.apply(
+            node,
+            &ADJUST_INVERT_RGB,
+            Arc::<[u8]>::from(AdjustInvertRgbParams::new().as_bytes()),
+        );
+    }
+    if params.blur_sigma > 0.0 {
+        let sigma = params.blur_sigma;
+        let radius = (sigma * 3.0).ceil().min(f32::from(GAUSSIAN_MAX_RADIUS)) as u32;
+        let p = Arc::<[u8]>::from(ConvGaussianParams::new(sigma, radius).as_bytes());
+        node = pipe.apply(node, &CONV_GAUSSIAN_H, Arc::clone(&p));
+        node = pipe.apply(node, &CONV_GAUSSIAN_V, p);
+    }
+    if params.sharpen_amount > 0.0 {
+        let p = Arc::<[u8]>::from(ConvGaussianParams::new(1.5, 5).as_bytes());
+        let mut blurred = pipe.apply(node, &CONV_GAUSSIAN_H, Arc::clone(&p));
+        blurred = pipe.apply(blurred, &CONV_GAUSSIAN_V, p);
+        node = pipe.apply2(
+            node,
+            blurred,
+            &CONV_UNSHARP,
+            Arc::<[u8]>::from(ConvUnsharpParams::new(params.sharpen_amount, 0.0).as_bytes()),
+        );
+    }
+
+    node
+}
+
 pub async fn adjust_rgba8(
     ctx: &GpuContext,
     image: &DecodedImage,
@@ -781,174 +1071,8 @@ pub async fn adjust_rgba8(
         pipe.set_selection(selection.clone());
         let src = RawSource::new(image.width, image.height, RGBA8, image.rgba.clone())
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
-        let mut node = pipe.source(Box::new(src));
-        if params.exposure_ev != 0.0 {
-            node = pipe.apply(
-                node,
-                &ADJUST_EXPOSURE,
-                Arc::<[u8]>::from(AdjustExposureParams::new(params.exposure_ev).as_bytes()),
-            );
-        }
-        if params.temp != 0.0 || params.tint != 0.0 {
-            node = pipe.apply(
-                node,
-                &ADJUST_WHITE_BALANCE,
-                Arc::<[u8]>::from(
-                    AdjustWhiteBalanceParams::new(params.temp, params.tint).as_bytes(),
-                ),
-            );
-        }
-        if !params.levels.is_identity() {
-            let l = &params.levels;
-            node = pipe.apply(
-                node,
-                &ADJUST_LEVELS,
-                Arc::<[u8]>::from(
-                    AdjustLevelsParams::new(
-                        l.in_black,
-                        l.in_white,
-                        l.gamma,
-                        l.out_black,
-                        l.out_white,
-                    )
-                    .as_bytes(),
-                ),
-            );
-        }
-        // 4 — per-channel levels (the composite output range stays on
-        // stage 3; this one is the input/gamma remap per r, g, b).
-        if !params.levels_rgb.is_identity() {
-            let l = &params.levels_rgb;
-            node = pipe.apply(
-                node,
-                &ADJUST_LEVELS_RGB,
-                Arc::<[u8]>::from(AdjustLevelsRgbParams::new(l.r, l.g, l.b).as_bytes()),
-            );
-        }
-        if params.brightness != 0.0 || params.contrast != 1.0 {
-            node = pipe.apply(
-                node,
-                &ADJUST_BRIGHTNESS_CONTRAST,
-                Arc::<[u8]>::from(
-                    AdjustBrightnessContrastParams::new(params.brightness, params.contrast)
-                        .as_bytes(),
-                ),
-            );
-        }
-        // 6, 7, 8 — the colour-grading trio.
-        if !params.color_balance.is_identity() {
-            let c = &params.color_balance;
-            node = pipe.apply(
-                node,
-                &ADJUST_COLOR_BALANCE,
-                Arc::<[u8]>::from(
-                    AdjustColorBalanceParams::new(c.shadows, c.midtones, c.highlights).as_bytes(),
-                ),
-            );
-        }
-        if !params.photo_filter.is_identity() {
-            let f = &params.photo_filter;
-            node = pipe.apply(
-                node,
-                &ADJUST_PHOTO_FILTER,
-                Arc::<[u8]>::from(
-                    AdjustPhotoFilterParams::new(f.color, f.density, f.preserve_luminosity)
-                        .as_bytes(),
-                ),
-            );
-        }
-        if !params.channel_mixer.is_identity() {
-            let m = &params.channel_mixer;
-            node = pipe.apply(
-                node,
-                &ADJUST_CHANNEL_MIXER,
-                Arc::<[u8]>::from(AdjustChannelMixerParams::new(m.r, m.g, m.b).as_bytes()),
-            );
-        }
-        // 9 — vibrance BEFORE the global saturation (it reads the
-        // still-unsaturated chroma to weight its own boost). The kernel's
-        // second term is the global saturation offset; we keep it 0 so
-        // stage 10 stays the single global control.
-        if params.vibrance != 0.0 {
-            node = pipe.apply(
-                node,
-                &ADJUST_VIBRANCE,
-                Arc::<[u8]>::from(AdjustVibranceParams::new(params.vibrance, 0.0).as_bytes()),
-            );
-        }
-        if params.saturation != 1.0 {
-            node = pipe.apply(
-                node,
-                &ADJUST_SATURATION,
-                Arc::<[u8]>::from(AdjustSaturationParams::new(params.saturation).as_bytes()),
-            );
-        }
-        // 11, 12, 13 — the range-destroying stages, LAST among the point
-        // adjustments (posterize/threshold quantize, so anything after
-        // them would work on a collapsed range).
-        if params.black_white.enabled {
-            let w = params.black_white.weights;
-            node = pipe.apply(
-                node,
-                &ADJUST_BLACK_WHITE,
-                Arc::<[u8]>::from(
-                    AdjustBlackWhiteParams::new(w[0], w[1], w[2], w[3], w[4], w[5]).as_bytes(),
-                ),
-            );
-        }
-        if let Some(levels) = params.posterize {
-            node = pipe.apply(
-                node,
-                &ADJUST_POSTERIZE,
-                Arc::<[u8]>::from(AdjustPosterizeParams::new(levels).as_bytes()),
-            );
-        }
-        if let Some(t) = params.threshold {
-            node = pipe.apply(
-                node,
-                &ADJUST_THRESHOLD,
-                Arc::<[u8]>::from(AdjustThresholdParams::new(t).as_bytes()),
-            );
-        }
-        // FILTER stages (first wasm reach for the registered T1/T2
-        // kernels — same registry-driven dispatch, nothing new): hue
-        // rotation, per-color invert, separable Gaussian blur, and
-        // unsharp masking (the classic a + amount·(a − blur(a)) blend —
-        // CONV_UNSHARP is the 2-input point kernel; its blur input is a
-        // fixed σ1.5 Gaussian of the current node).
-        if params.hue_degrees != 0.0 {
-            node = pipe.apply(
-                node,
-                &ADJUST_HUE_ROTATE,
-                Arc::<[u8]>::from(AdjustHueRotateParams::new(params.hue_degrees).as_bytes()),
-            );
-        }
-        if params.invert {
-            node = pipe.apply(
-                node,
-                &ADJUST_INVERT_RGB,
-                Arc::<[u8]>::from(AdjustInvertRgbParams::new().as_bytes()),
-            );
-        }
-        if params.blur_sigma > 0.0 {
-            let sigma = params.blur_sigma;
-            let radius = (sigma * 3.0).ceil().min(f32::from(GAUSSIAN_MAX_RADIUS)) as u32;
-            let p = Arc::<[u8]>::from(ConvGaussianParams::new(sigma, radius).as_bytes());
-            node = pipe.apply(node, &CONV_GAUSSIAN_H, Arc::clone(&p));
-            node = pipe.apply(node, &CONV_GAUSSIAN_V, p);
-        }
-        if params.sharpen_amount > 0.0 {
-            let p = Arc::<[u8]>::from(ConvGaussianParams::new(1.5, 5).as_bytes());
-            let mut blurred = pipe.apply(node, &CONV_GAUSSIAN_H, Arc::clone(&p));
-            blurred = pipe.apply(blurred, &CONV_GAUSSIAN_V, p);
-            node = pipe.apply2(
-                node,
-                blurred,
-                &CONV_UNSHARP,
-                Arc::<[u8]>::from(ConvUnsharpParams::new(params.sharpen_amount, 0.0).as_bytes()),
-            );
-        }
-
+        let node = pipe.source(Box::new(src));
+        let node = build_adjust_chain(&mut pipe, node, params);
         let roi = Region::new(0, 0, image.width, image.height);
         let mut target = RawTarget::new();
         pipe.to_encoder_async(node, roi, ctx, &mut target, RGBA8)
