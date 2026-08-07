@@ -226,7 +226,9 @@ describe("the panel's Retouch section", () => {
     textOf(
       RetouchSection({
         source: { x: 12, y: 34, aligned: true },
+        hasSelection: true,
         onAligned: () => {},
+        onContentAwareFill: () => {},
         ...over,
       }),
     )
@@ -238,19 +240,33 @@ describe("the panel's Retouch section", () => {
     expect(render({ source: null })).toContain("not set");
   });
 
-  it("states the healing brush's real limit where the user is", () => {
-    // The single most important sentence in this feature: mean-matching
-    // is not a Poisson solve, and the difference is visible on a ramp.
+  it("describes what the healing brush actually does, and where it stops", () => {
+    // This text used to warn that a mean match still seams across a
+    // ramp. The solve removed that limit, so the warning had to go —
+    // leaving it would be a different kind of lie. What remains is the
+    // real edge case: no boundary, no correction.
     const text = render();
-    expect(text).toContain("MEAN tone");
-    expect(text).toContain("Poisson");
-    expect(text).toContain("still shows a seam");
+    expect(text).toContain("gradient domain");
+    expect(text).toContain("follows a ramp");
+    expect(text).toContain("falls back to a plain clone");
+    expect(text).not.toContain("still shows a seam");
   });
 
-  it("says content-aware fill is absent rather than pretending", () => {
+  it("offers content-aware fill, and states what it does and does not do", () => {
+    // This section used to say the feature was absent. It ships now, so
+    // the note describes the real thing — including the two limits that
+    // are genuinely there rather than the absence that no longer is.
     const text = render();
-    expect(text).toContain("Content-aware fill is not offered");
-    expect(text).toContain("patch search");
+    expect(text).toContain("Content-aware fill");
+    expect(text).toContain("copied from real image data");
+    expect(text).toContain("windowed and single-scale");
+    expect(text).not.toContain("is not offered");
+  });
+
+  it("asks for a selection before it will fill", () => {
+    // The fill synthesises the SELECTION; with none there is no hole,
+    // and a button that did nothing would read as broken.
+    expect(render({ hasSelection: false })).toContain("select an area first");
   });
 
   it("explains alt-click and aligned", () => {

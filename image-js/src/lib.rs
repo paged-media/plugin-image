@@ -63,7 +63,9 @@ pub mod channels;
 pub mod cmyk;
 pub mod display;
 pub mod fill;
+pub mod heal;
 pub mod ingest;
+pub mod inpaint;
 pub mod layers;
 pub mod mip;
 pub mod paths;
@@ -1358,6 +1360,39 @@ mod wasm {
         let out = fill_rgba8(&ctx, &img, &FillSpec::Noise { amount, seed }, sel)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        land_fill(img.width, img.height, out, layered).await
+    }
+
+    /// CONTENT-AWARE FILL: synthesise the selection from the rest of the
+    /// image (exemplar-based inpainting).
+    ///
+    /// Unlike every other fill here it is CPU: it is a search, not a
+    /// dispatch, and there is no kernel that could express "find the
+    /// patch elsewhere in this image that best continues this one". The
+    /// GPU-only rule (spec §6) is about the KERNEL path, and this adds
+    /// none — it produces pixels that land through the same journaled
+    /// layer write as any other fill.
+    ///
+    /// Requires a SELECTION: with nothing selected there is no hole, and
+    /// with everything selected there is no source. Both are errors
+    /// rather than a silent no-op, because a fill that quietly did
+    /// nothing would read as a broken button.
+    #[wasm_bindgen]
+    pub async fn fill_content_aware(handle: u32) -> Result<DecodedHandle, JsValue> {
+        let (img, _ctx, sel, layered) = fill_prelude(handle)?;
+        let coverage = sel.ok_or_else(|| {
+            JsValue::from_str(
+                "content-aware fill needs a selection — it synthesises the \
+                 selected region from the rest of the image",
+            )
+        })?;
+        let out = crate::inpaint::fill(&img.rgba, img.width, img.height, &coverage, 128)
+            .ok_or_else(|| {
+                JsValue::from_str(
+                    "nothing to fill, or nothing to fill FROM (an empty \
+                     selection, or one covering the whole image)",
+                )
+            })?;
         land_fill(img.width, img.height, out, layered).await
     }
 

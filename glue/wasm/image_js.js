@@ -560,6 +560,29 @@ export function encode_image(rgba, width, height, format) {
 }
 
 /**
+ * CONTENT-AWARE FILL: synthesise the selection from the rest of the
+ * image (exemplar-based inpainting).
+ *
+ * Unlike every other fill here it is CPU: it is a search, not a
+ * dispatch, and there is no kernel that could express "find the
+ * patch elsewhere in this image that best continues this one". The
+ * GPU-only rule (spec §6) is about the KERNEL path, and this adds
+ * none — it produces pixels that land through the same journaled
+ * layer write as any other fill.
+ *
+ * Requires a SELECTION: with nothing selected there is no hole, and
+ * with everything selected there is no source. Both are errors
+ * rather than a silent no-op, because a fill that quietly did
+ * nothing would read as a broken button.
+ * @param {number} handle
+ * @returns {Promise<DecodedHandle>}
+ */
+export function fill_content_aware(handle) {
+    const ret = wasm.fill_content_aware(handle);
+    return ret;
+}
+
+/**
  * FILL the current selection (the whole image when none) with a
  * fixed TWO-STOP gradient. `kind` ∈ `linear | radial | angular |
  * reflected | diamond`; `c0`/`c1` are straight RGBA in `[0, 1]`
@@ -2343,12 +2366,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 338, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 344, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 373, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 379, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

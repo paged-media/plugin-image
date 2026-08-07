@@ -673,10 +673,14 @@ export function BrushSection({
  *  controls would imply two independent brushes and would drift. */
 export function RetouchSection({
   source,
+  hasSelection,
   onAligned,
+  onContentAwareFill,
 }: {
   source: { x: number; y: number; aligned: boolean } | null;
+  hasSelection: boolean;
   onAligned: (aligned: boolean) => void;
+  onContentAwareFill: () => void;
 }) {
   return (
     <>
@@ -706,17 +710,32 @@ export function RetouchSection({
         from the cursor so the copy translates instead of repeating.
       </div>
       <div style={note} data-image-heal-limit>
-        The healing brush matches the source&apos;s MEAN tone to its
-        destination — not a gradient-domain (Poisson) solve. It removes a
-        uniform difference, which is what most blemish retouching is, and
-        leaves a gradient one: healing across a strong luminance ramp still
-        shows a seam. Use the Clone stamp there, or heal in smaller steps.
+        The healing brush solves for its correction in the gradient domain —
+        a membrane fitted to the mismatch around the dab&apos;s edge — so it
+        follows a ramp instead of shifting the patch by one number. Where the
+        sampled window runs off the image there is no boundary to fit, and it
+        falls back to a plain clone rather than inventing a correction from
+        pixels that do not exist.
       </div>
-      <div style={note}>
-        Content-aware fill is not offered. Filling a selection by synthesising
-        plausible texture is a different algorithm (patch search), not a brush,
-        and a button that produced a blurry smear instead would be worse than
-        its absence.
+      <div style={row}>
+        <button
+          type="button"
+          data-image-content-aware-fill
+          disabled={!hasSelection}
+          onClick={onContentAwareFill}
+        >
+          Content-aware fill
+        </button>
+        <span style={mono}>{hasSelection ? "" : "select an area first"}</span>
+      </div>
+      <div style={note} data-image-caf-note>
+        Fills the SELECTION with texture found elsewhere in the same image,
+        patch by patch from the edge inward — so it keeps grain and continues
+        edges rather than blurring across them. Every pixel it writes was
+        copied from real image data, never averaged into existence. Its
+        search is windowed and single-scale: a large hole reproduces texture
+        faithfully but can lose large-scale structure, and a match on the far
+        side of a big image will not be found.
       </div>
     </>
   );
@@ -2303,7 +2322,11 @@ export function makeImagePanel(session: ImageSession) {
             honest limit. */}
         <RetouchSection
           source={s.cloneSource}
+          hasSelection={s.selection !== null}
           onAligned={(a) => session.setCloneAligned(a)}
+          onContentAwareFill={() =>
+            void session.fillSelection({ kind: "contentAware" })
+          }
         />
 
         {/* PATHS — the raster↔vector bridge (the vector side itself is

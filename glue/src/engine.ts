@@ -493,10 +493,9 @@ export type StrokeTool =
   /** Copies pixels from a source anchor — same tip, spacing, pressure
    *  and selection masking as the brush; only the paint layer differs. */
   | "clone"
-  /** A clone whose source is TONE-MATCHED to its destination. The match
-   *  is a mean offset, not a Poisson solve — it removes a uniform tone
-   *  difference and leaves a gradient one, which is why healing across a
-   *  strong ramp still shows a seam. */
+  /** A clone whose source is TONE-MATCHED to its destination, by a
+   *  gradient-domain (membrane) solve over the dab's boundary — so it
+   *  follows a ramp rather than shifting the patch by one number. */
   | "heal";
 
 export const STROKE_TOOLS: StrokeTool[] = [
@@ -845,6 +844,11 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** FILL the bound selection with deterministic monochrome noise. */
   fillNoise(handle: number, amount: number, seed: number): Promise<DecodedInfo>;
+  /** CONTENT-AWARE FILL — synthesise the selection from the rest of the
+   *  image (exemplar-based inpainting). CPU, because it is a SEARCH and
+   *  not a dispatch; the result lands through the same journaled layer
+   *  write as any other fill. Throws without a selection. */
+  fillContentAware(handle: number): Promise<DecodedInfo>;
   /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
    *  image as tightly packed RGBA8. Edge tiles are clamped to the image
    *  extent; a fully-outside window returns an empty buffer. The honest
@@ -1134,6 +1138,7 @@ export interface ImageWasmModule {
     amount: number,
     seed: number,
   ): Promise<DecodedHandleWasm>;
+  fill_content_aware(handle: number): Promise<DecodedHandleWasm>;
   encode_image(
     rgba: Uint8Array,
     width: number,
@@ -1436,6 +1441,17 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         Float32Array.from(c0),
         Float32Array.from(c1),
       );
+      const info = {
+        handle: h.handle,
+        width: h.width,
+        height: h.height,
+        display: displayTreatmentOf(h.display),
+      };
+      h.free();
+      return info;
+    },
+    async fillContentAware(handle) {
+      const h = await wasm.fill_content_aware(handle);
       const info = {
         handle: h.handle,
         width: h.width,

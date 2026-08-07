@@ -236,6 +236,24 @@ export function decode_image(bytes: Uint8Array): DecodedHandle;
 export function encode_image(rgba: Uint8Array, width: number, height: number, format: string): Uint8Array;
 
 /**
+ * CONTENT-AWARE FILL: synthesise the selection from the rest of the
+ * image (exemplar-based inpainting).
+ *
+ * Unlike every other fill here it is CPU: it is a search, not a
+ * dispatch, and there is no kernel that could express "find the
+ * patch elsewhere in this image that best continues this one". The
+ * GPU-only rule (spec §6) is about the KERNEL path, and this adds
+ * none — it produces pixels that land through the same journaled
+ * layer write as any other fill.
+ *
+ * Requires a SELECTION: with nothing selected there is no hole, and
+ * with everything selected there is no source. Both are errors
+ * rather than a silent no-op, because a fill that quietly did
+ * nothing would read as a broken button.
+ */
+export function fill_content_aware(handle: number): Promise<DecodedHandle>;
+
+/**
  * FILL the current selection (the whole image when none) with a
  * fixed TWO-STOP gradient. `kind` ∈ `linear | radial | angular |
  * reflected | diamond`; `c0`/`c1` are straight RGBA in `[0, 1]`
@@ -786,6 +804,7 @@ export interface InitOutput {
     readonly curve_lut: (a: number, b: number) => [number, number];
     readonly decode_image: (a: number, b: number) => [number, number, number];
     readonly encode_image: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+    readonly fill_content_aware: (a: number) => any;
     readonly fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly fill_noise: (a: number, b: number, c: number) => any;
     readonly free_image: (a: number) => void;

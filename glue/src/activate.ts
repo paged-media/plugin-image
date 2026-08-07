@@ -435,6 +435,16 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
+  host.contribute.command({
+    id: "media.paged.image.command.contentAwareFill",
+    title: "Content-aware fill",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.fillSelection({ kind: "contentAware" });
+    },
+  });
+
   // Selection commands (the panel buttons + command-palette reach).
   host.contribute.command({
     id: "media.paged.image.command.selectAll",

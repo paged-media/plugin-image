@@ -90,7 +90,11 @@ export const FILL_NOISE_SEED_DEFAULT = 1;
  *  reach). Colours are straight RGBA in [0,1]. */
 export type FillRequest =
   | { kind: "gradient"; gradient: GradientKind; c0: Rgba01; c1: Rgba01 }
-  | { kind: "noise"; amount: number; seed?: number };
+  | { kind: "noise"; amount: number; seed?: number }
+  /** CONTENT-AWARE: synthesise the selection from the rest of the image.
+   *  The only fill that is a SEARCH rather than a generator, and the
+   *  only one that needs no parameters — the image is the parameter. */
+  | { kind: "contentAware" };
 
 /** Save-back bytes staged by `applyToFile` — what the exporters hand
  *  out and what the panel reports. */
@@ -1463,8 +1467,18 @@ export function createImageSession(host: BundleHost): ImageSession {
         setStatus("Nothing ingested — ingest a placed image first.");
         return false;
       }
-      if (!state.gpu) {
+      // Content-aware fill is a CPU search, so it works with no device —
+      // the generators do not. Gating it on WebGPU would refuse a fill
+      // that has no GPU work in it.
+      if (req.kind !== "contentAware" && !state.gpu) {
         setStatus("WebGPU unavailable — the generators are GPU-only kernels.");
+        return false;
+      }
+      if (req.kind === "contentAware" && !state.selection) {
+        setStatus(
+          "Select the area to fill first — content-aware fill synthesises " +
+            "the SELECTION from the rest of the image.",
+        );
         return false;
       }
       state.busy = true;
@@ -1479,11 +1493,13 @@ export function createImageSession(host: BundleHost): ImageSession {
                 req.c0,
                 req.c1,
               )
-            : await engine.fillNoise(
-                src.handle,
-                req.amount,
-                req.seed ?? FILL_NOISE_SEED_DEFAULT,
-              );
+            : req.kind === "contentAware"
+              ? await engine.fillContentAware(src.handle)
+              : await engine.fillNoise(
+                  src.handle,
+                  req.amount,
+                  req.seed ?? FILL_NOISE_SEED_DEFAULT,
+                );
       } catch (err) {
         setStatus(`Fill failed: ${err instanceof Error ? err.message : err}`);
         state.busy = false;
