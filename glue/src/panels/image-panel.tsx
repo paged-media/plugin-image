@@ -2903,7 +2903,13 @@ export function makeImagePanel(session: ImageSession) {
           </button>
         </div>
 
-        <div style={note}>{s.status}</div>
+        {/* The one line every door writes its outcome to — a result, or
+            a STATED reason there is none. Addressable so a journey can
+            assert the app answered at all: silence here is what an
+            unhandled throw looks like from the outside. */}
+        <div style={note} data-image-status>
+          {s.status}
+        </div>
         <div style={note}>
           Apply composites an in-frame PREVIEW layer (C-1 Stage A) — the
           document and the placed file are unchanged. The crop commit cuts the
