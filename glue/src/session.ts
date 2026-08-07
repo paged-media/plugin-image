@@ -29,7 +29,11 @@
 // DOCUMENT is never mutated (the original placed bytes stay the truth —
 // adjusted-pixel save-back is a later milestone, stated in the panel).
 
-import type { BundleHost, Disposable } from "@paged-media/plugin-api";
+import type {
+  BundleHost,
+  Disposable,
+  ElementId,
+} from "@paged-media/plugin-api";
 
 import {
   bootEngine,
@@ -1090,6 +1094,30 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
   };
 
+  /**
+   * The `x-paged:media.paged.image` marker that makes a frame
+   * double-click-enterable (ADR-023 / K-13). Version 1; `data`
+   * deliberately carries NO state — the marker says who owns the
+   * frame's pixels and nothing else, so it can never disagree with the
+   * engine about them.
+   *
+   * Takes the real `ElementId`, not the string id the session stores:
+   * `ElementId` is a discriminated union over element KIND, so a bare
+   * id cannot reconstruct one, and inventing a kind here would be a
+   * guess the document would have to live with.
+   */
+  const stampOwnership = async (id: ElementId): Promise<void> => {
+    try {
+      // Already marked — do NOT write. A no-op write is still a
+      // MUTATION, so re-selecting the same frame would push an undo
+      // step for something the user never did.
+      if (await host.document.getMetadata(id)) return;
+      await host.document.setMetadata(id, { v: 1, data: { owns: "pixels" } });
+    } catch (err) {
+      host.log.debug("ownership marker not written", err);
+    }
+  };
+
   const decodeInto = async (
     name: string,
     bytes: Uint8Array,
@@ -1194,12 +1222,37 @@ export function createImageSession(host: BundleHost): ImageSession {
           );
           return false;
         }
-        return await decodeInto(
+        const ok = await decodeInto(
           asset.uri || "placed image",
           asset.bytes,
           "selection",
           id,
         );
+        if (ok) {
+          // ADR-023 / K-13 — MARK THE FRAME AS OURS, so double-clicking
+          // it enters the `rasterImage` context and the host Layers /
+          // Character panels retarget here.
+          //
+          // The context matcher is a PURE PREDICATE over a snapshot
+          // carrying only id / kind / groupChain / this plugin's own
+          // metadata. It cannot ask the document "does this rectangle
+          // hold placed raster bytes?" — which is the condition we
+          // actually claim on — and matching by KIND instead would
+          // claim every rectangle in the document and hijack a gesture
+          // that belongs to the host. So we do what the contract
+          // intends and paged.web already does: a bundle matches on the
+          // namespace it owns.
+          //
+          // FIRE-AND-FORGET, and after the `ok` gate rather than before
+          // it: a marker on a frame we failed to read would claim a
+          // context that then has nothing to show. This is a
+          // convenience marker and not part of the ingest contract — a
+          // host with no metadata door, or an engine that refuses the
+          // write, leaves the image fully editable through the panel
+          // exactly as before. It only ever costs the double-click.
+          void stampOwnership(ids[0]);
+        }
+        return ok;
       } finally {
         state.busy = false;
         emit();

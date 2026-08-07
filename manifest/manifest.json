@@ -85,6 +85,12 @@
       "media.paged.image.exporter.psd",
       "media.paged.image.exporter.png",
       "media.paged.image.exporter.jpeg"
+    ],
+    "editContexts": [
+      {
+        "type": "rasterImage",
+        "entry": "doubleClick"
+      }
     ]
   }
 }

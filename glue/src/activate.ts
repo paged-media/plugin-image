@@ -571,6 +571,47 @@ export function activate(host: BundleHost): BundleHandle {
     });
   }
 
+  // ── the rasterImage edit context (ADR-023 / K-13) ────────────────
+  //
+  // WHY THIS EXISTS AT ALL: a binding provider is consulted only while
+  // the edit context it registered against is ACTIVE — it borrows that
+  // context's activation rather than inventing a second notion of "who
+  // is active". paged.image had no context, so it could serve no host
+  // panel; this is the thing the ADR-023 providers below stand on.
+  //
+  // ENTRY IS DOUBLE-CLICK, and that is a PRODUCT rule rather than a
+  // local choice (plugin-sdk DESIGN.md §19). Every plugin that exposes
+  // content to the canvas is entered the same way — vector group,
+  // spreadsheet, web frame, Word document, raster image — so a user
+  // learns the gesture once. paged.image would technically prefer to
+  // activate on "I hold this frame", which it knows from its own ingest
+  // and not from a gesture; it takes the frame boundary anyway and
+  // narrows by DECLINING in the providers, which the binding contract
+  // models properly.
+  if (host.supports("contribute.editContext@1")) {
+    host.contribute.editContext({
+      type: "rasterImage",
+      entry: "doubleClick",
+      // Claimed by OUR OWN METADATA, never by kind. The candidate is a
+      // pure snapshot (id / kind / groupChain / this plugin's envelope)
+      // and cannot be asked "does this rectangle hold placed raster
+      // bytes?" — so matching on kind would claim every rectangle in
+      // the document and steal a gesture that belongs to the host. The
+      // marker is written at ingest (session `stampOwnership`).
+      matches: (c) => c.metadata !== null,
+      // No toolIds restriction: entering a raster frame should not take
+      // tools away. The rail is already the honest surface here, and a
+      // restriction would be a behaviour change smuggled in behind a
+      // panel-retargeting feature.
+      onEnter: () => {
+        host.log.debug("rasterImage context entered");
+      },
+      onExit: () => {
+        host.log.debug("rasterImage context exited");
+      },
+    });
+  }
+
   // The probe behind the save-back delivery seam (see the applyToFile
   // command): `shell.pickFile@1` is the only file door the contract has,
   // and it READS. Logged, not assumed — if a save door ever appears the
