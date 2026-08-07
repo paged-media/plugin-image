@@ -388,6 +388,7 @@ describe("the panel's Layers section", () => {
         onUngroup: () => {},
         onGroupVisible: () => {},
         onGroupOpacity: () => {},
+      onGroupPassThrough: () => {},
         onMaskClear: () => {},
         onBake: () => {},
         onUndo: () => {},
@@ -541,6 +542,7 @@ describe("the layer row's clip toggle", () => {
         onUngroup: () => {},
         onGroupVisible: () => {},
         onGroupOpacity: () => {},
+      onGroupPassThrough: () => {},
         onMaskClear: () => {},
         onBake: () => {},
         onUndo: () => {},
@@ -589,6 +591,7 @@ describe("the layer row's clip toggle", () => {
       onUngroup: () => {},
       onGroupVisible: () => {},
       onGroupOpacity: () => {},
+      onGroupPassThrough: () => {},
       onMaskClear: () => {},
       onBake: () => {},
       onUndo: () => {},
@@ -700,6 +703,9 @@ describe("the layers panel's groups", () => {
   });
 
   it("renders a group header ONCE for its run, not per member", () => {
+    // The group name is deliberately a nonsense word: counting
+    // occurrences of "Set" once matched "Setting" in the section's own
+    // note and reported two headers where there was one.
     const text = render({
       layers: [
         layer(),
@@ -707,27 +713,87 @@ describe("the layers panel's groups", () => {
         layer({ index: 2, id: 3, name: "B", group: 7 }),
       ],
       groups: [
-        { id: 7, name: "Set", visible: true, opacity: 1, blend: "normal" },
+        {
+          id: 7,
+          name: "Zephyr",
+          visible: true,
+          opacity: 1,
+          blend: "normal",
+          passThrough: true,
+          isolates: false,
+          parent: null,
+        },
       ],
     });
     // Once — a header per member would read as three groups.
-    expect(text.split("Set").length - 1).toBe(1);
+    expect(text.split("Zephyr").length - 1).toBe(1);
     expect(text).toContain("A");
     expect(text).toContain("B");
   });
 
-  it("states the isolation semantics and the two things it does not do", () => {
-    // The three sentences a designer needs: group opacity fades the
-    // RESULT, Pass Through is not offered, and groups do not nest.
+  it("states both modes, the opacity rule, and the nesting bound", () => {
+    // This note used to say Pass Through was not offered and groups did
+    // not nest. Both shipped, so both sentences had to go — a note that
+    // understates the tool is the same class of lie as one that
+    // overstates it.
     const text = render({
       layers: [layer(), layer({ index: 1, id: 2, group: 7 })],
       groups: [
-        { id: 7, name: "Set", visible: true, opacity: 0.5, blend: "normal" },
+        {
+          id: 7,
+          name: "Zephyr",
+          visible: true,
+          opacity: 0.5,
+          blend: "normal",
+          passThrough: true,
+          isolates: true,
+          parent: null,
+        },
       ],
     });
-    expect(text).toContain("fades the RESULT");
-    expect(text).toContain("Pass Through");
-    expect(text).toContain("do not nest");
+    expect(text).toContain("PASS THROUGH by default");
+    expect(text).toContain("fade the RESULT");
+    expect(text).toContain("forces isolation");
+    expect(text).toContain("Groups nest, up to eight deep");
+    expect(text).not.toContain("do not nest");
+  });
+
+  it("shows the EFFECTIVE mode, not the declared one", () => {
+    // A pass-through group faded below 100% actually isolates. Showing
+    // "pass" there would tell the designer the opposite of what the
+    // composite is about to do.
+    const faded = render({
+      layers: [layer(), layer({ index: 1, id: 2, group: 7 })],
+      groups: [
+        {
+          id: 7,
+          name: "Zephyr",
+          visible: true,
+          opacity: 0.5,
+          blend: "normal",
+          passThrough: true,
+          isolates: true,
+          parent: null,
+        },
+      ],
+    });
+    expect(faded).toContain("iso");
+    const plain = render({
+      layers: [layer(), layer({ index: 1, id: 2, group: 7 })],
+      groups: [
+        {
+          id: 7,
+          name: "Zephyr",
+          visible: true,
+          opacity: 1,
+          blend: "normal",
+          passThrough: true,
+          isolates: false,
+          parent: null,
+        },
+      ],
+    });
+    expect(plain).toContain("pass");
   });
 
   it("says nothing about groups when there are none", () => {

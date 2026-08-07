@@ -417,6 +417,8 @@ export interface ImageSession {
   setGroupOpacity(id: number, opacity: number): Promise<boolean>;
   setGroupName(id: number, name: string): Promise<boolean>;
   setGroupBlend(id: number, blend: string): Promise<boolean>;
+  /** Pass-through (members reach the stack below) vs isolated. */
+  setGroupPassThrough(id: number, passThrough: boolean): Promise<boolean>;
   /** Delete the mask outright. */
   clearLayerMask(index: number): Promise<boolean>;
   /** Convert a pixel layer into a smart object (one-way — the source is
@@ -2344,6 +2346,9 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     async setGroupBlend(id, blend) {
       return groupEdit(() => engine!.layerSetGroupBlend(id, blend));
+    },
+    async setGroupPassThrough(id, passThrough) {
+      return groupEdit(() => engine!.layerSetGroupPassThrough(id, passThrough));
     },
 
     async makeLayerSmart(index) {

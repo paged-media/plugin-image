@@ -73,6 +73,7 @@ export const layers_set_clipped: (a: number, b: number) => [number, number];
 export const layers_set_group_blend: (a: number, b: number, c: number) => [number, number];
 export const layers_set_group_name: (a: number, b: number, c: number) => [number, number];
 export const layers_set_group_opacity: (a: number, b: number) => [number, number];
+export const layers_set_group_pass_through: (a: number, b: number) => [number, number];
 export const layers_set_group_visible: (a: number, b: number) => [number, number];
 export const layers_set_locked: (a: number, b: number) => [number, number];
 export const layers_set_mask_enabled: (a: number, b: number) => [number, number];

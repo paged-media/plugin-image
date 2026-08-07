@@ -559,6 +559,15 @@ export function layers_set_group_name(id: number, name: string): void;
 
 export function layers_set_group_opacity(id: number, opacity: number): void;
 
+/**
+ * Switch a group between PASS THROUGH (the default: members reach
+ * the stack below) and ISOLATED (members composite into their own
+ * buffer first). Note that an opacity below 1 forces isolation
+ * regardless — `layers_list`'s `isolates` reports the effective
+ * mode, `passThrough` the declared one.
+ */
+export function layers_set_group_pass_through(id: number, pass_through: boolean): void;
+
 export function layers_set_group_visible(id: number, visible: boolean): void;
 
 /**
@@ -875,6 +884,7 @@ export interface InitOutput {
     readonly layers_set_group_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_group_name: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_group_opacity: (a: number, b: number) => [number, number];
+    readonly layers_set_group_pass_through: (a: number, b: number) => [number, number];
     readonly layers_set_group_visible: (a: number, b: number) => [number, number];
     readonly layers_set_locked: (a: number, b: number) => [number, number];
     readonly layers_set_mask_enabled: (a: number, b: number) => [number, number];

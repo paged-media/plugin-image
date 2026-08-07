@@ -141,6 +141,12 @@ use crate::fill::{f16_to_rgba8, rgba8_to_f16};
 use crate::ingest::{adjust_rgba8, AdjustParams, DecodedImage, IngestError};
 use crate::stroke::blend_kernel;
 
+/// How deeply groups may nest. Each open level parks a full-canvas
+/// accumulator while it composites, so this is a memory bound rather
+/// than a modelling one — and an explicit bound beats discovering it as
+/// an allocation failure mid-fold.
+const MAX_GROUP_DEPTH: usize = 8;
+
 /// The default name of the layer an ingested image becomes.
 pub const BACKGROUND_LAYER_NAME: &str = "Background";
 
@@ -385,31 +391,53 @@ pub struct HistoryStats {
 
 /// An ordered stack of pixel layers over one canvas, with the COW undo
 /// journal for its pixel edits.
-/// A LAYER GROUP: a named, contiguous run of layers that composites into
-/// its own accumulator before blending into the stack.
+/// A LAYER GROUP: a named, contiguous run of layers.
 ///
-/// That isolation is what makes a group more than a folder — a group at
-/// 50% opacity fades the COMPOSITE of its members, which is a different
-/// picture from fading each member to 50% individually, and it is the
-/// reason designers reach for groups at all.
+/// An ISOLATED group composites its members into their own accumulator
+/// before blending that result into the stack, which is what makes a
+/// group more than a folder — a group at 50% fades the COMPOSITE of its
+/// members, a different picture from fading each member individually.
+///
+/// A PASS-THROUGH group does not isolate: its members composite directly
+/// into whatever is beneath the group, so an adjustment layer inside one
+/// reaches the whole stack below. This is Photoshop's DEFAULT, and it is
+/// the mode most designers actually mean by "folder".
 ///
 /// CONTIGUOUS, and enforced. The stack is a Vec and the fold walks it
-/// once; a group whose members were scattered would composite as two
-/// separate runs, which is not what any of its properties would then
-/// mean. NESTING is out of scope and stated rather than half-built: a
-/// group inside a group needs a tree, and this is a list.
+/// once; a group whose members were scattered would composite as several
+/// runs, and none of its properties would then mean what the panel
+/// showed. NESTING works by the same rule at one level up: a nested
+/// group's run must lie inside its parent's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayerGroup {
     pub id: u32,
     pub name: String,
     pub visible: bool,
-    /// 0–1, applied to the group's COMPOSITE.
+    /// 0–1. On an ISOLATED group this fades the composite. On a
+    /// pass-through group anything below 1 FORCES isolation — that is
+    /// Photoshop's own rule and it is not a shortcut: "fade the group"
+    /// has no meaning until there is a group-shaped thing to fade.
     pub opacity: f32,
     /// How the group's composite blends into what is beneath it.
+    /// Meaningful only when isolated.
     pub blend: &'static KernelDef,
+    /// PASS THROUGH (the Photoshop default): members composite straight
+    /// into the stack below instead of into an isolated buffer.
+    pub pass_through: bool,
+    /// The enclosing group, for nesting. `None` is a top-level group.
+    pub parent: Option<u32>,
 }
 
 impl LayerGroup {
+    /// Does this group composite in isolation?
+    ///
+    /// Pass-through is the declared mode, but an opacity below 1 forces
+    /// isolation regardless — Photoshop's rule, and the honest one:
+    /// fading a group that has no composite of its own is not defined.
+    pub fn isolates(&self) -> bool {
+        !self.pass_through || self.opacity < 1.0
+    }
+
     pub fn blend_name(&self) -> &'static str {
         self.blend
             .id
@@ -884,8 +912,12 @@ impl LayerStack {
     /// the fold walks the stack once, so a scattered group would
     /// composite as several runs and its opacity, blend and visibility
     /// would each mean something different from what the panel showed.
-    /// A range containing a layer that already belongs to another group
-    /// is refused for the same reason — nesting needs a tree.
+    ///
+    /// NESTING is supported, and it is the same rule one level up: every
+    /// layer in the range must share the SAME enclosing group (possibly
+    /// none), and the new group becomes its child. A range straddling
+    /// two different parents is refused, because the result would not be
+    /// a tree — it would be a group that is inside two things at once.
     pub fn group_range(&mut self, from: usize, to: usize, name: &str) -> Result<u32, IngestError> {
         let (lo, hi) = (from.min(to), from.max(to));
         if hi >= self.layers.len() {
@@ -894,12 +926,22 @@ impl LayerStack {
                 self.layers.len()
             )));
         }
-        if self.layers[lo..=hi].iter().any(|l| l.group.is_some()) {
+        let parent = self.layers[lo].group;
+        if self.layers[lo..=hi].iter().any(|l| l.group != parent) {
             return Err(IngestError::Unsupported(
-                "a layer already in a group cannot be grouped again — nested \
-                 groups need a tree and this stack is a list"
+                "cannot group a range that straddles two different groups: the \
+                 result would be inside both, which is not a tree"
                     .into(),
             ));
+        }
+        // Depth guard. Nesting is genuinely supported, but a runaway
+        // chain would make the fold park an unbounded number of
+        // full-canvas accumulators — a memory cliff, not a feature.
+        if self.depth_of(parent) >= MAX_GROUP_DEPTH {
+            return Err(IngestError::Unsupported(format!(
+                "group nesting deeper than {MAX_GROUP_DEPTH}: each level parks a \
+                 full-canvas buffer while it composites"
+            )));
         }
         let id = self.fresh_id();
         self.groups.push(LayerGroup {
@@ -908,6 +950,10 @@ impl LayerStack {
             visible: true,
             opacity: 1.0,
             blend: &COMPOSE_NORMAL,
+            // Photoshop's default, and the one most people mean by
+            // "folder": members reach the stack below.
+            pass_through: true,
+            parent,
         });
         for l in &mut self.layers[lo..=hi] {
             l.group = Some(id);
@@ -915,19 +961,77 @@ impl LayerStack {
         Ok(id)
     }
 
+    /// How many groups enclose `gid` (itself included).
+    fn depth_of(&self, gid: Option<u32>) -> usize {
+        let mut n = 0;
+        let mut cur = gid;
+        while let Some(id) = cur {
+            n += 1;
+            if n > MAX_GROUP_DEPTH * 2 {
+                break; // a cycle cannot be built through the API, but do not hang on one
+            }
+            cur = self
+                .groups
+                .iter()
+                .find(|g| g.id == id)
+                .and_then(|g| g.parent);
+        }
+        n
+    }
+
+    /// The enclosing chain of `gid`, OUTERMOST first — what the fold
+    /// compares against to decide which groups to open and close.
+    fn chain_of(&self, gid: Option<u32>) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut cur = gid;
+        while let Some(id) = cur {
+            out.push(id);
+            if out.len() > MAX_GROUP_DEPTH * 2 {
+                break;
+            }
+            cur = self
+                .groups
+                .iter()
+                .find(|g| g.id == id)
+                .and_then(|g| g.parent);
+        }
+        out.reverse();
+        out
+    }
+
     /// Dissolve a group. Its layers STAY, in place and unchanged — the
     /// group was a compositing wrapper, not a container, so removing it
     /// cannot lose pixels.
+    ///
+    /// Children are RE-PARENTED to the dissolved group's parent rather
+    /// than orphaned or deleted, for the same reason: dissolving one
+    /// level of wrapping must not take a level of content with it.
     pub fn ungroup(&mut self, id: u32) -> Result<(), IngestError> {
-        if !self.groups.iter().any(|g| g.id == id) {
+        let Some(g) = self.groups.iter().find(|g| g.id == id) else {
             return Err(IngestError::Unsupported(format!("unknown group {id}")));
-        }
+        };
+        let parent = g.parent;
         for l in &mut self.layers {
             if l.group == Some(id) {
-                l.group = None;
+                l.group = parent;
+            }
+        }
+        for child in &mut self.groups {
+            if child.parent == Some(id) {
+                child.parent = parent;
             }
         }
         self.groups.retain(|g| g.id != id);
+        Ok(())
+    }
+
+    /// Switch a group between pass-through and isolated.
+    pub fn set_group_pass_through(
+        &mut self,
+        id: u32,
+        pass_through: bool,
+    ) -> Result<(), IngestError> {
+        self.group_mut(id)?.pass_through = pass_through;
         Ok(())
     }
 
@@ -1266,66 +1370,71 @@ impl LayerStack {
         // top of it. Kept as one byte per pixel, because that is already
         // the coverage representation everything else here speaks.
         let mut clip_base: Option<Vec<u8>> = None;
-        // GROUPS: a run of layers sharing a group id composites into its
-        // OWN accumulator, which is then blended in as one plate. That
-        // isolation is the whole difference between a group and a
-        // folder — a group at 50% fades the composite of its members,
-        // not each member individually.
+        // GROUPS. An ISOLATED group composites its members into their own
+        // accumulator, which is then blended in as one plate — that is
+        // the difference between a group and a folder. A PASS-THROUGH
+        // group (Photoshop's default) does not isolate at all; its
+        // members reach the stack below directly, which is why an
+        // adjustment inside one affects everything beneath the group.
         //
-        // `stack` is the outer accumulator, parked while a group is
-        // open; `acc` is always whichever one is being written.
-        let mut open_group: Option<u32> = None;
-        let mut stack: Option<Vec<u8>> = None;
+        // NESTING needs no tree of layers, only a STACK of parked
+        // accumulators: at each layer, close the open groups that no
+        // longer enclose it and open the ones that newly do. The
+        // ancestor chain is what those comparisons run on.
+        let mut open: Vec<(u32, Vec<u8>)> = Vec::new();
         for (layer, px) in plates {
-            // Close a group when the run ends (a different group, or
-            // none) and blend its composite into the outer stack.
-            if open_group.is_some() && layer.group != open_group {
-                let gid = open_group.take().expect("open");
-                let inner = std::mem::replace(&mut acc, stack.take().expect("parked"));
+            let want = self.chain_of(layer.group);
+            // A layer inside ANY hidden group contributes nothing —
+            // exact, not an approximation, by the same `over(a, b·0)`
+            // argument the per-layer check makes.
+            if want.iter().any(|g| !self.group_enabled(*g)) {
+                continue;
+            }
+            // Close what no longer encloses this layer, innermost first.
+            while let Some((gid, _)) = open.last() {
+                let still = want.contains(gid);
+                if still {
+                    break;
+                }
+                let (gid, parked) = open.pop().expect("non-empty");
+                let inner = std::mem::replace(&mut acc, parked);
                 acc = self.blend_group(ctx, gid, acc, inner, w, h).await?;
                 clip_base = None;
             }
-            // Open one when a run begins.
-            match layer.group {
-                Some(gid) if !self.group_enabled(gid) => {
-                    // A hidden group contributes nothing, and skipping
-                    // its members is exact rather than an approximation
-                    // — the same argument the per-layer `enabled` check
-                    // makes.
+            // Open what newly does, outermost first. Only an ISOLATED
+            // group parks a buffer; a pass-through one is bookkeeping.
+            for gid in want.iter().copied() {
+                if open.iter().any(|(o, _)| *o == gid) {
                     continue;
                 }
-                Some(gid) if open_group != Some(gid) => {
-                    open_group = Some(gid);
-                    stack = Some(std::mem::replace(
-                        &mut acc,
-                        vec![0u8; (w as usize) * (h as usize) * 8],
-                    ));
+                let isolates = self
+                    .groups
+                    .iter()
+                    .find(|g| g.id == gid)
+                    .is_some_and(|g| g.isolates());
+                if isolates {
+                    let parked =
+                        std::mem::replace(&mut acc, vec![0u8; (w as usize) * (h as usize) * 8]);
+                    open.push((gid, parked));
                     clip_base = None;
                 }
-                _ => {}
             }
+            // THE CLIP BASE: the alpha of the most recent unclipped
+            // pixel plate, which is what every clipped layer stacked on
+            // top of it is confined to. Tracked here, after the group
+            // bookkeeping, because opening or closing a group resets it
+            // — a clip cannot reach across a group boundary any more
+            // than it can reach across the bottom of the stack.
             if layer.clipped {
-                // A clipped layer with NOTHING to clip to contributes
-                // nothing. Compositing it unclipped would be the one
-                // behaviour a designer cannot recover from — the whole
-                // reason they clipped it was to confine it.
                 if clip_base.is_none() {
+                    // Nothing to clip to: contributing unclipped would be
+                    // the one behaviour a designer cannot recover from.
                     continue;
                 }
             } else if layer.is_pixels() {
                 clip_base = Some(alpha_of(px));
             }
-            // AN ADJUSTMENT LAYER transforms the backdrop instead of
-            // blending over it. The accumulator is the backdrop, so the
-            // chain runs on THAT and replaces it — which is precisely
-            // what "non-destructive" means: no layer's own pixels are
-            // touched, and removing this layer restores the result
-            // exactly.
-            //
-            // The layer MASK becomes the chain's `selection`. The adjust
-            // chain has always taken one, so a masked adjustment layer
-            // needed no new plumbing — the mask a designer paints and the
-            // selection a marquee makes are the same object again.
+
             // The clip base multiplies into the layer's own coverage,
             // so a clipped-AND-masked layer is confined by both. Two
             // coverages multiply; they do not override each other.
@@ -1401,9 +1510,10 @@ impl LayerStack {
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         }
 
-        // A group still open at the top of the stack closes here.
-        if let Some(gid) = open_group.take() {
-            let inner = std::mem::replace(&mut acc, stack.take().expect("parked"));
+        // Groups still open at the top of the stack close here,
+        // innermost first.
+        while let Some((gid, parked)) = open.pop() {
+            let inner = std::mem::replace(&mut acc, parked);
             acc = self.blend_group(ctx, gid, acc, inner, w, h).await?;
         }
 
@@ -2598,18 +2708,70 @@ mod tests {
     }
 
     #[test]
-    fn image_editor_layers_a_group_cannot_contain_a_group() {
-        // Nesting needs a tree and this is a list; refusing is honest,
-        // silently flattening would not be.
+    fn image_editor_layers_groups_nest() {
+        // Nesting is supported: the inner group becomes a CHILD of the
+        // one already enclosing its members. (An earlier version refused
+        // this, honestly, because the fold parked one accumulator; it
+        // parks a stack now and the limitation went with it.)
         let mut s = stack(8, 8);
         s.add("A");
         s.add("B");
-        s.group_range(1, 2, "Outer").expect("grouped");
-        let err = s.group_range(1, 2, "Inner").expect_err("refused");
+        let outer = s.group_range(1, 2, "Outer").expect("grouped");
+        let inner = s.group_range(1, 2, "Inner").expect("nests");
+        assert_ne!(inner, outer);
+        let g = s.groups().iter().find(|g| g.id == inner).expect("inner");
+        assert_eq!(g.parent, Some(outer), "the inner group knows its parent");
+        assert_eq!(s.layers()[1].group, Some(inner), "members moved inward");
+    }
+
+    #[test]
+    fn image_editor_layers_a_group_cannot_straddle_two_parents() {
+        // The one thing nesting still cannot be: a group inside two
+        // things at once is not a tree, so the range is refused rather
+        // than silently re-parented.
+        let mut s = stack(8, 8);
+        s.add("A");
+        s.add("B");
+        s.add("C");
+        s.group_range(1, 1, "First").expect("grouped");
+        s.group_range(2, 2, "Second").expect("grouped");
+        let err = s.group_range(1, 2, "Across").expect_err("refused");
         assert!(
-            format!("{err}").contains("nested"),
+            format!("{err}").contains("straddles"),
             "the refusal must SAY why: {err}"
         );
+    }
+
+    #[test]
+    fn image_editor_layers_nesting_is_bounded() {
+        // Each open level parks a full-canvas buffer, so the depth bound
+        // is a memory guard — and an explicit refusal beats discovering
+        // it as an allocation failure mid-fold.
+        let mut s = stack(8, 8);
+        s.add("A");
+        for _ in 0..MAX_GROUP_DEPTH {
+            s.group_range(1, 1, "G").expect("nests");
+        }
+        let err = s.group_range(1, 1, "TooDeep").expect_err("bounded");
+        assert!(format!("{err}").contains("nesting deeper"), "{err}");
+    }
+
+    #[test]
+    fn image_editor_layers_ungrouping_reparents_its_children() {
+        // Dissolving one level of wrapping must not take a level of
+        // content with it.
+        let mut s = stack(8, 8);
+        s.add("A");
+        let outer = s.group_range(1, 1, "Outer").expect("grouped");
+        let inner = s.group_range(1, 1, "Inner").expect("nests");
+        s.ungroup(outer).expect("dissolved");
+        let g = s
+            .groups()
+            .iter()
+            .find(|g| g.id == inner)
+            .expect("inner survives");
+        assert_eq!(g.parent, None, "the child rose to the outer's parent");
+        assert_eq!(s.layers()[1].group, Some(inner), "and kept its members");
     }
 
     #[test]
@@ -2668,6 +2830,11 @@ mod tests {
             Arc::from(vec![80u8; 16 * 16 * 4].into_boxed_slice());
         let adj = s.add_adjustment("Brighten", bright(0.5));
         let id = s.group_range(px, adj, "Set").expect("grouped");
+        // ISOLATED explicitly. Pass-through is the default now, and
+        // under it this test's assertions hold for the wrong reason —
+        // the adjustment would brighten everything below, not just its
+        // group-mate, and the name would be overclaiming.
+        s.set_group_pass_through(id, false).expect("isolate");
 
         let visible = pollster::block_on(s.composite(Some(ctx), None)).expect("visible");
         assert_ne!(
@@ -2690,23 +2857,61 @@ mod tests {
         );
     }
 
+    /// THE PAIR THAT DEFINES THE TWO MODES, in one test because the
+    /// difference is only meaningful as a comparison.
+    ///
+    /// An adjustment alone in a group reaches the stack below when the
+    /// group is PASS-THROUGH (Photoshop's default, and this stack's) and
+    /// cannot when it is ISOLATED — because isolation starts the group
+    /// from a transparent accumulator, leaving the adjustment nothing to
+    /// transform.
     #[test]
-    fn image_editor_layers_an_adjustment_alone_in_a_group_adjusts_nothing() {
-        // The corollary, pinned so nobody "fixes" it later: isolation
-        // means the group starts from transparent, so an adjustment with
-        // no group-mates has nothing beneath it to transform. That is
-        // the semantic, not a bug.
+    fn image_editor_layers_pass_through_reaches_below_and_isolation_does_not() {
         let Some(ctx) = device() else { return };
+
         let mut s = stack(16, 16);
         let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
         let at = s.add_adjustment("Brighten", bright(0.5));
-        s.group_range(at, at, "Set").expect("grouped");
-        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("out");
-        assert_eq!(
-            out.to_vec(),
-            base.to_vec(),
-            "an isolated group's adjustment cannot reach below it"
+        let id = s.group_range(at, at, "Set").expect("grouped");
+
+        // DEFAULT: pass through. The adjustment brightens the background
+        // beneath the group.
+        assert!(
+            s.groups()[0].pass_through,
+            "pass-through is the default, as in Photoshop"
         );
+        let through = pollster::block_on(s.composite(Some(ctx), None)).expect("through");
+        assert_ne!(
+            through.to_vec(),
+            base.to_vec(),
+            "a pass-through group's adjustment reaches the stack below"
+        );
+
+        // ISOLATED: it cannot.
+        s.set_group_pass_through(id, false).expect("isolate");
+        let isolated = pollster::block_on(s.composite(Some(ctx), None)).expect("isolated");
+        assert_eq!(
+            isolated.to_vec(),
+            base.to_vec(),
+            "an isolated group's adjustment has nothing beneath it to transform"
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_opacity_below_one_forces_isolation() {
+        // Photoshop's own rule, and the honest one: "fade the group" has
+        // no meaning until there is a group-shaped thing to fade, so a
+        // pass-through group with opacity < 1 isolates.
+        let mut s = stack(8, 8);
+        s.add("A");
+        let id = s.group_range(1, 1, "Set").expect("grouped");
+        assert!(!s.groups()[0].isolates(), "pass-through at full opacity");
+        s.set_group_opacity(id, 0.5).expect("fade");
+        assert!(s.groups()[0].isolates(), "fading forces isolation");
+        s.set_group_opacity(id, 1.0).expect("restore");
+        assert!(!s.groups()[0].isolates());
+        s.set_group_pass_through(id, false).expect("isolate");
+        assert!(s.groups()[0].isolates(), "and declaring it works too");
     }
 
     /// THE POINT OF GROUPS, and the assertion that separates one from a
@@ -2757,6 +2962,71 @@ mod tests {
             (g[idx], g[idx + 3]),
             (m[idx], m[idx + 3]),
             "group opacity must fade the COMPOSITE, not each member"
+        );
+    }
+
+    /// NESTING, end to end on a device. The inner group's adjustment
+    /// must reach its own members and stop at the inner boundary — which
+    /// is the thing a stack of parked accumulators buys and a single
+    /// parked one could not.
+    #[test]
+    fn image_editor_layers_a_nested_group_stops_at_its_own_boundary() {
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+
+        // Outer group: a mid-grey plate. Inner group (above it): a
+        // darker plate plus an adjustment, both isolated.
+        let outer_px = s.add("OuterPlate");
+        s.layer_mut(outer_px).expect("o").rgba =
+            Arc::from(vec![120u8; 16 * 16 * 4].into_boxed_slice());
+        let inner_px = s.add("InnerPlate");
+        s.layer_mut(inner_px).expect("i").rgba =
+            Arc::from(vec![60u8; 16 * 16 * 4].into_boxed_slice());
+        let adj = s.add_adjustment("Brighten", bright(0.4));
+
+        let outer = s.group_range(outer_px, adj, "Outer").expect("outer");
+        s.set_group_pass_through(outer, false)
+            .expect("isolate outer");
+        let inner = s.group_range(inner_px, adj, "Inner").expect("inner");
+        s.set_group_pass_through(inner, false)
+            .expect("isolate inner");
+        assert_eq!(
+            s.groups().iter().find(|g| g.id == inner).unwrap().parent,
+            Some(outer),
+            "the inner group nests inside the outer one"
+        );
+
+        // It composites without panicking and produces something between
+        // the two plates' tones — the inner plate brightened, over the
+        // outer one. The structural assertion above is the point; this
+        // is the proof the fold actually ran the nesting.
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("nested composite");
+        assert!(
+            out[0] > 60,
+            "the inner adjustment brightened its own plate: {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn image_editor_layers_a_hidden_outer_group_hides_its_nested_contents() {
+        // A layer inside ANY hidden ancestor contributes nothing —
+        // checking only its immediate group would leak nested content
+        // out of a folder the designer closed.
+        let Some(ctx) = device() else { return };
+        let mut s = stack(16, 16);
+        let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
+        let px = s.add("Inner");
+        s.layer_mut(px).expect("i").rgba = Arc::from(vec![250u8; 16 * 16 * 4].into_boxed_slice());
+        let outer = s.group_range(px, px, "Outer").expect("outer");
+        s.group_range(px, px, "Inner").expect("inner");
+        s.set_group_visible(outer, false)
+            .expect("hide the OUTER one");
+        let out = pollster::block_on(s.composite(Some(ctx), None)).expect("out");
+        assert_eq!(
+            out.to_vec(),
+            base.to_vec(),
+            "hiding an ancestor hides everything nested inside it"
         );
     }
 }

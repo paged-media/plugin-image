@@ -1739,12 +1739,20 @@ mod wasm {
                 .iter()
                 .map(|g| {
                     format!(
-                        "{{\"id\":{},\"name\":{},\"visible\":{},\"opacity\":{},\"blend\":\"{}\"}}",
+                        "{{\"id\":{},\"name\":{},\"visible\":{},\"opacity\":{},\
+                         \"blend\":\"{}\",\"passThrough\":{},\"isolates\":{},\"parent\":{}}}",
                         g.id,
                         json_escape(&g.name),
                         g.visible,
                         g.opacity,
-                        g.blend_name()
+                        g.blend_name(),
+                        g.pass_through,
+                        // The EFFECTIVE mode, which is not always the
+                        // declared one — opacity below 1 forces
+                        // isolation, and the panel shows what will
+                        // actually happen rather than what was asked for.
+                        g.isolates(),
+                        g.parent.map_or_else(|| "null".to_string(), |p| p.to_string())
                     )
                 })
                 .collect();
@@ -1928,6 +1936,20 @@ mod wasm {
     #[wasm_bindgen]
     pub fn layers_set_group_name(id: u32, name: &str) -> Result<(), JsValue> {
         with_stack(|d| d.stack.set_group_name(id, name).map_err(ingest_err))
+    }
+
+    /// Switch a group between PASS THROUGH (the default: members reach
+    /// the stack below) and ISOLATED (members composite into their own
+    /// buffer first). Note that an opacity below 1 forces isolation
+    /// regardless — `layers_list`'s `isolates` reports the effective
+    /// mode, `passThrough` the declared one.
+    #[wasm_bindgen]
+    pub fn layers_set_group_pass_through(id: u32, pass_through: bool) -> Result<(), JsValue> {
+        with_stack(|d| {
+            d.stack
+                .set_group_pass_through(id, pass_through)
+                .map_err(ingest_err)
+        })
     }
 
     #[wasm_bindgen]

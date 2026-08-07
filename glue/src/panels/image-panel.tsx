@@ -1052,6 +1052,7 @@ export function LayersSection({
   onUngroup,
   onGroupVisible,
   onGroupOpacity,
+  onGroupPassThrough,
   onMaskClear,
   onBake,
   onUndoTo,
@@ -1089,6 +1090,7 @@ export function LayersSection({
   onUngroup: (id: number) => void;
   onGroupVisible: (id: number, visible: boolean) => void;
   onGroupOpacity: (id: number, opacity: number) => void;
+  onGroupPassThrough: (id: number, passThrough: boolean) => void;
   /** Delete the mask outright. */
   onMaskClear: (index: number) => void;
   /** Walk BACK `n` journal steps (n undos — the journal is a stack). */
@@ -1139,6 +1141,21 @@ export function LayersSection({
                       disabled={disabled}
                       onChange={(v) => onGroupOpacity(g.id, v)}
                     />
+                    <button
+                      type="button"
+                      title={
+                        g.isolates
+                          ? g.passThrough
+                            ? "Pass through — but the opacity is below 100%, which forces isolation"
+                            : "Isolated: members composite into their own buffer first"
+                          : "Pass through: members reach the stack below, so an adjustment inside affects everything beneath"
+                      }
+                      data-image-group-mode={g.id}
+                      disabled={disabled}
+                      onClick={() => onGroupPassThrough(g.id, !g.passThrough)}
+                    >
+                      {g.isolates ? "iso" : "pass"}
+                    </button>
                     <button
                       type="button"
                       title="Dissolve this group (its layers stay)"
@@ -1336,12 +1353,15 @@ export function LayersSection({
       ))}
       {groups.length > 0 ? (
         <div style={note} data-image-groups-note>
-          A group composites its members into their own buffer first, so its
-          opacity fades the RESULT rather than each member — that is what makes
-          it more than a folder, and why an adjustment inside a group reaches
-          only its group-mates. Photoshop&apos;s non-isolating &ldquo;Pass
-          Through&rdquo; mode is not offered. Groups do not nest: that needs a
-          tree and this stack is a list.
+          A group is PASS THROUGH by default, as in Photoshop: its members
+          composite straight into the stack below, so an adjustment inside
+          reaches everything beneath it. Switch it to ISOLATED and the members
+          composite into their own buffer first — which is what makes group
+          opacity fade the RESULT rather than each member, and what confines an
+          adjustment to its group-mates. Setting the opacity below 100% forces
+          isolation either way, because fading a group that has no composite of
+          its own is not defined. Groups nest, up to eight deep; each open
+          level parks a full-canvas buffer while it composites.
         </div>
       ) : null}
       <div
@@ -2401,6 +2421,9 @@ export function makeImagePanel(session: ImageSession) {
           onUngroup={(id) => void session.ungroupLayers(id)}
           onGroupVisible={(id, v) => void session.setGroupVisible(id, v)}
           onGroupOpacity={(id, o) => void session.setGroupOpacity(id, o)}
+          onGroupPassThrough={(id, pt) =>
+            void session.setGroupPassThrough(id, pt)
+          }
           onMaskClear={(i) => void session.clearLayerMask(i)}
           onUndoTo={(n) => void session.undoSteps(n)}
           onRedoTo={(n) => void session.redoSteps(n)}

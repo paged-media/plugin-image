@@ -659,6 +659,17 @@ export interface LayerGroupInfo {
   visible: boolean;
   opacity: number;
   blend: string;
+  /** The DECLARED mode. Pass-through (the default, as in Photoshop)
+   *  means members composite straight into the stack below, so an
+   *  adjustment inside reaches everything beneath the group. */
+  passThrough: boolean;
+  /** The EFFECTIVE mode, which is not always the declared one: an
+   *  opacity below 1 forces isolation, because fading a group that has
+   *  no composite of its own is not defined. The panel shows what will
+   *  happen, not what was asked for. */
+  isolates: boolean;
+  /** The enclosing group, for nesting; null at the top level. */
+  parent: number | null;
 }
 
 export const EMPTY_LAYER_STACK: LayerStackInfo = {
@@ -1075,6 +1086,10 @@ export interface ImageEngine {
   layerSetGroupOpacity(id: number, opacity: number): void;
   layerSetGroupName(id: number, name: string): void;
   layerSetGroupBlend(id: number, blend: string): void;
+  /** Switch a group between pass-through and isolated. An opacity below
+   *  1 forces isolation regardless — read `isolates` for the effective
+   *  mode. */
+  layerSetGroupPassThrough(id: number, passThrough: boolean): void;
   /** Fold the stack and write the result into the bound image; returns
    *  the straight RGBA8. GPU-only whenever there is anything to blend; a
    *  single plain visible layer needs no device at all. */
@@ -1380,6 +1395,7 @@ export interface ImageWasmModule {
   layers_set_group_opacity(id: number, opacity: number): void;
   layers_set_group_name(id: number, name: string): void;
   layers_set_group_blend(id: number, blend: string): void;
+  layers_set_group_pass_through(id: number, passThrough: boolean): void;
   layers_composite(): Promise<Uint8Array>;
   layers_bake_adjust(
     exposure_ev: number,
@@ -1805,6 +1821,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layerSetGroupOpacity: (id, o) => wasm.layers_set_group_opacity(id, o),
     layerSetGroupName: (id, n) => wasm.layers_set_group_name(id, n),
     layerSetGroupBlend: (id, b) => wasm.layers_set_group_blend(id, b),
+    layerSetGroupPassThrough: (id, pt) =>
+      wasm.layers_set_group_pass_through(id, pt),
     layersComposite: () => wasm.layers_composite(),
     layersAddAdjustment: (name, p) =>
       // The SAME wire block the bake and the preview use — one decode,

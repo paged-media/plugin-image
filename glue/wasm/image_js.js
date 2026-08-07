@@ -1246,6 +1246,22 @@ export function layers_set_group_opacity(id, opacity) {
 }
 
 /**
+ * Switch a group between PASS THROUGH (the default: members reach
+ * the stack below) and ISOLATED (members composite into their own
+ * buffer first). Note that an opacity below 1 forces isolation
+ * regardless — `layers_list`'s `isolates` reports the effective
+ * mode, `passThrough` the declared one.
+ * @param {number} id
+ * @param {boolean} pass_through
+ */
+export function layers_set_group_pass_through(id, pass_through) {
+    const ret = wasm.layers_set_group_pass_through(id, pass_through);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * @param {number} id
  * @param {boolean} visible
  */
