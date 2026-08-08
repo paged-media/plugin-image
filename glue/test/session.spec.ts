@@ -134,9 +134,16 @@ describe("the M4 ingest session (real engine wasm)", () => {
 
     fake.emitSelection([{ kind: "rectangle", id: "u9" }]);
     expect(await session.apply()).toBe(true);
+    // C-34 — the adapter appends the CALLER, filled from the manifest
+    // id, so an owner-gated engine can refuse a foreign replace. It is
+    // a third argument, and `toHaveBeenCalledWith` is exact on arity:
+    // asserting only two would now be asserting the pre-C-34 shape.
+    // Asserted by VALUE, not `any(String)` — a caller that is not this
+    // bundle's id would be the actual bug this door guards against.
     expect(fake.sceneLayers.submit).toHaveBeenCalledWith(
       "u9",
       expect.objectContaining({ items: expect.any(Array) }),
+      "media.paged.image",
     );
 
     session.dispose();

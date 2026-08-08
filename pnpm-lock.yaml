@@ -21,11 +21,11 @@ importers:
         specifier: workspace:*
         version: link:../manifest
       '@paged-media/plugin-api':
-        specifier: 0.2.29-canary.0
-        version: 0.2.29-canary.0
+        specifier: 0.2.30-canary.0
+        version: 0.2.30-canary.0
       '@paged-media/plugin-sdk':
-        specifier: 0.2.29-canary.0
-        version: 0.2.29-canary.0(react@18.3.1)
+        specifier: 0.2.30-canary.0
+        version: 0.2.30-canary.0(react@18.3.1)
       '@types/node':
         specifier: 20.19.39
         version: 20.19.39
@@ -353,11 +353,11 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@paged-media/plugin-api@0.2.29-canary.0':
-    resolution: {integrity: sha512-dSRpd2OyTrDNmiFVbbG/USJPoOq0zIcNb0c2xRyxJAbzk7AsX630gr1zg9oAJBop6zp33u4L7MJ1OGHhjY768g==}
+  '@paged-media/plugin-api@0.2.30-canary.0':
+    resolution: {integrity: sha512-s4s7xCafgorjV9587cvBs2o0VX9imxg9yQOpHi7PIjCto5Pi23ZtKMKDikl3vCnBhMqVcHnFeyrifQS+sTEVLg==}
 
-  '@paged-media/plugin-sdk@0.2.29-canary.0':
-    resolution: {integrity: sha512-AMplmxOnl9PVTBqlcjpvuoHmUeh6tdEs6bmbKVUuOyZUk0h+476HNwpsQFUvcCEPCEiTLGPUfp80zo+J89du8g==}
+  '@paged-media/plugin-sdk@0.2.30-canary.0':
+    resolution: {integrity: sha512-H3UrXw+AP4JGnDaLIQFyJRyy+ptGdFhdnoGe6zk8CPTwla7ZaLnxQeSvMuhQ1zJFwXvcr5qlHJIgsqpbOZM4bQ==}
     peerDependencies:
       react: ^18.3.0
     peerDependenciesMeta:
@@ -1054,13 +1054,13 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@paged-media/plugin-api@0.2.29-canary.0':
+  '@paged-media/plugin-api@0.2.30-canary.0':
     dependencies:
       '@types/react': 18.3.31
 
-  '@paged-media/plugin-sdk@0.2.29-canary.0(react@18.3.1)':
+  '@paged-media/plugin-sdk@0.2.30-canary.0(react@18.3.1)':
     dependencies:
-      '@paged-media/plugin-api': 0.2.29-canary.0
+      '@paged-media/plugin-api': 0.2.30-canary.0
     optionalDependencies:
       react: 18.3.1
 

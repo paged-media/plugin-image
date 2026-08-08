@@ -46,6 +46,12 @@ export function fitInto(
 ): FitTransform | null {
   const b = geom.bounds;
   if (!b) return null;
+  // C-23 — a pasteboard frame reports `pageId: null`. A fit result is
+  // consumed as a PLACEMENT on a page, so there is nothing to return
+  // here; the caller already treats null as "cannot fit". Before C-23
+  // the door omitted off-page frames entirely, so this path was reached
+  // the same way — with a less honest reason.
+  if (!geom.pageId) return null;
   const [top, left, bottom, right] = b;
   const boxW = Math.max(right - left, 1);
   const boxH = Math.max(bottom - top, 1);
