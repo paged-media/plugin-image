@@ -209,18 +209,19 @@ describe("the character provider", () => {
     // rather than asking core and painting the text caret's paragraph
     // over an image frame.
     //
-    // NOTE the example changed on 2026-08-09: this used to use
-    // `characterLeading`, which became WRITABLE when the type lane
-    // learned to lay out more than one line. A test whose example moves
-    // out from under it is the test doing its job — the claim being
-    // made is about ownership-without-value, so it needs a path that
-    // still HAS no value.
+    // NOTE the example has now moved TWICE in one day: first off
+    // `characterLeading` (writable once the lane laid out more than one
+    // line), then off `characterFontStyle` (writable once the lane
+    // passed a style to the face door). A test whose example keeps
+    // moving out from under it is the test doing its job — the claim is
+    // about ownership-WITHOUT-value, so it needs a path that still has
+    // none. Underline is one: nothing in the lane draws a rule.
     expect(text.paths).toContain("paragraphJustification");
-    expect(text.paths).toContain("characterFontStyle");
+    expect(text.paths).toContain("characterUnderline");
     // …and they are NOT writable, so the control renders read-only
     // instead of offering a commit that lands nowhere.
     expect(text.writablePaths).not.toContain("paragraphJustification");
-    expect(text.writablePaths).not.toContain("characterFontStyle");
+    expect(text.writablePaths).not.toContain("characterUnderline");
 
     bundle.dispose();
     handle.dispose();

@@ -200,6 +200,15 @@ export interface ImageSessionState {
     text: string;
     family: string;
     sizePx: number;
+    /** The style axis within the family — "Bold", "Italic", "Bold
+     *  Italic", … — or null for the family's DEFAULT face.
+     *
+     *  It is a request, not a resolution: the HOST owns face matching
+     *  (`getFontFace(family, style)` → the document's own embedded
+     *  faces), so this plugin asks and takes what comes back. Asking
+     *  for a style the document does not embed answers null, which is
+     *  the same honest miss as an unknown family. */
+    style: string | null;
     /** Letter spacing in 1/1000 em — IDML's unit, and UNITLESS, so it
      *  crosses the px/pt boundary unchanged (unlike size and leading). */
     trackingPerMille: number;
@@ -377,6 +386,7 @@ export interface ImageSession {
       text: string;
       family: string;
       sizePx: number;
+      style: string | null;
       trackingPerMille: number;
       leadingPx: number | null;
     }>,
@@ -607,6 +617,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       text: "",
       family: "Helvetica",
       sizePx: 48,
+      style: null,
       trackingPerMille: 0,
       leadingPx: null,
     },
@@ -2066,14 +2077,31 @@ export function createImageSession(host: BundleHost): ImageSession {
         setStatus("This host serves no fonts (assets.fonts@1).");
         return false;
       }
-      const face = await host.assets.getFontFace(family);
+      // The STYLE axis rides the same door — the contract has taken
+      // `style?` all along, so this needed no SDK change. Null asks for
+      // the family's default face.
+      const face = await host.assets.getFontFace(
+        family,
+        state.type.style ?? undefined,
+      );
       if (!face) {
+        const asked = state.type.style ? ` ${state.type.style}` : "";
         setStatus(
-          `The document carries no bytes for "${family}" — type renders ` +
-            "the faces the document already embeds, never a web fetch.",
+          `The document carries no bytes for "${family}${asked}" — type ` +
+            "renders the faces the document already embeds, never a web " +
+            "fetch.",
         );
         return false;
       }
+      // WHAT CAME BACK, not what was asked for. A host may resolve a
+      // request for Bold to the family's regular face, and a designer
+      // who typed Bold and got Regular should be told rather than left
+      // to notice. `face.style` is the host's own answer.
+      const resolvedStyle = face.style ?? null;
+      const styleDrift =
+        state.type.style !== null &&
+        resolvedStyle !== null &&
+        resolvedStyle.toLowerCase() !== state.type.style.toLowerCase();
       state.busy = true;
       emit();
       let missing = 0;
@@ -2104,7 +2132,10 @@ export function createImageSession(host: BundleHost): ImageSession {
           ? `Type set in ${family} — ${missing} character${
               missing === 1 ? " has" : "s have"
             } no glyph in this font and ${missing === 1 ? "was" : "were"} not drawn.`
-          : `Type set in ${family}.`,
+          : styleDrift
+            ? `Type set in ${family} — the document embeds no ` +
+              `"${state.type.style}" face, so "${resolvedStyle}" was used.`
+            : `Type set in ${family}${resolvedStyle ? ` ${resolvedStyle}` : ""}.`,
       );
       return true;
     },

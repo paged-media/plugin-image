@@ -106,6 +106,18 @@ export const VALUED_PATHS: readonly PropertyPath[] = [
   // act on, which is the kind of live-looking dead surface the brand
   // honesty rule forbids.
   "characterLeading",
+  // STYLE (2026-08-09). The provider's own note used to park this on
+  // "when the face lookup grows a style axis" — and the axis was
+  // already there: `AssetSurface.getFontFace(family, style?)` has taken
+  // an optional style all along, and the adapter, the editor's asset
+  // source and the `requestFontFaceBytes` wire payload all carry it.
+  // Nothing needed adding anywhere; the type lane simply never asked.
+  //
+  // What this serves is the REQUEST, not the resolution — the host owns
+  // face matching, so a request for Bold against a document that embeds
+  // no bold face resolves to what it has, and the session says so in
+  // its status line rather than letting the drift pass silently.
+  "characterFontStyle",
 ];
 
 /**
@@ -134,7 +146,6 @@ export const ABSENT_PATHS: readonly PropertyPath[] = [
   // underline) would become real if the type lane grew past one run on
   // one line — they are absent because the FEATURE is absent, not
   // because of any unit or binding problem.
-  "characterFontStyle",
   "characterKerningMethod",
   "characterBaselineShift",
   "characterHorizontalScale",
@@ -222,6 +233,15 @@ export function makeTextBindingProvider(
             value: (t.sizePx * ptPerPx) as unknown as Value,
           };
         }
+        case "characterFontStyle":
+          // Null is UNSET — the family's default face — and reads as
+          // absent rather than as a guessed "Regular". The plugin has
+          // not resolved anything yet, and naming a face it did not
+          // choose would be inventing the value this provider exists to
+          // avoid inventing.
+          return t.style === null
+            ? { kind: "absent", reason: "no style set — the family's default face" }
+            : { kind: "value", value: t.style as unknown as Value };
         case "characterTracking":
           // No conversion, and that is the point — 1/1000 em is
           // size-relative, so it is already the panel's number.
@@ -313,6 +333,14 @@ export function makeTextBindingProvider(
           // anyway; rounding here keeps the value the panel reads back
           // equal to the one it committed, within a pixel.
           session.setType({ sizePx: Math.max(1, Math.round(pt / ptPerPx)) });
+          return ok();
+        }
+        case "characterFontStyle": {
+          const style = String(request.value ?? "").trim();
+          // An emptied field means "the family's default face", which is
+          // the only way back once a style has been typed — same shape
+          // as clearing leading back to AUTO.
+          session.setType({ style: style === "" ? null : style });
           return ok();
         }
         case "characterTracking": {

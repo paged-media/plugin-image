@@ -78,7 +78,8 @@ function systemFace(): Uint8Array | null {
 }
 
 /** A session over the real wasm, with a host that serves `face`. */
-async function withFont(face: Uint8Array | null) {
+async function withFont(face: Uint8Array | null, resolvedStyle?: string) {
+  const asked: Array<{ family: string; style: string | null }> = [];
   const fake = makeFakeEditor();
   fake.placed.set("u1", psdBytes());
   fake.geometry.set("u1", geomFor("u1", [0, 0, 100, 200]));
@@ -96,24 +97,83 @@ async function withFont(face: Uint8Array | null) {
       // no fonts", which is the honest no-door message and exactly what
       // it should say when a host really wires nothing.
       assetSource: {
-        getFontFace: async () =>
-          face ? { family: "Test", bytes: face, format: "truetype" } : null,
+        // RECORDS what it was asked for. Without this the style axis
+        // can be "wired" all the way to a door that ignores it, and
+        // every assertion above still passes — the shape of a test that
+        // proves plumbing rather than behaviour.
+        getFontFace: async (family: string, style?: string) => {
+          asked.push({ family, style: style ?? null });
+          return face
+            ? {
+                family: "Test",
+                bytes: face,
+                format: "truetype",
+                // The RESOLVED style, which a host is free to make
+                // differ from the request.
+                style: resolvedStyle ?? undefined,
+              }
+            : null;
+        },
         getPlacedImage: async () => null,
       } as never,
     },
   );
   const session = createImageSession(handle.host);
   expect(await session.ingestSelection()).toBe(true);
-  return { session, handle, fake };
+  return { session, handle, fake, asked };
 }
 
 describe("the raster type lane", () => {
+  it("asks the FACE DOOR for the style, and reports what came back", async () => {
+    const face = systemFace();
+    if (!face) {
+      console.warn("no system font available — skipping the style assertions");
+      return;
+    }
+    // The host resolves this request to REGULAR: a document that
+    // embeds no bold face is the common case, and the interesting
+    // behaviour is what the designer is told about it.
+    const { session, handle, asked } = await withFont(face, "Regular");
+
+    session.setType({ family: "Test", style: "Bold", sizePx: 20 });
+    await session.paintText([1, 1], "Hi", "Test", 20);
+
+    // THE ASK REACHED THE DOOR. `getFontFace(family, style?)` has taken
+    // an optional style since it shipped — the type lane simply never
+    // passed one, so this asserts the wiring rather than the contract.
+    expect(asked.at(-1)).toEqual({ family: "Test", style: "Bold" });
+
+    // WHAT THIS TEST CANNOT REACH, stated rather than faked: the
+    // drift SENTENCE ("the document embeds no Bold face, so Regular was
+    // used") lands on the SUCCESS status, and in Node the paint stops
+    // earlier at the GPU gate — fills are device-only, which the
+    // neighbouring test documents for the same reason. So the assertion
+    // here is that the failure was not a FONT failure: the face
+    // resolved, and the request carried the style.
+    expect(session.state().status).not.toContain("no bytes");
+    expect(session.state().status).not.toContain("serves no fonts");
+
+    // Clearing the style asks for the family's DEFAULT face — the only
+    // way back once a style has been typed.
+    session.setType({ style: null });
+    await session.paintText([1, 1], "Hi", "Test", 20);
+    expect(asked.at(-1)).toEqual({ family: "Test", style: null });
+
+    session.dispose();
+    handle.dispose();
+  });
+
+
   it("keeps its settings on the SESSION, so several runs share them", async () => {
     const { session, handle } = await withFont(null);
     expect(session.state().type).toEqual({
       text: "",
       family: "Helvetica",
       sizePx: 48,
+      // Style defaults to UNSET — the family's default face. Not
+      // "Regular": naming a face the plugin did not resolve would be
+      // inventing a value.
+      style: null,
       // Tracking defaults to ZERO — the face's own advances, untouched.
       trackingPerMille: 0,
       // Leading defaults to AUTO (null), not to a multiple of the size:
