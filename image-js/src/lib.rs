@@ -1617,6 +1617,81 @@ mod wasm {
         apply_point_kernel(handle, &GEOM_WARP_BACKWARD, params.as_bytes()).await
     }
 
+    /// STYLIZE — emboss. `angle_deg` is the light direction, `height`
+    /// the relief strength; height 0 is the identity (flat mid-grey
+    /// plus nothing).
+    pub async fn apply_emboss(
+        handle: u32,
+        angle_deg: f32,
+        height: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvEmbossParams, CONV_EMBOSS};
+        let params = ConvEmbossParams::new(angle_deg, height);
+        apply_point_kernel(handle, &CONV_EMBOSS, params.as_bytes()).await
+    }
+
+    /// STYLIZE — find edges. `strength` scales the gradient before the
+    /// inversion; the result is dark lines on white.
+    pub async fn apply_find_edges(handle: u32, strength: f32) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvFindEdgesParams, CONV_FIND_EDGES};
+        let params = ConvFindEdgesParams::new(strength);
+        apply_point_kernel(handle, &CONV_FIND_EDGES, params.as_bytes()).await
+    }
+
+    /// BLUR GALLERY — motion. `length_px` 0 is the identity.
+    pub async fn apply_motion_blur(
+        handle: u32,
+        angle_deg: f32,
+        length_px: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvMotionParams, CONV_MOTION};
+        let params = ConvMotionParams::new(angle_deg, length_px);
+        apply_point_kernel(handle, &CONV_MOTION, params.as_bytes()).await
+    }
+
+    /// BLUR GALLERY — radial. `spin` picks the mode; `amount` 0 is the
+    /// identity for both. The centre is NORMALISED (0..1) so it survives
+    /// a resize, unlike a pixel centre which would drift.
+    pub async fn apply_radial_blur(
+        handle: u32,
+        cx: f32,
+        cy: f32,
+        amount: f32,
+        spin: bool,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvRadialParams, CONV_RADIAL};
+        let params = ConvRadialParams::new(cx, cy, amount, spin);
+        apply_point_kernel(handle, &CONV_RADIAL, params.as_bytes()).await
+    }
+
+    /// PIXELATE — mosaic. `cell_px` <= 1 is the identity.
+    pub async fn apply_mosaic(handle: u32, cell_px: f32) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::geom::{MosaicParams, GEOM_MOSAIC};
+        let params = MosaicParams::new(cell_px);
+        apply_point_kernel(handle, &GEOM_MOSAIC, params.as_bytes()).await
+    }
+
+    /// ADJUST — selective colour. `range` 0..8; all-zero deltas are the
+    /// identity for every range.
+    pub async fn apply_selective_color(
+        handle: u32,
+        range: u32,
+        cyan: f32,
+        magenta: f32,
+        yellow: f32,
+        black: f32,
+        absolute: bool,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::adjust::{SelectiveColorParams, ADJUST_SELECTIVE_COLOR};
+        if range > 8 {
+            return Err(JsValue::from_str(&format!(
+                "unknown selective-colour range {range} (0 reds .. 8 blacks)"
+            )));
+        }
+        let params = SelectiveColorParams::new(range, cyan, magenta, yellow, black, absolute);
+        apply_point_kernel(handle, &ADJUST_SELECTIVE_COLOR, params.as_bytes()).await
+    }
+
     /// Shared body for "run ONE kernel over the whole image and land the
     /// result like a fill" — the same prelude, mask, journal and
     /// layered-vs-flat landing every fill already goes through, so a new

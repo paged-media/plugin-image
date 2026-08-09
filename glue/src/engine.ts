@@ -440,6 +440,19 @@ export interface DecodedInfo {
  *  working sRGB space; the other two are honest pass-throughs. */
 export type DisplayTreatment = "managed" | "assumed-srgb" | "profile-rejected";
 
+/** The DecodedInfo every kernel-apply returns. One place, because six
+ *  hand-written copies of the same field list is six chances to forget
+ *  `depthReduced` and have a 16-bit source silently stop reporting. */
+function decodedInfoOf(h: DecodedHandleWasm): DecodedInfo {
+  return {
+    handle: h.handle,
+    width: h.width,
+    height: h.height,
+    display: displayTreatmentOf(h.display),
+    depthReduced: h.depth_reduced === true,
+  };
+}
+
 /** The distortion kinds `geom.warp_backward` carries. Order matches the
  *  kernel's `kind` discriminant. */
 export const WARP_KINDS = ["pinch", "spherize", "twirl", "wave"] as const;
@@ -1097,6 +1110,40 @@ export interface ImageEngine {
     amount: number,
     frequency?: number,
   ): Promise<DecodedInfo>;
+  /** STYLIZE — directional relief. `height === 0` is the identity. */
+  applyEmboss(
+    handle: number,
+    angleDeg: number,
+    height: number,
+  ): Promise<DecodedInfo>;
+  /** STYLIZE — inverted Sobel: DARK lines on white, as Photoshop draws
+   *  them. Runs per channel, so an equal-luma colour edge registers. */
+  applyFindEdges(handle: number, strength: number): Promise<DecodedInfo>;
+  /** BLUR GALLERY — motion. `lengthPx === 0` is the identity. */
+  applyMotionBlur(
+    handle: number,
+    angleDeg: number,
+    lengthPx: number,
+  ): Promise<DecodedInfo>;
+  /** BLUR GALLERY — radial spin/zoom. The centre is NORMALISED (0..1)
+   *  so it survives a resize; `amount === 0` is the identity. */
+  applyRadialBlur(
+    handle: number,
+    cx: number,
+    cy: number,
+    amount: number,
+    spin: boolean,
+  ): Promise<DecodedInfo>;
+  /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
+  applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /** Per-range CMYK shift. `range` 0..8; all-zero deltas are the
+   *  identity for every range. */
+  applySelectiveColor(
+    handle: number,
+    range: number,
+    cmyk: readonly [number, number, number, number],
+    absolute: boolean,
+  ): Promise<DecodedInfo>;
   /** Convert a pixel layer into a smart object, preserving its pixels
    *  as the source. One-way: going back would discard the source. */
   layerMakeSmart(index: number): void;
@@ -1439,6 +1486,34 @@ export interface ImageWasmModule {
     kind: number,
     amount: number,
     frequency: number,
+  ): Promise<DecodedHandleWasm>;
+  apply_emboss(
+    handle: number,
+    angle_deg: number,
+    height: number,
+  ): Promise<DecodedHandleWasm>;
+  apply_find_edges(handle: number, strength: number): Promise<DecodedHandleWasm>;
+  apply_motion_blur(
+    handle: number,
+    angle_deg: number,
+    length_px: number,
+  ): Promise<DecodedHandleWasm>;
+  apply_radial_blur(
+    handle: number,
+    cx: number,
+    cy: number,
+    amount: number,
+    spin: boolean,
+  ): Promise<DecodedHandleWasm>;
+  apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
+  apply_selective_color(
+    handle: number,
+    range: number,
+    cyan: number,
+    magenta: number,
+    yellow: number,
+    black: number,
+    absolute: boolean,
   ): Promise<DecodedHandleWasm>;
   layers_make_smart(index: number): void;
   layers_render_smart(index: number, scale: number): Promise<void>;
@@ -1902,6 +1977,40 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         display: displayTreatmentOf(h.display),
         depthReduced: h.depth_reduced === true,
       };
+    },
+    // ONE decoder for all six: the return shape is identical, and six
+    // hand-written copies of it is six chances to forget a field.
+    async applyEmboss(handle, angleDeg, height) {
+      return decodedInfoOf(await wasm.apply_emboss(handle, angleDeg, height));
+    },
+    async applyFindEdges(handle, strength) {
+      return decodedInfoOf(await wasm.apply_find_edges(handle, strength));
+    },
+    async applyMotionBlur(handle, angleDeg, lengthPx) {
+      return decodedInfoOf(
+        await wasm.apply_motion_blur(handle, angleDeg, lengthPx),
+      );
+    },
+    async applyRadialBlur(handle, cx, cy, amount, spin) {
+      return decodedInfoOf(
+        await wasm.apply_radial_blur(handle, cx, cy, amount, spin),
+      );
+    },
+    async applyMosaic(handle, cellPx) {
+      return decodedInfoOf(await wasm.apply_mosaic(handle, cellPx));
+    },
+    async applySelectiveColor(handle, range, cmyk, absolute) {
+      return decodedInfoOf(
+        await wasm.apply_selective_color(
+          handle,
+          range,
+          cmyk[0],
+          cmyk[1],
+          cmyk[2],
+          cmyk[3],
+          absolute,
+        ),
+      );
     },
     layerMakeSmart: (index) => wasm.layers_make_smart(index),
     layerRenderSmart: (index, scale) => wasm.layers_render_smart(index, scale),

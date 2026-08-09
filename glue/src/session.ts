@@ -352,6 +352,27 @@ export interface ImageSession {
     amount: number,
     frequency?: number,
   ): Promise<boolean>;
+  /** STYLIZE — directional relief. `height` 0 is the identity. */
+  applyEmboss(angleDeg: number, height: number): Promise<boolean>;
+  /** STYLIZE — inverted Sobel: dark lines on white. */
+  applyFindEdges(strength: number): Promise<boolean>;
+  /** BLUR GALLERY — motion. `lengthPx` 0 is the identity. */
+  applyMotionBlur(angleDeg: number, lengthPx: number): Promise<boolean>;
+  /** BLUR GALLERY — radial spin/zoom about a NORMALISED centre. */
+  applyRadialBlur(
+    cx: number,
+    cy: number,
+    amount: number,
+    spin: boolean,
+  ): Promise<boolean>;
+  /** PIXELATE — mosaic. `cellPx` <= 1 is the identity. */
+  applyMosaic(cellPx: number): Promise<boolean>;
+  /** Per-range CMYK shift (0 reds .. 8 blacks). */
+  applySelectiveColor(
+    range: number,
+    cmyk: readonly [number, number, number, number],
+    absolute: boolean,
+  ): Promise<boolean>;
   setParams(p: Partial<AdjustParams>): void;
   /** Set the composite levels (merged into params.levels). */
   setLevels(l: Partial<LevelsParams>): void;
@@ -1656,6 +1677,38 @@ export function createImageSession(host: BundleHost): ImageSession {
     async applyWarp(kind, amount, frequency = 1) {
       return this.applyEffect(`Distort (${kind})`, (h) =>
         engine!.applyWarp(h, kind, amount, frequency),
+      );
+    },
+    // All six ride `applyEffect`, so they inherit the SAME journal
+    // entry, status line and layered-vs-flat landing every other effect
+    // has. A new effect that reached the engine directly would acquire
+    // different undo semantics without anyone deciding that.
+    async applyEmboss(angleDeg, height) {
+      return this.applyEffect("Emboss", (h) =>
+        engine!.applyEmboss(h, angleDeg, height),
+      );
+    },
+    async applyFindEdges(strength) {
+      return this.applyEffect("Find edges", (h) =>
+        engine!.applyFindEdges(h, strength),
+      );
+    },
+    async applyMotionBlur(angleDeg, lengthPx) {
+      return this.applyEffect("Motion blur", (h) =>
+        engine!.applyMotionBlur(h, angleDeg, lengthPx),
+      );
+    },
+    async applyRadialBlur(cx, cy, amount, spin) {
+      return this.applyEffect(spin ? "Spin blur" : "Zoom blur", (h) =>
+        engine!.applyRadialBlur(h, cx, cy, amount, spin),
+      );
+    },
+    async applyMosaic(cellPx) {
+      return this.applyEffect("Mosaic", (h) => engine!.applyMosaic(h, cellPx));
+    },
+    async applySelectiveColor(range, cmyk, absolute) {
+      return this.applyEffect("Selective colour", (h) =>
+        engine!.applySelectiveColor(h, range, cmyk, absolute),
       );
     },
 

@@ -2468,6 +2468,71 @@ export function makeImagePanel(session: ImageSession) {
           reconstruction filter and edge rule with the crop straighten.
         </div>
 
+        <div style={sectionTitle}>Stylize, blur &amp; pixelate</div>
+        <div style={row}>
+          <button
+            type="button"
+            data-image-emboss
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Directional relief. A flat region stays mid-grey, which is what makes it read as relief rather than as an edge map."
+            onClick={() => void session.applyEmboss(135, 1)}
+          >
+            Emboss
+          </button>
+          <button
+            type="button"
+            data-image-find-edges
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Sobel magnitude, inverted — dark lines on white, and run per channel so an equal-luminance colour edge still registers."
+            onClick={() => void session.applyFindEdges(1)}
+          >
+            Find edges
+          </button>
+          <button
+            type="button"
+            data-image-motion-blur
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Directional blur along a line, centred on the pixel so the subject smears symmetrically."
+            onClick={() => void session.applyMotionBlur(0, 24)}
+          >
+            Motion blur
+          </button>
+          <button
+            type="button"
+            data-image-spin-blur
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Radial blur, spin: the smear grows outward because arc length scales with radius."
+            onClick={() => void session.applyRadialBlur(0.5, 0.5, 0.15, true)}
+          >
+            Spin blur
+          </button>
+          <button
+            type="button"
+            data-image-zoom-blur
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Radial blur, zoom: the same arc walk holding the angle and varying the radius."
+            onClick={() => void session.applyRadialBlur(0.5, 0.5, 0.15, false)}
+          >
+            Zoom blur
+          </button>
+          <button
+            type="button"
+            data-image-mosaic
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Pixelate by quantizing the source coordinate and sampling the cell centre — hard blocks, not smoothed steps."
+            onClick={() => void session.applyMosaic(12)}
+          >
+            Mosaic
+          </button>
+        </div>
+        <div style={note}>
+          One-click defaults, not a parameter surface: each of these is a
+          single kernel and every one has an identity setting, so a slider
+          adds nothing a designer cannot get by applying twice. Emboss and
+          find edges share one 3&times;3 neighbourhood read; the two radial
+          modes are one kernel, where zoom is the degenerate arc.
+        </div>
+
         {/* LAYERS — the layer graph itself: order, visibility, opacity,
             blend and the active-layer choice paint/fill/bake land in,
             plus the journal's undo/redo and its stated bound. */}
