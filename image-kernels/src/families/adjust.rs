@@ -1871,6 +1871,194 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
 "
 );
 
+// ── Selective Color ────────────────────────────────────────────────
+//
+// Photoshop's Selective Color shifts CMYK within one colour RANGE at a
+// time — "make the reds less magenta" without touching the blues. It is
+// the last unbuilt row of the §14.1 adjustments table.
+//
+// THE RANGE MEMBERSHIP IS THE WHOLE DESIGN, and it is not a hue window.
+// Photoshop's ranges are defined by channel ORDER: a pixel is "red" to
+// the extent that R is its max and its distance from the other two is
+// large. That formulation gives a SMOOTH weight with no seams at hue
+// boundaries and no wraparound special case at 0°/360° — which a hue
+// window needs and gets wrong at exactly the reds.
+//
+// RELATIVE vs ABSOLUTE is the other real choice and both ship: relative
+// scales the shift by how much of that ink is already there (so a pale
+// area barely moves), absolute adds it flat. Relative is Photoshop's
+// default because it preserves tonality; absolute is what you reach for
+// when relative will not go far enough.
+
+/// Selective-colour params: the target range, CMYK deltas in [-1,1],
+/// and the relative/absolute mode.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct SelectiveColorParams {
+    /// 0 reds · 1 yellows · 2 greens · 3 cyans · 4 blues · 5 magentas
+    /// · 6 whites · 7 neutrals · 8 blacks
+    pub range: u32,
+    pub cyan: f32,
+    pub magenta: f32,
+    pub yellow: f32,
+    pub black: f32,
+    /// 0 = relative (scale by existing ink), 1 = absolute.
+    pub absolute: u32,
+}
+
+#[allow(clippy::new_without_default, clippy::too_many_arguments)]
+impl SelectiveColorParams {
+    pub fn new(
+        range: u32,
+        cyan: f32,
+        magenta: f32,
+        yellow: f32,
+        black: f32,
+        absolute: bool,
+    ) -> Self {
+        Self {
+            range,
+            cyan,
+            magenta,
+            yellow,
+            black,
+            absolute: u32::from(absolute),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// Per-range CMYK shift. All-zero deltas are the IDENTITY for every
+/// range, so one parity test covers all nine.
+pub static ADJUST_SELECTIVE_COLOR: KernelDef = KernelDef {
+    id: "adjust.selective_color",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<SelectiveColorParams>(),
+        fields: &[
+            ParamField {
+                name: "range",
+                wgsl_ty: "u32",
+            },
+            ParamField {
+                name: "cyan",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "magenta",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "yellow",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "black",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "absolute",
+                wgsl_ty: "u32",
+            },
+        ],
+    },
+    wgsl: ADJUST_SELECTIVE_COLOR_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const ADJUST_SELECTIVE_COLOR_WGSL: &str = "\
+// paged.image kernel `adjust.selective_color` — handwritten, ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    range: u32,
+    cyan: f32,
+    magenta: f32,
+    yellow: f32,
+    black: f32,
+    absolute: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+// Membership by channel ORDER, not by hue angle — smooth, and with no
+// wraparound case at the reds.
+fn weight_for(rgb: vec3<f32>, range: u32) -> f32 {
+    let mx = max(rgb.r, max(rgb.g, rgb.b));
+    let mn = min(rgb.r, min(rgb.g, rgb.b));
+    let mid = rgb.r + rgb.g + rgb.b - mx - mn;
+    let chroma = mx - mn;
+
+    // Achromatic ranges first: they are about LIGHTNESS, and a pixel
+    // with no chroma belongs to no hue range at all.
+    if (range == 6u) { return clamp((mn - 0.5) * 2.0, 0.0, 1.0); }        // whites
+    if (range == 8u) { return clamp((0.5 - mx) * 2.0, 0.0, 1.0); }        // blacks
+    if (range == 7u) {                                                     // neutrals
+        return clamp(1.0 - chroma * 2.0, 0.0, 1.0)
+             * clamp(1.0 - abs(mx + mn - 1.0), 0.0, 1.0);
+    }
+    if (chroma <= 0.0) { return 0.0; }
+
+    // PRIMARIES are max-dominant; SECONDARIES are min-deficient. The
+    // weight is how cleanly the pixel fits that pattern.
+    var w = 0.0;
+    if (range == 0u) { w = select(0.0, (mx - mid) / chroma, rgb.r >= mx); }        // reds
+    else if (range == 2u) { w = select(0.0, (mx - mid) / chroma, rgb.g >= mx); }   // greens
+    else if (range == 4u) { w = select(0.0, (mx - mid) / chroma, rgb.b >= mx); }   // blues
+    else if (range == 1u) { w = select(0.0, (mid - mn) / chroma, rgb.b <= mn); }   // yellows
+    else if (range == 3u) { w = select(0.0, (mid - mn) / chroma, rgb.r <= mn); }   // cyans
+    else if (range == 5u) { w = select(0.0, (mid - mn) / chroma, rgb.g <= mn); }   // magentas
+    return clamp(w, 0.0, 1.0) * clamp(chroma * 2.0, 0.0, 1.0);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+    let rgb = clamp(a.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    let w = weight_for(rgb, params.range);
+    // RGB → CMYK. k is the black generation; a fully black pixel has
+    // no chromatic ink to scale, which the guard below preserves.
+    let k = 1.0 - max(rgb.r, max(rgb.g, rgb.b));
+    let inv = 1.0 - k;
+    var cmy = vec3<f32>(0.0);
+    if (inv > 0.0) { cmy = (vec3<f32>(inv) - (rgb - vec3<f32>(0.0))) / inv; }
+    cmy = clamp(cmy, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    let delta = vec3<f32>(params.cyan, params.magenta, params.yellow) * w;
+    var cmy2 : vec3<f32>;
+    var k2 : f32;
+    if (params.absolute == 1u) {
+        cmy2 = cmy + delta;
+        k2 = k + params.black * w;
+    } else {
+        // RELATIVE — scale by the ink already present, so a pale area
+        // barely moves. This is what preserves tonality.
+        cmy2 = cmy + cmy * delta;
+        k2 = k + k * params.black * w;
+    }
+    cmy2 = clamp(cmy2, vec3<f32>(0.0), vec3<f32>(1.0));
+    k2 = clamp(k2, 0.0, 1.0);
+
+    let out_rgb = (vec3<f32>(1.0) - cmy2) * (1.0 - k2);
+    let result = vec4<f32>(clamp(out_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), a.a);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_LUT1D,
     &ADJUST_LUT3D,
@@ -1890,4 +2078,5 @@ pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_PHOTO_FILTER,
     &ADJUST_CHANNEL_MIXER,
     &ADJUST_LEVELS_RGB,
+    &ADJUST_SELECTIVE_COLOR,
 ];

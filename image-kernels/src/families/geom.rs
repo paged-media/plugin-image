@@ -802,6 +802,99 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+// ── Pixelate: mosaic ───────────────────────────────────────────────
+//
+// Photoshop's Pixelate family is several effects over one idea: quantize
+// the SOURCE COORDINATE, then sample. Mosaic is the square-cell case and
+// the one everything else varies (Crystallize uses Voronoi cells,
+// Fragment offsets four copies) — so this lands in `geom` beside the
+// warp rather than in `conv`, because it is a coordinate function, not a
+// neighbourhood average.
+//
+// SAMPLING THE CELL CENTRE, not averaging the cell, is deliberate: it is
+// what Photoshop does, it is O(1) per texel instead of O(cell²), and the
+// difference shows on a gradient — an average produces smooth steps, a
+// centre sample produces the hard posterized blocks people expect.
+
+/// Mosaic params: cell size in PIXELS. 1 is the identity.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct MosaicParams {
+    pub cell_px: f32,
+    pub _abi_pad0: u32,
+    pub _abi_pad1: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl MosaicParams {
+    pub fn new(cell_px: f32) -> Self {
+        Self {
+            cell_px,
+            _abi_pad0: 0,
+            _abi_pad1: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// Square-cell pixelation by source-coordinate quantization.
+pub static GEOM_MOSAIC: KernelDef = KernelDef {
+    id: "geom.mosaic",
+    class: KernelClass::Resample { support: 1.0 },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<MosaicParams>(),
+        fields: &[ParamField {
+            name: "cell_px",
+            wgsl_ty: "f32",
+        }],
+    },
+    wgsl: GEOM_MOSAIC_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const GEOM_MOSAIC_WGSL: &str = "\
+// paged.image kernel `geom.mosaic` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    cell_px: f32,
+    _abi_pad0: u32,
+    _abi_pad1: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    // max(1) makes cell 0 and cell 1 both the IDENTITY rather than a
+    // divide by zero — a slider that starts at its minimum must not
+    // produce NaN before the user has touched it.
+    let cell = max(params.cell_px, 1.0);
+    let cx = floor(f32(xy.x) / cell) * cell + cell * 0.5;
+    let cy = floor(f32(xy.y) / cell) * cell + cell * 0.5;
+    let c = clamp(vec2<i32>(i32(cx), i32(cy)),
+                  vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+    let result = textureLoad(in0, c, 0);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
     &GEOM_FLIP_H,
     &GEOM_FLIP_V,
@@ -810,6 +903,7 @@ pub static FAMILY: &[&KernelDef] = &[
     &GEOM_CROP,
     &GEOM_ROTATE_BILINEAR,
     &GEOM_WARP_BACKWARD,
+    &GEOM_MOSAIC,
 ];
 
 #[cfg(test)]

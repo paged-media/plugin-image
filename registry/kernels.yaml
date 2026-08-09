@@ -1452,3 +1452,89 @@
     - "rank filtering (3x3 median via a fixed compare-exchange selection network): standard literature; no reference reading"
   tests:
     rust: ["image-conformance/tests/family_morph.rs"]
+
+- id: conv.emboss
+  rust_path: families::conv::CONV_EMBOSS
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "3x3 directional derivative plus a 0.5 mid-grey bias, so a FLAT region stays mid-grey rather than black — that bias is what makes emboss read as relief instead of as an edge map. Standard form; no reference reading."
+    - "ships with conv.find_edges: same neighbourhood read, different taps, so writing one without the other would mean two window loops to keep in step"
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]
+
+- id: conv.find_edges
+  rust_path: families::conv::CONV_FIND_EDGES
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Sobel magnitude, INVERTED — Photoshop's Find Edges draws dark lines on white, not white on black; getting that backwards yields a plausible-looking wrong effect"
+    - "run per CHANNEL rather than on luminance, so a red-on-green edge at equal luma still registers — a luma-only gradient misses exactly the edges a designer drew deliberately"
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]
+
+- id: conv.motion
+  rust_path: families::conv::CONV_MOTION
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "line-integral blur: average N taps along a direction, centred on the pixel so the subject smears symmetrically rather than sliding off its own position"
+    - "TAP COUNT IS FIXED (17), not derived from length: a length-derived count makes cost depend on a slider and a designer dragging one falls off a performance cliff mid-gesture. Fixed count + varying step keeps cost flat and degrades by undersampling, which is visible as banding at extreme lengths — the honest failure."
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]
+
+- id: conv.radial
+  rust_path: families::conv::CONV_RADIAL
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Photoshop's two Radial Blur modes are ONE kernel: both walk an arc about a centre, and zoom is the degenerate arc that holds the angle and varies the radius"
+    - "spin's arc length scales with radius, so the smear grows outward — that is what makes it read as rotation rather than as noise"
+  tests:
+    rust: ["image-conformance/tests/family_conv.rs"]
+
+- id: geom.mosaic
+  rust_path: families::geom::GEOM_MOSAIC
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "source-coordinate quantization, which is why it sits in geom beside the warp rather than in conv — it is a coordinate function, not a neighbourhood average"
+    - "samples the CELL CENTRE rather than averaging the cell: it is what Photoshop does, it is O(1) instead of O(cell^2), and on a gradient an average gives smooth steps where a centre sample gives the hard posterized blocks people expect"
+    - "cell <= 1 is the IDENTITY via max(1), so a slider at its minimum cannot divide by zero before the user has touched it"
+  tests:
+    rust: ["image-conformance/tests/family_geom.rs"]
+
+- id: adjust.selective_color
+  rust_path: families::adjust::ADJUST_SELECTIVE_COLOR
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "per-range CMYK shift. Range membership is by channel ORDER (a pixel is 'red' to the extent R is its max and its distance from the others is large), NOT by a hue window — the order form is smooth, has no seam at hue boundaries, and needs no wraparound special case at 0/360 degrees, which a hue window gets wrong at exactly the reds"
+    - "RELATIVE and ABSOLUTE both ship: relative scales the shift by ink already present so a pale area barely moves (Photoshop's default, and what preserves tonality), absolute adds flat"
+    - "all-zero deltas are the IDENTITY for every range, so one parity test covers all nine"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs"]

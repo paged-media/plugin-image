@@ -398,4 +398,438 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
-pub static FAMILY: &[&KernelDef] = &[&CONV_BOX, &CONV_GAUSSIAN_H, &CONV_GAUSSIAN_V, &CONV_UNSHARP];
+// ── Stylize: emboss + find edges ───────────────────────────────────
+//
+// Both are 3×3 convolutions and they ship TOGETHER because they are the
+// same neighbourhood read with a different tap set — writing one and not
+// the other would mean two window loops that must stay in step.
+//
+// EMBOSS keeps luminance and adds a directional derivative, so a flat
+// region stays mid-grey rather than going black. That mid-grey bias is
+// the whole reason emboss reads as relief instead of as an edge map.
+//
+// FIND EDGES is the Sobel MAGNITUDE, and it is INVERTED — Photoshop's
+// Find Edges draws dark lines on white, not white on black. Getting that
+// backwards produces something that looks like an effect and is the
+// wrong one.
+
+/// Emboss params: light direction in degrees and relief height.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvEmbossParams {
+    pub angle_deg: f32,
+    pub height: f32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvEmbossParams {
+    pub fn new(angle_deg: f32, height: f32) -> Self {
+        Self {
+            angle_deg,
+            height,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// Directional relief: mid-grey plus the derivative along `angle_deg`.
+pub static CONV_EMBOSS: KernelDef = KernelDef {
+    id: "conv.emboss",
+    class: KernelClass::Windowed { radius: (1, 1) },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvEmbossParams>(),
+        fields: &[
+            ParamField {
+                name: "angle_deg",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "height",
+                wgsl_ty: "f32",
+            },
+        ],
+    },
+    wgsl: CONV_EMBOSS_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CONV_EMBOSS_WGSL: &str = "\
+// paged.image kernel `conv.emboss` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    angle_deg: f32,
+    height: f32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+fn tap(xy: vec2<i32>, dims: vec2<i32>) -> vec3<f32> {
+    let c = clamp(xy, vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+    return textureLoad(in0, c, 0).rgb;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    // One offset pair along the light direction: the derivative is the
+    // difference across the pixel, which is what gives relief a side.
+    let r = radians(params.angle_deg);
+    let off = vec2<i32>(i32(round(cos(r))), i32(round(-sin(r))));
+    let fwd = tap(xy + off, dims);
+    let bwd = tap(xy - off, dims);
+    // 0.5 bias keeps a FLAT region mid-grey instead of black.
+    let rel = vec3<f32>(0.5) + (fwd - bwd) * params.height * 0.5;
+    let result = vec4<f32>(clamp(rel, vec3<f32>(0.0), vec3<f32>(1.0)), a.a);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
+/// Find-edges params: `strength` scales the gradient before inversion.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvFindEdgesParams {
+    pub strength: f32,
+    pub _abi_pad0: u32,
+    pub _abi_pad1: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvFindEdgesParams {
+    pub fn new(strength: f32) -> Self {
+        Self {
+            strength,
+            _abi_pad0: 0,
+            _abi_pad1: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// Inverted Sobel magnitude — DARK lines on white, as Photoshop draws.
+pub static CONV_FIND_EDGES: KernelDef = KernelDef {
+    id: "conv.find_edges",
+    class: KernelClass::Windowed { radius: (1, 1) },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvFindEdgesParams>(),
+        fields: &[ParamField {
+            name: "strength",
+            wgsl_ty: "f32",
+        }],
+    },
+    wgsl: CONV_FIND_EDGES_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CONV_FIND_EDGES_WGSL: &str = "\
+// paged.image kernel `conv.find_edges` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    strength: f32,
+    _abi_pad0: u32,
+    _abi_pad1: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+fn tap(xy: vec2<i32>, dims: vec2<i32>) -> vec3<f32> {
+    let c = clamp(xy, vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+    return textureLoad(in0, c, 0).rgb;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    // Sobel, per channel. Run on COLOUR rather than luminance so a
+    // red-on-green edge at equal luma still registers — a luma-only
+    // gradient misses exactly the edges a designer drew deliberately.
+    let tl = tap(xy + vec2<i32>(-1, -1), dims);
+    let tc = tap(xy + vec2<i32>( 0, -1), dims);
+    let tr = tap(xy + vec2<i32>( 1, -1), dims);
+    let ml = tap(xy + vec2<i32>(-1,  0), dims);
+    let mr = tap(xy + vec2<i32>( 1,  0), dims);
+    let bl = tap(xy + vec2<i32>(-1,  1), dims);
+    let bc = tap(xy + vec2<i32>( 0,  1), dims);
+    let br = tap(xy + vec2<i32>( 1,  1), dims);
+
+    let gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+    let gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+    let mag = sqrt(gx * gx + gy * gy) * params.strength;
+    // INVERTED: Photoshop draws dark edges on white.
+    let edges = clamp(vec3<f32>(1.0) - mag, vec3<f32>(0.0), vec3<f32>(1.0));
+    let result = vec4<f32>(edges, a.a);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
+// ── Blur Gallery: motion + radial ──────────────────────────────────
+//
+// Both accumulate along a PATH rather than over a box, which is what
+// separates them from the Gaussian pair — and why they cannot be a
+// separable two-pass like Gaussian is. Motion walks a straight line,
+// radial walks an arc or a ray about a centre; the loop is otherwise
+// identical, so the two share their sampling and their edge rule.
+//
+// TAP COUNT IS FIXED, not derived from the length. A length-derived
+// count makes cost depend on a slider, and a designer dragging one
+// would fall off a performance cliff mid-gesture. A fixed count with a
+// varying STEP keeps the cost flat and degrades by undersampling —
+// visible as banding at extreme lengths, which is the honest failure.
+
+/// Motion-blur params: direction in degrees and length in PIXELS.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvMotionParams {
+    pub angle_deg: f32,
+    pub length_px: f32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvMotionParams {
+    pub fn new(angle_deg: f32, length_px: f32) -> Self {
+        Self {
+            angle_deg,
+            length_px,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// Directional blur: average along a line through the pixel.
+///
+/// The window radius is the MAXIMUM the kernel will read, not the
+/// current length — the ROI must be inflated for the worst case a
+/// parameter can ask for, or a long blur reads outside its tile.
+pub static CONV_MOTION: KernelDef = KernelDef {
+    id: "conv.motion",
+    class: KernelClass::Windowed { radius: (32, 32) },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvMotionParams>(),
+        fields: &[
+            ParamField {
+                name: "angle_deg",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "length_px",
+                wgsl_ty: "f32",
+            },
+        ],
+    },
+    wgsl: CONV_MOTION_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CONV_MOTION_WGSL: &str = "\
+// paged.image kernel `conv.motion` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    angle_deg: f32,
+    length_px: f32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+const TAPS : i32 = 17;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    let r = radians(params.angle_deg);
+    let dir = vec2<f32>(cos(r), -sin(r));
+    // Centred on the pixel: half the length each way, so the subject
+    // smears symmetrically rather than sliding off its own position.
+    let half = params.length_px * 0.5;
+    var acc = vec4<f32>(0.0);
+    for (var i : i32 = 0; i < TAPS; i = i + 1) {
+        let t = (f32(i) / f32(TAPS - 1)) * 2.0 - 1.0;
+        let p = vec2<f32>(f32(xy.x), f32(xy.y)) + dir * (t * half);
+        let c = clamp(vec2<i32>(i32(round(p.x)), i32(round(p.y))),
+                      vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+        acc = acc + textureLoad(in0, c, 0);
+    }
+    let result = acc / f32(TAPS);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
+/// Radial-blur params: centre in NORMALISED coords, amount, and mode
+/// (0 = spin, 1 = zoom).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvRadialParams {
+    pub cx: f32,
+    pub cy: f32,
+    pub amount: f32,
+    pub mode: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvRadialParams {
+    pub fn new(cx: f32, cy: f32, amount: f32, spin: bool) -> Self {
+        Self {
+            cx,
+            cy,
+            amount,
+            mode: if spin { 0 } else { 1 },
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// Spin / zoom blur about a centre. Photoshop's two Radial Blur modes
+/// are ONE kernel: both walk an arc, and zoom is the degenerate arc
+/// that keeps the angle and varies the radius.
+pub static CONV_RADIAL: KernelDef = KernelDef {
+    id: "conv.radial",
+    class: KernelClass::Windowed { radius: (32, 32) },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvRadialParams>(),
+        fields: &[
+            ParamField {
+                name: "cx",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "cy",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "amount",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "mode",
+                wgsl_ty: "u32",
+            },
+        ],
+    },
+    wgsl: CONV_RADIAL_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CONV_RADIAL_WGSL: &str = "\
+// paged.image kernel `conv.radial` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    cx: f32,
+    cy: f32,
+    amount: f32,
+    mode: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+const TAPS : i32 = 17;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    let centre = vec2<f32>(params.cx * f32(dims.x), params.cy * f32(dims.y));
+    let p = vec2<f32>(f32(xy.x), f32(xy.y));
+    let rel = p - centre;
+    let rad = length(rel);
+    let ang = atan2(rel.y, rel.x);
+
+    var acc = vec4<f32>(0.0);
+    for (var i : i32 = 0; i < TAPS; i = i + 1) {
+        let t = (f32(i) / f32(TAPS - 1)) * 2.0 - 1.0;
+        var q : vec2<f32>;
+        if (params.mode == 0u) {
+            // SPIN — vary the angle, hold the radius. The arc length
+            // scales with radius, so the smear grows outward, which is
+            // what makes a spin read as rotation rather than as noise.
+            let a2 = ang + t * params.amount;
+            q = centre + vec2<f32>(cos(a2), sin(a2)) * rad;
+        } else {
+            // ZOOM — hold the angle, vary the radius.
+            q = centre + rel * (1.0 + t * params.amount);
+        }
+        let c = clamp(vec2<i32>(i32(round(q.x)), i32(round(q.y))),
+                      vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+        acc = acc + textureLoad(in0, c, 0);
+    }
+    let result = acc / f32(TAPS);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
+pub static FAMILY: &[&KernelDef] = &[
+    &CONV_BOX,
+    &CONV_GAUSSIAN_H,
+    &CONV_GAUSSIAN_V,
+    &CONV_UNSHARP,
+    &CONV_EMBOSS,
+    &CONV_FIND_EDGES,
+    &CONV_MOTION,
+    &CONV_RADIAL,
+];
