@@ -1171,7 +1171,230 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+/// How the region a move VACATES is left behind.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VacateMode {
+    /// Photoshop's plain Move: the pixels leave, and what they leave is
+    /// transparent.
+    Transparent = 0,
+    /// Photoshop's alt-drag: the pixels are COPIED, so the source keeps
+    /// what it had. This is the behaviour `geom.offset` under a mask
+    /// accidentally approximated, now available deliberately.
+    Copy = 1,
+}
+
+impl VacateMode {
+    /// Rejecting decoder for the JS boundary.
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Transparent),
+            1 => Some(Self::Copy),
+            _ => None,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct MoveSelectionParams {
+    pub dx: f32,
+    pub dy: f32,
+    pub vacate: u32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl MoveSelectionParams {
+    pub fn new(dx: f32, dy: f32, vacate: VacateMode) -> Self {
+        Self {
+            dx,
+            dy,
+            vacate: vacate as u32,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// MOVE the SELECTED pixels — Photoshop's Move tool with an active
+/// selection, which is a different operation from `geom.offset`.
+///
+/// The distinction is worth stating because the naive version is
+/// subtly wrong in a way that looks plausible. `geom.offset` under the
+/// standard ABI mask computes `out(p) = mix(in(p), in(p − d), m(p))`:
+/// the mask is read at the DESTINATION only, so the selection behaves
+/// as a fixed WINDOW through which shifted content scrolls. The
+/// selected pixels never actually go anywhere — content slides past a
+/// stationary hole. That is not a move, and it is not a duplicate
+/// either.
+///
+/// A real move reads the mask TWICE:
+///
+/// ```text
+/// m_src = m(p − d)   // was the pixel that lands here selected?
+/// m_dst = m(p)       // is this pixel part of the region being vacated?
+/// out   = in(p)*(1 − m_dst) + in(p − d)*m_src
+/// ```
+///
+/// That is ADDITIVE — the unselected part of the layer stays put and
+/// the selected part translates — and not the sequential
+/// clear-then-land it is tempting to write. Clearing first and blending
+/// over double-counts at fractional mask values: it comes out as
+/// `a*(1 − m + m²)`, right at 0 and 1 and wrong at every feathered
+/// edge. This was written the wrong way first and a soft-mask identity
+/// test caught it.
+///
+/// Both reads matter independently: `m_src` decides what ARRIVES,
+/// `m_dst` decides what LEAVES, and where the selection overlaps its
+/// own translate both fire on the same pixel — which is exactly the
+/// case a single-mask formulation cannot express at all.
+///
+/// Because it consumes the mask itself rather than through the ABI's
+/// pointwise epilogue, this kernel writes `result` directly, the same
+/// licence `Resample` kernels already take.
+///
+/// IDENTITY: `dx == 0 && dy == 0`. At zero offset `m_src == m_dst`, so
+/// the expression is `a*(1 − m) + a*m = a` exactly, for every mask
+/// value including soft ones, under either vacate mode. Not
+/// special-cased; it falls out of the algebra — which is the reason to
+/// insist on algebra that actually has the property.
+pub static GEOM_MOVE_SELECTION: KernelDef = KernelDef {
+    id: "geom.move_selection",
+    class: KernelClass::Resample { support: 1.0 },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<MoveSelectionParams>(),
+        fields: &[
+            ParamField {
+                name: "dx",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "dy",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "vacate",
+                wgsl_ty: "u32",
+            },
+        ],
+    },
+    wgsl: GEOM_MOVE_SELECTION_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const GEOM_MOVE_SELECTION_WGSL: &str = "\
+// paged.image kernel `geom.move_selection` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    dx: f32,
+    dy: f32,
+    vacate: u32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+fn tap(p: vec2<i32>, dims: vec2<i32>) -> vec4<f32> {
+    let c = clamp(p, vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+    return textureLoad(in0, c, 0);
+}
+
+fn maskAt(p: vec2<i32>, dims: vec2<i32>) -> f32 {
+    // OUTSIDE the image is unselected, not edge-extended. Clamping the
+    // mask would smear the selection's border rows outward and a move
+    // near an edge would drag a stripe with it.
+    if (p.x < 0 || p.y < 0 || p.x >= dims.x || p.y >= dims.y) {
+        return 0.0;
+    }
+    return textureLoad(mask, p, 0).r;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    // Backward map: what lands at p came from p - d.
+    let sx = f32(xy.x) - params.dx;
+    let sy = f32(xy.y) - params.dy;
+    let x0 = i32(floor(sx));
+    let y0 = i32(floor(sy));
+    let fx = sx - f32(x0);
+    let fy = sy - f32(y0);
+
+    // BILINEAR, for the same reason geom.offset is: a drag at any zoom
+    // produces fractional deltas, and rounding makes the moved pixels
+    // sit still and then jump. Integer offsets give fx == fy == 0
+    // exactly, so a whole-pixel move stays bit-exact.
+    let p00 = tap(vec2<i32>(x0,     y0    ), dims);
+    let p10 = tap(vec2<i32>(x0 + 1, y0    ), dims);
+    let p01 = tap(vec2<i32>(x0,     y0 + 1), dims);
+    let p11 = tap(vec2<i32>(x0 + 1, y0 + 1), dims);
+    let moved = mix(mix(p00, p10, fx), mix(p01, p11, fx), fy);
+
+    // The ARRIVING coverage is the mask sampled at the source, filtered
+    // the same way the colour is — otherwise a soft-edged selection
+    // moves with a hard edge and the feather is lost on the first drag.
+    let m00 = maskAt(vec2<i32>(x0,     y0    ), dims);
+    let m10 = maskAt(vec2<i32>(x0 + 1, y0    ), dims);
+    let m01 = maskAt(vec2<i32>(x0,     y0 + 1), dims);
+    let m11 = maskAt(vec2<i32>(x0 + 1, y0 + 1), dims);
+    let m_src = mix(mix(m00, m10, fx), mix(m01, m11, fx), fy);
+
+    let m_dst = textureLoad(mask, xy, 0).r;
+
+    // ADDITIVE composition, not a sequential clear-then-land. The
+    // obvious formulation — empty the source region, then blend the
+    // arriving pixels over it — double-counts wherever the mask is
+    // FRACTIONAL: it evaluates to a*(1 - m + m^2), which is correct
+    // only at m = 0 and m = 1 and wrong at every feathered edge. A test
+    // caught exactly that, having been written against a doc-comment
+    // that claimed the identity held.
+    //
+    // Split the layer instead. The unselected part stays where it is;
+    // the selected part is what translates:
+    //
+    //   out = a(p)*(1 - leaving) + a(p-d)*m_src
+    //
+    // At d = 0, m_src == m_dst, so this is a*(1-m) + a*m = a exactly,
+    // for every mask value including soft ones.
+    //
+    // This is premultiplied-alpha compositing. NOTE the family-wide
+    // caveat: the current upload path does not premultiply, so a
+    // SUB-PIXEL move can darken an RGB fringe where alpha varies. It
+    // never arises for the integer offsets a whole-pixel drag produces,
+    // and the fix (if it ever bites) is to sandwich the dispatch
+    // between the existing cast.premultiply / cast.unpremultiply.
+    //
+    // `leaving` is what distinguishes the two modes, and it is the ONLY
+    // difference between them: a plain Move empties what it left
+    // (m_dst), while an alt-drag copy leaves the source alone and only
+    // overwrites where content arrives (m_src).
+    var leaving = m_dst;
+    if (params.vacate == 1u) {
+        leaving = m_src;
+    }
+    let result = a * (1.0 - leaving) + moved * m_src;
+    textureStore(outp, xy, result);
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
+    &GEOM_MOVE_SELECTION,
     &GEOM_FLIP_H,
     &GEOM_FLIP_V,
     &GEOM_ROTATE90_CW,

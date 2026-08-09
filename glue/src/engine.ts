@@ -1136,6 +1136,13 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
   applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /** MOVE the SELECTED pixels; `vacate` 0 transparent / 1 copy. */
+  applyMoveSelection(
+    handle: number,
+    dx: number,
+    dy: number,
+    vacate: number,
+  ): Promise<DecodedInfo>;
   // FILTER GALLERY — twelve primitives spanning the six families.
   // `amount` 0 is the identity on every one of them.
   galleryKuwahara(handle: number, radiusPx: number, amount: number): Promise<DecodedInfo>;
@@ -1564,6 +1571,12 @@ export interface ImageWasmModule {
     spin: boolean,
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
+  apply_move_selection(
+    handle: number,
+    dx: number,
+    dy: number,
+    vacate: number,
+  ): Promise<DecodedHandleWasm>;
   // Filter Gallery entry points (tile origin pinned to 0,0 in Rust).
   apply_gallery_kuwahara(handle: number, radius_px: number, amount: number): Promise<DecodedHandleWasm>;
   apply_gallery_posterize_edges(handle: number, levels: number, edge_amount: number, edge_threshold: number, amount: number): Promise<DecodedHandleWasm>;
@@ -2104,6 +2117,11 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyMosaic(handle, cellPx) {
       return decodedInfoOf(await wasm.apply_mosaic(handle, cellPx));
+    },
+    async applyMoveSelection(handle, dx, dy, vacate) {
+      return decodedInfoOf(
+        await wasm.apply_move_selection(handle, dx, dy, vacate),
+      );
     },
     async galleryKuwahara(handle, radiusPx, amount) {
       return decodedInfoOf(

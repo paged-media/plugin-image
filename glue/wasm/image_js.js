@@ -535,6 +535,25 @@ export function apply_motion_blur(handle, angle_deg, length_px) {
 }
 
 /**
+ * MOVE the SELECTED pixels — the Move tool with a live selection.
+ *
+ * Distinct from [`apply_offset`], which moves the whole layer. With
+ * a selection this is what a user means by "move": the selected
+ * pixels relocate and the region they came from is vacated.
+ * `vacate` is 0 transparent (plain drag) / 1 copy (alt-drag).
+ * dx=dy=0 is the identity under either.
+ * @param {number} handle
+ * @param {number} dx
+ * @param {number} dy
+ * @param {number} vacate
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_move_selection(handle, dx, dy, vacate) {
+    const ret = wasm.apply_move_selection(handle, dx, dy, vacate);
+    return ret;
+}
+
+/**
  * MOVE the pixels of the active layer by (dx, dy). `edge` is
  * 0 transparent / 1 clamp / 2 wrap; dx=dy=0 is the identity for
  * every policy. At edge=2 this is Photoshop's Filter > Other >
@@ -2883,12 +2902,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 583, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 586, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 618, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 621, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

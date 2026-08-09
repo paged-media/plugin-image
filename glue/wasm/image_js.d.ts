@@ -205,6 +205,17 @@ export function apply_mosaic(handle: number, cell_px: number): Promise<DecodedHa
 export function apply_motion_blur(handle: number, angle_deg: number, length_px: number): Promise<DecodedHandle>;
 
 /**
+ * MOVE the SELECTED pixels — the Move tool with a live selection.
+ *
+ * Distinct from [`apply_offset`], which moves the whole layer. With
+ * a selection this is what a user means by "move": the selected
+ * pixels relocate and the region they came from is vacated.
+ * `vacate` is 0 transparent (plain drag) / 1 copy (alt-drag).
+ * dx=dy=0 is the identity under either.
+ */
+export function apply_move_selection(handle: number, dx: number, dy: number, vacate: number): Promise<DecodedHandle>;
+
+/**
  * MOVE the pixels of the active layer by (dx, dy). `edge` is
  * 0 transparent / 1 clamp / 2 wrap; dx=dy=0 is the identity for
  * every policy. At edge=2 this is Photoshop's Filter > Other >
@@ -1018,6 +1029,7 @@ export interface InitOutput {
     readonly apply_lens_blur: (a: number, b: number, c: number, d: number) => any;
     readonly apply_mosaic: (a: number, b: number) => any;
     readonly apply_motion_blur: (a: number, b: number, c: number) => any;
+    readonly apply_move_selection: (a: number, b: number, c: number, d: number) => any;
     readonly apply_offset: (a: number, b: number, c: number, d: number) => any;
     readonly apply_radial_blur: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly apply_reduce_noise: (a: number, b: number, c: number, d: number) => any;

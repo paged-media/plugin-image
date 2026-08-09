@@ -37,6 +37,7 @@ export const apply_gradient_map: (a: number, b: number, c: number, d: number, e:
 export const apply_lens_blur: (a: number, b: number, c: number, d: number) => any;
 export const apply_mosaic: (a: number, b: number) => any;
 export const apply_motion_blur: (a: number, b: number, c: number) => any;
+export const apply_move_selection: (a: number, b: number, c: number, d: number) => any;
 export const apply_offset: (a: number, b: number, c: number, d: number) => any;
 export const apply_radial_blur: (a: number, b: number, c: number, d: number, e: number) => any;
 export const apply_reduce_noise: (a: number, b: number, c: number, d: number) => any;

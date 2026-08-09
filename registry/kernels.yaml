@@ -1696,6 +1696,23 @@
     - "tolerance is Exact because both branches write an existing f16 sample; the only arithmetic is the decision"
   tests:
     rust: ["image-kernels/tests/rank_noise.rs"]
+- id: geom.move_selection
+  rust_path: families::geom::GEOM_MOVE_SELECTION
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "a real move reads the mask TWICE — m(p-d) decides what ARRIVES, m(p) decides what LEAVES; a single-mask formulation cannot express the case where a selection overlaps its own translate, because both fire on the same pixel"
+    - "distinct from geom.offset under a mask, which computes mix(in(p), in(p-d), m(p)) — the mask read at the DESTINATION only, so the selection is a stationary WINDOW that content scrolls past rather than pixels that relocate; that is neither a move nor a duplicate"
+    - "the arriving COVERAGE is bilinearly filtered exactly like the colour, so a soft-edged selection keeps its feather instead of moving with a hard edge on the first drag"
+    - "outside the image reads as UNSELECTED rather than edge-extended: clamping the mask would smear its border rows outward and a move near an edge would drag a stripe along"
+    - "vacated pixels go to premultiplied zero (colour to zero with the alpha) so a later composite cannot resurrect a fringe of the old colour"
+    - "identity dx=dy=0 falls out of the algebra rather than a special case: m_src equals m_dst, so mix(mix(a,v,m),a,m) is a for every mask value including soft ones, under either vacate mode"
+  tests:
+    rust: ["image-kernels/tests/geom_move_selection.rs"]
 - id: geom.offset
   rust_path: families::geom::GEOM_OFFSET
   state_row: image.kernel.family-t2

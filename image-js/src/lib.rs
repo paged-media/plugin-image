@@ -1708,6 +1708,32 @@ mod wasm {
         apply_point_kernel(handle, &ADJUST_SELECTIVE_COLOR, params.as_bytes()).await
     }
 
+    /// MOVE the SELECTED pixels — the Move tool with a live selection.
+    ///
+    /// Distinct from [`apply_offset`], which moves the whole layer. With
+    /// a selection this is what a user means by "move": the selected
+    /// pixels relocate and the region they came from is vacated.
+    /// `vacate` is 0 transparent (plain drag) / 1 copy (alt-drag).
+    /// dx=dy=0 is the identity under either.
+    #[wasm_bindgen]
+    pub async fn apply_move_selection(
+        handle: u32,
+        dx: f32,
+        dy: f32,
+        vacate: u32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::geom::{
+            MoveSelectionParams, VacateMode, GEOM_MOVE_SELECTION,
+        };
+        let mode = VacateMode::from_u32(vacate).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown vacate mode {vacate} (0 transparent | 1 copy)"
+            ))
+        })?;
+        let params = MoveSelectionParams::new(dx, dy, mode);
+        apply_point_kernel(handle, &GEOM_MOVE_SELECTION, params.as_bytes()).await
+    }
+
     // ───────────────── FILTER GALLERY (§18) ─────────────────
     //
     // Twelve primitives spanning the gallery's six families. They are

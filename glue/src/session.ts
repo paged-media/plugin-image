@@ -98,6 +98,20 @@ export const FILL_NOISE_SEED_DEFAULT = 1;
  * same integers out of the params block, so renumbering here silently
  * changes what a stored effect does.
  */
+/**
+ * What a Move does with the region the selected pixels came FROM.
+ *
+ * Frozen wire encoding shared with the Rust `VacateMode` and the WGSL
+ * branch, so renumbering here changes what a stored effect does.
+ */
+export const VacateMode = {
+  /** Plain drag: the pixels leave and the source becomes transparent. */
+  Transparent: 0,
+  /** Alt-drag: the pixels are copied and the source keeps what it had. */
+  Copy: 1,
+} as const;
+export type VacateMode = (typeof VacateMode)[keyof typeof VacateMode];
+
 export const EdgePolicy = {
   /** Photoshop "Set to Transparent" — the vacated region is cleared. */
   Transparent: 0,
@@ -385,6 +399,13 @@ export interface ImageSession {
   ): Promise<boolean>;
   /** PIXELATE — mosaic. `cellPx` <= 1 is the identity. */
   applyMosaic(cellPx: number): Promise<boolean>;
+  /**
+   * MOVE the SELECTED pixels. This is what the Move tool does when a
+   * selection is live, and it is NOT `offsetLayer` — that moves the
+   * whole layer. With a selection, the selected pixels relocate and
+   * the region they came from is vacated.
+   */
+  moveSelection(dx: number, dy: number, vacate?: VacateMode): Promise<boolean>;
   // FILTER GALLERY — twelve primitives spanning the six families.
   // `amount` 0 is the identity on every one of them.
   galleryKuwahara(radiusPx: number, amount: number): Promise<boolean>;
@@ -1793,6 +1814,11 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     async applyMosaic(cellPx) {
       return this.applyEffect("Mosaic", (h) => engine!.applyMosaic(h, cellPx));
+    },
+    async moveSelection(dx, dy, vacate = VacateMode.Transparent) {
+      return this.applyEffect("Move selection", (h) =>
+        engine!.applyMoveSelection(h, dx, dy, vacate),
+      );
     },
     async galleryKuwahara(radiusPx, amount) {
       return this.applyEffect("Paint daubs", (h) =>
