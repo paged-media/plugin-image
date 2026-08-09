@@ -60,6 +60,7 @@ export const crop_image: (a: number, b: number, c: number, d: number, e: number)
 export const curve_lut: (a: number, b: number) => [number, number];
 export const decode_image: (a: number, b: number) => [number, number, number];
 export const encode_image: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+export const encode_image_opt: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const fill_content_aware: (a: number) => any;
 export const fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const fill_noise: (a: number, b: number, c: number) => any;

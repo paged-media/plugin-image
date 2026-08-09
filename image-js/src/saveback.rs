@@ -154,6 +154,135 @@ const RGBA8: PixelFormat = PixelFormat {
 
 /// Re-encode straight RGBA8 as PNG or JPEG through the codec targets.
 /// One full-frame strip (the targets accumulate and encode at `finish`).
+/// What a buffer can be re-expressed as WITHOUT losing a bit.
+///
+/// Only the reductions the frozen `ChannelLayout` can actually name.
+/// Notably absent: RGB. Dropping a constant-opaque alpha would save a
+/// quarter of the raw bytes on every screenshot and photograph, and it
+/// is not expressible — `ChannelLayout` is `Gray | GrayA | Rgba | Cmyk
+/// | Cmyka`, with no three-channel arm, and the type is frozen. Filed
+/// as RFI E-6 rather than worked around, because inventing a private
+/// 3-channel path here would be a second notion of what a layout is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LosslessShape {
+    /// r == g == b everywhere AND every alpha is 255 — one byte per
+    /// pixel instead of four.
+    Gray,
+    /// r == g == b everywhere, alpha varies — two instead of four.
+    GrayA,
+    /// Nothing to reduce.
+    Rgba,
+}
+
+/// Classify a straight-RGBA8 buffer. One pass, and it stops early on
+/// the first pixel that rules both reductions out — the common case
+/// (a colour photograph) exits within a few pixels.
+pub fn lossless_shape(rgba: &[u8]) -> LosslessShape {
+    let mut opaque = true;
+    for px in rgba.chunks_exact(4) {
+        if px[0] != px[1] || px[1] != px[2] {
+            return LosslessShape::Rgba;
+        }
+        if px[3] != 255 {
+            opaque = false;
+        }
+    }
+    if opaque {
+        LosslessShape::Gray
+    } else {
+        LosslessShape::GrayA
+    }
+}
+
+/// [`encode_rgba8`] with the two knobs the fixed-quality version has
+/// not got: a JPEG `quality`, and a LOSSLESS channel reduction for PNG.
+///
+/// The reduction is not a quality setting — it re-expresses a buffer
+/// that was already greyscale in a layout that says so, so the decoded
+/// pixels are identical byte for byte. It pays on exactly the images
+/// that are largest and most often greyscale: scans, masks, line art,
+/// alpha mattes.
+pub fn encode_rgba8_opt(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    format: RasterFormat,
+    quality: u8,
+    reduce: bool,
+) -> Result<Vec<u8>, IngestError> {
+    let expected = (width as usize) * (height as usize) * 4;
+    if rgba.len() != expected {
+        return Err(IngestError::Decode(format!(
+            "encode: {} bytes for {width}x{height} (expected {expected})",
+            rgba.len()
+        )));
+    }
+    let err = |e: image_codecs::CodecError| IngestError::Decode(e.to_string());
+    let region = Region::new(0, 0, width, height);
+
+    // JPEG has no alpha and no indexed mode, so the reduction is a PNG
+    // affair; quality is the JPEG one. Neither knob crosses over.
+    if format == RasterFormat::Jpeg {
+        let info = TargetInfo {
+            width,
+            height,
+            format: RGBA8,
+            icc: None,
+        };
+        let slice = TileSliceRef {
+            region,
+            format: RGBA8,
+            row_stride: width as usize * 4,
+            bytes: rgba,
+        };
+        let mut t = JpegTarget::new(quality.clamp(1, 100));
+        t.begin(info).map_err(err)?;
+        t.write_strip(region, &slice).map_err(err)?;
+        t.finish().map_err(err)?;
+        return Ok(t.into_bytes());
+    }
+
+    let shape = if reduce {
+        lossless_shape(rgba)
+    } else {
+        LosslessShape::Rgba
+    };
+    let (channels, packed) = match shape {
+        LosslessShape::Rgba => (ChannelLayout::Rgba, None),
+        LosslessShape::Gray => (
+            ChannelLayout::Gray,
+            Some(rgba.chunks_exact(4).map(|p| p[0]).collect::<Vec<u8>>()),
+        ),
+        LosslessShape::GrayA => (
+            ChannelLayout::GrayA,
+            Some(
+                rgba.chunks_exact(4)
+                    .flat_map(|p| [p[0], p[3]])
+                    .collect::<Vec<u8>>(),
+            ),
+        ),
+    };
+    let fmt = PixelFormat { channels, ..RGBA8 };
+    let bytes: &[u8] = packed.as_deref().unwrap_or(rgba);
+    let info = TargetInfo {
+        width,
+        height,
+        format: fmt,
+        icc: None,
+    };
+    let slice = TileSliceRef {
+        region,
+        format: fmt,
+        row_stride: width as usize * usize::from(channels.count()),
+        bytes,
+    };
+    let mut t = PngTarget::new();
+    t.begin(info).map_err(err)?;
+    t.write_strip(region, &slice).map_err(err)?;
+    t.finish().map_err(err)?;
+    Ok(t.into_bytes())
+}
+
 pub fn encode_rgba8(
     rgba: &[u8],
     width: u32,

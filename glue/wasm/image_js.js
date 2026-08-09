@@ -977,6 +977,44 @@ export function encode_image(rgba, width, height, format) {
 }
 
 /**
+ * [`encode_image`] with the two knobs it has not got: a JPEG
+ * `quality` (the plain door rides a fixed 90), and a LOSSLESS
+ * channel reduction for PNG.
+ *
+ * `reduce` is not a quality setting. It re-expresses a buffer that
+ * was ALREADY greyscale in a layout that says so — one byte per
+ * pixel instead of four when the alpha is constant-opaque, two
+ * when it is not — so the decoded pixels come back identical byte
+ * for byte. It pays on exactly the images that tend to be large
+ * and greyscale: scans, masks, line art, alpha mattes. On a colour
+ * photograph the classifier exits within a few pixels and nothing
+ * changes.
+ *
+ * What it deliberately does NOT do is drop a constant-opaque alpha
+ * to three channels, which would save a quarter of the raw bytes
+ * on every screenshot. `ChannelLayout` has no RGB arm and the type
+ * is frozen — RFI E-6.
+ * @param {Uint8Array} rgba
+ * @param {number} width
+ * @param {number} height
+ * @param {string} format
+ * @param {number} quality
+ * @param {boolean} reduce
+ * @returns {Uint8Array}
+ */
+export function encode_image_opt(rgba, width, height, format, quality, reduce) {
+    const ptr0 = passArray8ToWasm0(rgba, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.encode_image_opt(ptr0, len0, width, height, ptr1, len1, quality, reduce);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * CONTENT-AWARE FILL: synthesise the selection from the rest of the
  * image (exemplar-based inpainting).
  *
@@ -2954,12 +2992,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 596, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 600, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 631, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 635, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

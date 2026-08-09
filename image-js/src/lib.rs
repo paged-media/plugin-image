@@ -3441,6 +3441,39 @@ mod wasm {
         Ok(js_sys::Uint8Array::from(&bytes[..]))
     }
 
+    /// [`encode_image`] with the two knobs it has not got: a JPEG
+    /// `quality` (the plain door rides a fixed 90), and a LOSSLESS
+    /// channel reduction for PNG.
+    ///
+    /// `reduce` is not a quality setting. It re-expresses a buffer that
+    /// was ALREADY greyscale in a layout that says so — one byte per
+    /// pixel instead of four when the alpha is constant-opaque, two
+    /// when it is not — so the decoded pixels come back identical byte
+    /// for byte. It pays on exactly the images that tend to be large
+    /// and greyscale: scans, masks, line art, alpha mattes. On a colour
+    /// photograph the classifier exits within a few pixels and nothing
+    /// changes.
+    ///
+    /// What it deliberately does NOT do is drop a constant-opaque alpha
+    /// to three channels, which would save a quarter of the raw bytes
+    /// on every screenshot. `ChannelLayout` has no RGB arm and the type
+    /// is frozen — RFI E-6.
+    #[wasm_bindgen]
+    pub fn encode_image_opt(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        format: &str,
+        quality: u8,
+        reduce: bool,
+    ) -> Result<js_sys::Uint8Array, JsValue> {
+        let fmt = RasterFormat::from_wire(format)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown encode format \"{format}\"")))?;
+        let bytes = crate::saveback::encode_rgba8_opt(rgba, width, height, fmt, quality, reduce)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(js_sys::Uint8Array::from(&bytes[..]))
+    }
+
     /// PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
     /// retained parse behind `psd_handle` (the merged composite is always
     /// rewritten; the layer structure is handled per the returned shape)

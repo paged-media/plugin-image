@@ -423,6 +423,27 @@ export function decode_image(bytes: Uint8Array): DecodedHandle;
 export function encode_image(rgba: Uint8Array, width: number, height: number, format: string): Uint8Array;
 
 /**
+ * [`encode_image`] with the two knobs it has not got: a JPEG
+ * `quality` (the plain door rides a fixed 90), and a LOSSLESS
+ * channel reduction for PNG.
+ *
+ * `reduce` is not a quality setting. It re-expresses a buffer that
+ * was ALREADY greyscale in a layout that says so — one byte per
+ * pixel instead of four when the alpha is constant-opaque, two
+ * when it is not — so the decoded pixels come back identical byte
+ * for byte. It pays on exactly the images that tend to be large
+ * and greyscale: scans, masks, line art, alpha mattes. On a colour
+ * photograph the classifier exits within a few pixels and nothing
+ * changes.
+ *
+ * What it deliberately does NOT do is drop a constant-opaque alpha
+ * to three channels, which would save a quarter of the raw bytes
+ * on every screenshot. `ChannelLayout` has no RGB arm and the type
+ * is frozen — RFI E-6.
+ */
+export function encode_image_opt(rgba: Uint8Array, width: number, height: number, format: string, quality: number, reduce: boolean): Uint8Array;
+
+/**
  * CONTENT-AWARE FILL: synthesise the selection from the rest of the
  * image (exemplar-based inpainting).
  *
@@ -1085,6 +1106,7 @@ export interface InitOutput {
     readonly curve_lut: (a: number, b: number) => [number, number];
     readonly decode_image: (a: number, b: number) => [number, number, number];
     readonly encode_image: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+    readonly encode_image_opt: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly fill_content_aware: (a: number) => any;
     readonly fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly fill_noise: (a: number, b: number, c: number) => any;

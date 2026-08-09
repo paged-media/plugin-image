@@ -883,6 +883,26 @@ export interface ImageEngine {
     height: number,
     format: RasterFormat,
   ): Uint8Array;
+  /**
+   * `encode` with the two knobs it has not got: a JPEG `quality` (the
+   * plain door rides a fixed 90) and a LOSSLESS channel reduction for
+   * PNG.
+   *
+   * `reduce` is not a quality setting — it re-expresses an already-grey
+   * buffer in a layout that says so (one byte per pixel instead of
+   * four when the alpha is constant-opaque, two when it varies), so the
+   * decoded pixels are identical byte for byte. It pays on the images
+   * that tend to be large AND grey: scans, masks, line art, mattes. On
+   * a colour photograph the classifier exits within a few pixels.
+   */
+  encodeOpt(
+    rgba: Uint8Array,
+    width: number,
+    height: number,
+    format: RasterFormat,
+    quality: number,
+    reduce: boolean,
+  ): Uint8Array;
   /** FILL the bound SELECTION (the whole image when none) with a fixed
    *  two-stop gradient, compositing through the coverage mask on the
    *  GPU. DESTRUCTIVE: returns a NEW engine-held image (the crop/resize
@@ -1391,6 +1411,14 @@ export interface ImageWasmModule {
     height: number,
     format: string,
   ): Uint8Array;
+  encode_image_opt(
+    rgba: Uint8Array,
+    width: number,
+    height: number,
+    format: string,
+    quality: number,
+    reduce: boolean,
+  ): Uint8Array;
   psd_apply_adjusted(
     psd_handle: number,
     width: number,
@@ -1867,6 +1895,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     encode: (rgba, width, height, format) =>
       wasm.encode_image(rgba, width, height, format),
+    encodeOpt: (rgba, width, height, format, quality, reduce) =>
+      wasm.encode_image_opt(rgba, width, height, format, quality, reduce),
     psdApplyAdjusted: (psdHandle, width, height, rgba) =>
       wasm.psd_apply_adjusted(psdHandle, width, height, rgba),
     resize: async (handle, outW, outH, filter) => {
