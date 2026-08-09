@@ -2026,28 +2026,27 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
     let a = textureLoad(in0, xy, 0);
-    // DELIBERATELY no unpremultiply. Do not change this to match the
-    // sibling adjust kernels, which is wrong in a way that is easy to
-    // miss. See RFI E-5.
+    // UNPREMULTIPLY first — range membership, the CMYK decomposition
+    // and black generation are statements about COLOUR, and a
+    // premultiplied pixel's rgb is colour scaled by alpha. Reading it
+    // raw makes the same colour take a different correction depending
+    // only on its opacity.
     //
-    // The 16 macro-generated adjust kernels bracket with
-    // `unpremul_rgb(a)` … `vec4(c * a.a, a.a)`, which is right ONLY if
-    // `in0` carries premultiplied data. It does not: `ingest.rs` and
-    // `apply_point_kernel` upload the decode bridge's bytes verbatim
-    // (`/255`, no alpha association), and `fill.rs` documents that the
-    // engine's working buffers are STRAIGHT — which is precisely why
-    // IT brackets with `cast.premultiply` and the adjust chain does
-    // not. Given straight input, the sibling bracket computes
-    // `f(rgb/a)·a` rather than `f(rgb)`: it preserves the FORMAT (the
-    // two scalings cancel) but applies the adjustment to a colour the
-    // pixel never had. Identical at `a = 1`, which is why nobody has
-    // noticed.
-    //
-    // Reading `a.rgb` straight is therefore correct here and the
-    // siblings are the ones to change. A GPU lane written against
-    // premultiplied stimulus reported this kernel as the broken one; I
-    // changed it to match, then reverted on the evidence above.
-    let rgb = clamp(a.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    // The 16 macro-generated adjust kernels get this from
+    // `adjust_wgsl!`; this module is handwritten and missed it. A GPU
+    // behavioural lane found it (RFI E-5), and the road there is worth
+    // recording: the first fix was reverted, because at the time
+    // `apply_point_kernel` uploaded STRAIGHT bytes and the siblings
+    // were the ones out of step with the data. That has since been
+    // corrected at the dispatch bridge — alpha is now associated
+    // before dispatch, gated on `window_is_opaque` exactly as
+    // `fill.rs` does — so `GPU_WORKING`'s Premultiplied declaration,
+    // the adjust family and the data finally agree, and this kernel
+    // joins them.
+    let s = a.a;
+    var rgb = a.rgb;
+    if (s > 0.0) { rgb = rgb / s; }
+    rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 
     let w = weight_for(rgb, params.range);
     // RGB → CMYK. k is the black generation; a fully black pixel has
@@ -2074,7 +2073,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     k2 = clamp(k2, 0.0, 1.0);
 
     let out_rgb = (vec3<f32>(1.0) - cmy2) * (1.0 - k2);
-    let result = vec4<f32>(clamp(out_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), a.a);
+    // Re-associate on the way out, matching the sibling convention
+    // `vec4(c * a.a, a.a)`.
+    let result = vec4<f32>(
+        clamp(out_rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * s,
+        a.a,
+    );
     let m = textureLoad(mask, xy, 0).r;
     textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
 }

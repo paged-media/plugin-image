@@ -254,6 +254,31 @@ pub(crate) fn f16_to_rgba8(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// [`f16_to_rgba8`]'s twin for a PREMULTIPLIED buffer: dissociate the
+/// alpha on the way back to straight RGBA8.
+///
+/// `a == 0` returns transparent black rather than dividing — the colour
+/// under a zero alpha carries no information, and any value is as
+/// defensible as another, so pick the one that cannot produce a fringe.
+// Only the wasm realm's kernel doors read back a premultiplied
+// buffer, so on a host build this has no caller and the workspace's
+// -D warnings turns that into an error. Gate it rather than allow
+// dead_code: an #[allow] here would also hide a REAL orphaning.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn f16_to_rgba8_unpremul(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for px in bytes.chunks_exact(8) {
+        let v = |i: usize| f16::from_le_bytes([px[i * 2], px[i * 2 + 1]]).to_f32();
+        let a = v(3).clamp(0.0, 1.0);
+        for c in 0..3 {
+            let s = if a > 0.0 { v(c) / a } else { 0.0 };
+            out.push((s.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+        out.push((a * 255.0).round() as u8);
+    }
+    out
+}
+
 /// Paint `spec` into `image` through `selection` (the whole image when
 /// `None`) and return the new straight RGBA8. GPU-only — the generator
 /// AND the composite are registered WGSL kernels; there is no CPU blend

@@ -1422,3 +1422,122 @@ fn geometric_remaps_round_trip_exactly() {
     }
     report("geometric round-trip", failures, pairs.len());
 }
+
+// ─────────────────────── alpha consistency ───────────────────────
+//
+// The property that would have CAUGHT RFI E-5, added after the fact
+// because none of the four above could see it.
+//
+// An adjustment is a statement about COLOUR. The same colour at 100%
+// and at 25% opacity must therefore receive the same correction — only
+// its alpha differs. A kernel that reads premultiplied `rgb` as if it
+// were straight fails this, and fails it silently: identity still
+// holds (zero deltas round-trip exactly), and the op is still
+// deterministic, finite and mask-scoped.
+//
+// The buffers ARE premultiplied here: `GPU_WORKING` declares it, and as
+// of the E-5 fix `apply_point_kernel` associates alpha before dispatch
+// (gated on opacity, as `fill.rs` does), so the lane's stimulus and the
+// shipping path finally agree. That agreement is the point — the
+// original lane reported the one kernel that matched the DATA as the
+// broken one, because its stimulus encoded the contract rather than
+// what the dispatcher actually sent.
+
+/// Kernels for which alpha-dependence is CORRECT, each with the reason.
+/// An exemption is a claim, so it has to carry one.
+const ALPHA_EXEMPT: &[(&str, &str)] = &[
+    (
+        "adjust.exposure",
+        "a linear scale commutes with premultiplication, so it operates in \
+         premultiplied space deliberately and never dissociates",
+    ),
+    (
+        "adjust.threshold",
+        "compares in premultiplied space by design — thresholding the \
+         dissociated colour would binarize a near-transparent pixel on \
+         evidence it does not really have",
+    ),
+];
+
+#[test]
+fn an_adjustment_is_the_same_at_every_alpha() {
+    let Some(ctx) = ctx_or_skip("alpha consistency") else {
+        return;
+    };
+    // One straight colour, carried at four opacities.
+    const STRAIGHT: [f32; 3] = [0.75, 0.375, 0.125];
+    const ALPHAS: [f32; 4] = [1.0, 0.5, 0.25, 0.125];
+
+    let mut checked = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    for def in module_kernels() {
+        if !def.id.starts_with("adjust.") || def.inputs != 1 {
+            continue;
+        }
+        if ALPHA_EXEMPT.iter().any(|(id, _)| *id == def.id) {
+            continue;
+        }
+        let Some(row) = TABLE.iter().find(|r| r.id == def.id) else {
+            continue;
+        };
+        let params = params_bytes(def, &row.stress);
+
+        // The reference: the fully-opaque case, where premultiplied and
+        // straight coincide and no kernel can get it wrong.
+        let mut reference: Option<[f32; 3]> = None;
+        for a in ALPHAS {
+            let tile = tile_from_fn(OUT, OUT, |_, _| {
+                [STRAIGHT[0] * a, STRAIGHT[1] * a, STRAIGHT[2] * a, a]
+            });
+            let out = dispatch(ctx, def, &[tile], &params, None);
+            // Dissociate the result and compare COLOUR, not premultiplied
+            // bytes — those must differ, since the alphas do.
+            let px = |c: usize| f16::from_le_bytes([out[c * 2], out[c * 2 + 1]]).to_f32();
+            let oa = px(3);
+            if oa <= 0.0 {
+                continue;
+            }
+            let got = [px(0) / oa, px(1) / oa, px(2) / oa];
+            match reference {
+                None => reference = Some(got),
+                Some(want) => {
+                    // Generous: f16 through a divide at alpha 1/8 loses
+                    // real precision, and the failure this guards
+                    // against is gross (0.25 -> 0.75), not marginal.
+                    let d = (0..3).map(|i| (got[i] - want[i]).abs()).fold(0.0, f32::max);
+                    if d > 0.02 {
+                        failures.push(format!(
+                            "{}: colour ({:.3},{:.3},{:.3}) at alpha {a} came back \
+                             ({:.3},{:.3},{:.3}) but ({:.3},{:.3},{:.3}) at alpha 1 — \
+                             delta {d:.3}. The adjustment depends on OPACITY, which \
+                             means it is reading premultiplied rgb as straight colour.",
+                            def.id,
+                            STRAIGHT[0],
+                            STRAIGHT[1],
+                            STRAIGHT[2],
+                            got[0],
+                            got[1],
+                            got[2],
+                            want[0],
+                            want[1],
+                            want[2],
+                        ));
+                    }
+                }
+            }
+        }
+        checked += 1;
+    }
+
+    assert!(
+        checked >= 15,
+        "expected the whole adjust family; only checked {checked}"
+    );
+    assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
+    eprintln!(
+        "[alpha-consistency] {checked} adjust kernels agree across 4 opacities; \
+         {} exempt with reasons",
+        ALPHA_EXEMPT.len()
+    );
+}

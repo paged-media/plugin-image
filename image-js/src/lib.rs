@@ -2125,9 +2125,22 @@ mod wasm {
             .bytes()
             .to_vec()
         });
+        // Same alpha association as `apply_point_kernel` (RFI E-5), for
+        // the same reason: `gen.pattern` composites source-over, which
+        // is a premultiplied operation, and BOTH inputs have to be in
+        // that space or a semi-transparent tile composites wrong.
+        let associate = img.rgba.chunks_exact(4).any(|px| px[3] != 255)
+            || tile.rgba.chunks_exact(4).any(|px| px[3] != 255);
+        let assoc = |buf: &[u8], i: usize, c: usize| -> [u8; 2] {
+            let v = buf[i + c] as f32 / 255.0;
+            let a = buf[i + 3] as f32 / 255.0;
+            f16::from_f32(if associate && c < 3 { v * a } else { v }).to_le_bytes()
+        };
         let mut win = Vec::with_capacity(img.rgba.len() * 2);
-        for &b in img.rgba.iter() {
-            win.extend_from_slice(&f16::from_f32(b as f32 / 255.0).to_le_bytes());
+        for i in (0..img.rgba.len()).step_by(4) {
+            for c in 0..4 {
+                win.extend_from_slice(&assoc(&img.rgba, i, c));
+            }
         }
         // in1: the tile, zero-padded into a destination-sized buffer.
         let mut tile_win = vec![0u8; (img.width as usize) * (img.height as usize) * 4 * 2];
@@ -2138,7 +2151,7 @@ mod wasm {
                 let src = (y * tile.width as usize + x) * 4;
                 let dst = (y * img.width as usize + x) * 4 * 2;
                 for c in 0..4 {
-                    let v = f16::from_f32(tile.rgba[src + c] as f32 / 255.0).to_le_bytes();
+                    let v = assoc(&tile.rgba, src, c);
                     tile_win[dst + c * 2] = v[0];
                     tile_win[dst + c * 2 + 1] = v[1];
                 }
@@ -2160,13 +2173,12 @@ mod wasm {
         )
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        land_fill(
-            img.width,
-            img.height,
-            crate::fill::f16_to_rgba8(&out),
-            layered,
-        )
-        .await
+        let rgba = if associate {
+            crate::fill::f16_to_rgba8_unpremul(&out)
+        } else {
+            crate::fill::f16_to_rgba8(&out)
+        };
+        land_fill(img.width, img.height, rgba, layered).await
     }
 
     async fn apply_point_kernel(
@@ -2183,28 +2195,110 @@ mod wasm {
             .bytes()
             .to_vec()
         });
-        let mut win = Vec::with_capacity(img.rgba.len() * 2);
-        for &b in img.rgba.iter() {
-            win.extend_from_slice(&f16::from_f32(b as f32 / 255.0).to_le_bytes());
+
+        // ALPHA ASSOCIATION — the fix for RFI E-5.
+        //
+        // `PixelFormat::GPU_WORKING` declares Premultiplied and the
+        // whole `adjust.*` family is written to it (`unpremul_rgb(a)`
+        // on read, `vec4(c * a.a, a.a)` on write). The decode bridge
+        // does NOT associate alpha, so this door used to hand straight
+        // bytes to kernels expecting premultiplied ones: the bracket
+        // then computed `f(rgb/a)·a` rather than `f(rgb)` — the format
+        // survives because the scalings cancel, but the adjustment
+        // lands on a colour the pixel never had. Identical at `a = 1`,
+        // which is why an opaque photograph looks right and this went
+        // unnoticed.
+        //
+        // `fill.rs` already solved this for its own composite and this
+        // is the same bracket, on the same `window_is_opaque` gate:
+        // over a fully opaque backdrop `rgb·1 = rgb` and the round trip
+        // is PROVABLY the identity, so the common case (a JPEG, a PSD
+        // composite, most placed photographs) pays nothing.
+        let associate = img.rgba.chunks_exact(4).any(|px| px[3] != 255);
+        let px_f16 = |i: usize, c: usize| -> [u8; 2] {
+            let v = img.rgba[i + c] as f32 / 255.0;
+            let a = img.rgba[i + 3] as f32 / 255.0;
+            let v = if associate && c < 3 { v * a } else { v };
+            f16::from_f32(v).to_le_bytes()
+        };
+        // WINDOWED kernels get an EXPANDED window and the windowed
+        // dispatcher; everything else takes the one-shot lane.
+        //
+        // This is the fix for RFI E-4. `abi.rs` has always said a
+        // Windowed kernel receives `in0` expanded by its radius, with
+        // output (x,y) at window centre (x+rx, y+ry) — but this
+        // function used to send every kernel through
+        // `execute_tile_once_async`, which sizes the input at the
+        // OUTPUT dims. So the contract said one thing and the only
+        // dispatcher a panel button could reach did another, and the
+        // kernels split into two camps that were each right about one
+        // of them.
+        //
+        // `execute_windowed_once_async` already existed — the resample
+        // doors ride it. Nothing needed amending; this call simply had
+        // to pick the right lane. That also makes the halo the kernels
+        // DERIVE come out as (rx, ry) instead of zero, so the edge band
+        // is real image data rather than a clamp against the output
+        // rectangle.
+        let out = match def.class {
+            image_kernels::KernelClass::Windowed { radius: (rx, ry) } => {
+                let (rx, ry) = (u32::from(rx), u32::from(ry));
+                let (ww, wh) = (img.width + 2 * rx, img.height + 2 * ry);
+                let mut win = Vec::with_capacity((ww as usize) * (wh as usize) * 4 * 2);
+                for wy in 0..wh {
+                    // CLAMP into the halo. Zeroing it would darken every
+                    // border pixel by the fraction of the window that
+                    // fell outside — a visible dark frame on any blur,
+                    // and the reason a convolution edge policy is never
+                    // "just use zero".
+                    let sy = (wy as i64 - ry as i64).clamp(0, img.height as i64 - 1) as usize;
+                    for wx in 0..ww {
+                        let sx = (wx as i64 - rx as i64).clamp(0, img.width as i64 - 1) as usize;
+                        let i = (sy * img.width as usize + sx) * 4;
+                        for c in 0..4 {
+                            win.extend_from_slice(&px_f16(i, c));
+                        }
+                    }
+                }
+                image_gpu::execute_windowed_once_async(
+                    &ctx,
+                    def,
+                    &win,
+                    ww,
+                    wh,
+                    params,
+                    mask.as_deref(),
+                    img.width,
+                    img.height,
+                )
+                .await
+            }
+            _ => {
+                let mut win = Vec::with_capacity(img.rgba.len() * 2);
+                for i in (0..img.rgba.len()).step_by(4) {
+                    for c in 0..4 {
+                        win.extend_from_slice(&px_f16(i, c));
+                    }
+                }
+                image_gpu::execute_tile_once_async(
+                    &ctx,
+                    def,
+                    &[image_gpu::TileInput { f16_bytes: &win }],
+                    params,
+                    mask.as_deref(),
+                    img.width,
+                    img.height,
+                )
+                .await
+            }
         }
-        let out = image_gpu::execute_tile_once_async(
-            &ctx,
-            def,
-            &[image_gpu::TileInput { f16_bytes: &win }],
-            params,
-            mask.as_deref(),
-            img.width,
-            img.height,
-        )
-        .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        land_fill(
-            img.width,
-            img.height,
-            crate::fill::f16_to_rgba8(&out),
-            layered,
-        )
-        .await
+        let rgba = if associate {
+            crate::fill::f16_to_rgba8_unpremul(&out)
+        } else {
+            crate::fill::f16_to_rgba8(&out)
+        };
+        land_fill(img.width, img.height, rgba, layered).await
     }
 
     // ─────────────────────── LAYER doors (§6.2) ──────────────────────
