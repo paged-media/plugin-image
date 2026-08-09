@@ -529,8 +529,15 @@ const RGBA16F: PixelFormat = PixelFormat {
 pub fn decode_rgba8(bytes: &[u8]) -> Result<DecodedImage, IngestError> {
     match sniff(bytes) {
         Some(Format::Psd) => decode_psd(bytes),
-        Some(Format::Png) => decode_source(PngSource::new(MemoryByteSource::new(bytes.to_vec()))),
-        Some(Format::Jpeg) => decode_source(JpegSource::new(MemoryByteSource::new(bytes.to_vec()))),
+        Some(Format::Png) => decode_source(
+            PngSource::new(MemoryByteSource::new(bytes.to_vec())),
+            PngSource::source_was_16bit,
+        ),
+        // JPEG is 8-bit by the format; nothing to narrow.
+        Some(Format::Jpeg) => decode_source(
+            JpegSource::new(MemoryByteSource::new(bytes.to_vec())),
+            |_| false,
+        ),
         None => Err(IngestError::Unsupported(
             "unrecognized image container (PSD/PNG/JPEG in the M4 slice)".into(),
         )),
@@ -574,26 +581,38 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, IngestError> {
 }
 
 /// Full-frame decode through an `ImageSource` adapter, widened to RGBA8.
-fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestError> {
+/// `reduced` reports whether the SOURCE carried more depth than the
+/// buffer we get back, so the panel can say so. It is a function of the
+/// concrete source rather than of `SourceInfo`, because the narrowing
+/// happens inside the adapter and `ImageSource` is frozen.
+fn decode_source<S: ImageSource>(
+    mut source: S,
+    reduced: fn(&S) -> bool,
+) -> Result<DecodedImage, IngestError> {
     let info = source
         .probe()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
     if info.format.depth != SampleDepth::U8 {
-        // The PSD lane ACCEPTS 16-bit and reduces it, because PSD's
-        // sample order is spec-documented big-endian and the convention
-        // is established and tested in `image-psd`. This lane does not,
-        // and the reason is evidence rather than effort: no adapter here
-        // documents its 16-bit byte order and there is no 16-bit fixture
-        // to verify a guess against. A wrong guess would decode to a
-        // plausible-looking WRONG image, which is worse than a refusal —
-        // so the refusal stands until a fixture settles it.
+        // A codec adapter narrows in its own lane and reports `U8` here,
+        // so reaching this arm means a depth NO adapter has a
+        // documented reduction for.
+        //
+        // This used to reject 16-bit PNG, on the grounds that "the
+        // sample byte order is unverified and there is no fixture to
+        // check a guess". Both halves were false: PNG's endianness is
+        // normative (§7.1, network byte order) and we never see the
+        // wire bytes anyway — zune returns assembled `u16`s. A fixture
+        // also cost about twenty lines to make, which is what
+        // `codec_png_16bit.rs` now does, MEASURING the byte order
+        // rather than asserting it.
         return Err(IngestError::Unsupported(format!(
-            "depth {:?}: this codec lane is 8-bit (PSD 16-bit IS accepted and \
-             reduced; here the sample byte order is unverified and guessing \
-             it would decode to a wrong-looking image)",
+            "depth {:?}: no adapter in this lane has a documented reduction \
+             for it (8-bit passes through; 16-bit PNG and PSD are accepted \
+             and narrowed, and the panel says so)",
             info.format.depth
         )));
     }
+    let depth_reduced = reduced(&source);
     // EXIF orientation (JPEG/TIFF carry it; PNG/PSD don't, so it parses to
     // None and the auto-orient is a no-op). Auto-orientation is the
     // architecturally honest job of the decode-to-RGBA bridge: it is a CPU
@@ -678,9 +697,10 @@ fn decode_source<S: ImageSource>(mut source: S) -> Result<DecodedImage, IngestEr
         height: h,
         rgba: rgba.into(),
         display,
-        // This lane is 8-bit only (see the depth gate above), so nothing
-        // was reduced here.
-        depth_reduced: false,
+        // TRUE when the adapter narrowed the file's own samples — a
+        // 16-bit PNG opens, and the panel's Depth row says it was
+        // reduced rather than letting it look like an 8-bit original.
+        depth_reduced,
     })
 }
 

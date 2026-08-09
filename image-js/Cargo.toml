@@ -43,6 +43,11 @@ console_error_panic_hook = { workspace = true }
 getrandom = { workspace = true }
 
 [dev-dependencies]
+# Fixture builders only — the 16-bit ingest test encodes its own PNG
+# rather than committing a binary. Dev-only, so the wasm32 release
+# build is untouched (the cargo-tree guard still holds).
+zune-png = { workspace = true }
+zune-core = { workspace = true }
 pollster = { workspace = true }
 # CMYK-JPEG fixture builder for the ingest cast test (the codec adapter
 # only encodes RGB/Gray; jpeg-encoder writes the Adobe-APP14 CMYK form

@@ -740,6 +740,8 @@ dependencies = [
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "zune-core",
+ "zune-png",
 ]
 
 [[package]]

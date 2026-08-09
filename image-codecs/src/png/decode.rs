@@ -76,9 +76,23 @@ struct DecodedInfo {
     native_format: &'static str,
     icc: Option<Vec<u8>>,
     exif: Option<Vec<u8>>,
+    /// The file's OWN depth, before `decode_frame` narrows it. Kept so
+    /// the ingest can TELL the user its 16-bit file was reduced rather
+    /// than opening it silently — the PSD lane already reports this and
+    /// a quiet narrowing would be the worse half of a half-truth.
+    source_depth_16: bool,
 }
 
 impl<B: ByteSource> PngSource<B> {
+    /// Did the FILE carry 16-bit samples? Answers only after `probe`.
+    ///
+    /// An inherent method, not a trait one: `ImageSource` is frozen,
+    /// and this is a PNG-specific fact rather than a new obligation on
+    /// every codec.
+    pub fn source_was_16bit(&self) -> bool {
+        self.info.as_ref().is_some_and(|i| i.source_depth_16)
+    }
+
     pub fn new(bytes: B) -> Self {
         PngSource {
             bytes,
@@ -125,10 +139,31 @@ impl<B: ByteSource> PngSource<B> {
         let raw = self.slurp()?;
         let mut dec = PngDecoder::new(ZCursor::new(&raw));
         let result = dec.decode().map_err(malformed)?;
-        let src = result.u8().ok_or_else(|| CodecError::Unsupported {
-            format: PNG,
-            detail: "decoder returned non-U8 samples".into(),
-        })?;
+        // NARROW 16-bit to 8 by the HIGH byte, which is the same
+        // reduction the PSD ingest already reports in the panel's Depth
+        // row — consistent, and a file that used to be unopenable now
+        // opens. `v >> 8` rather than `v / 257`: the high byte is what
+        // an 8-bit consumer would have read from the same sample, and
+        // scaling would put 16-bit precision into the low bits of an
+        // 8-bit value where it cannot survive anyway.
+        //
+        // This is a NARROWING, not 16-bit support. A true 16-bit stack
+        // means the layer buffers, the composite fold and the upload
+        // bridge all carrying u16, which is the genuinely large item —
+        // `SampleDepth::U16` already exists, so it is NOT the frozen
+        // type that stands in the way.
+        let src = match result {
+            zune_core::result::DecodingResult::U8(v) => v,
+            zune_core::result::DecodingResult::U16(v) => {
+                v.into_iter().map(|s| (s >> 8) as u8).collect()
+            }
+            _ => {
+                return Err(CodecError::Unsupported {
+                    format: PNG,
+                    detail: "decoder returned neither U8 nor U16 samples".into(),
+                })
+            }
+        };
 
         // zune delivers RGB as 3 components; widen to the 4-channel
         // `Rgba` the spec layout demands, filling alpha at 255. Every
@@ -222,15 +257,20 @@ fn parse_headers(raw: &[u8]) -> Result<DecodedInfo> {
     let mut dec = PngDecoder::new(ZCursor::new(raw));
     dec.decode_headers().map_err(malformed)?;
 
-    // 16-bit is the M1 lane; refuse rather than silently truncate.
+    // 16-BIT: accepted since 2026-08-09, narrowed to 8 on the way out
+    // (see `decode_frame`) rather than refused.
+    //
+    // The refusal used to read "M0 is U8 only", and the catalog
+    // recorded the blocker as "their 16-bit byte order is unverified
+    // and no fixture exists to check a guess". That was never true of
+    // PNG: the endianness is normative (PNG §7.1 — samples are network
+    // byte order, MSB first) and, more to the point, we never see the
+    // wire bytes. zune hands back `DecodingResult::U16(Vec<u16>)`,
+    // already assembled into native values, so there is no guess to
+    // check and never was.
+    let source_depth_16 = matches!(dec.depth(), Some(BitDepth::Sixteen));
     match dec.depth() {
-        Some(BitDepth::Eight) => {}
-        Some(BitDepth::Sixteen) => {
-            return Err(CodecError::Unsupported {
-                format: PNG,
-                detail: "16-bit depth (M0 is U8 only)".into(),
-            })
-        }
+        Some(BitDepth::Eight) | Some(BitDepth::Sixteen) => {}
         other => {
             return Err(CodecError::Unsupported {
                 format: PNG,
@@ -260,6 +300,7 @@ fn parse_headers(raw: &[u8]) -> Result<DecodedInfo> {
         native_format,
         icc,
         exif,
+        source_depth_16,
     })
 }
 
