@@ -197,6 +197,19 @@ export interface ImageSessionState {
    *  string and face survive between clicks, which is what makes setting
    *  several runs of the same type usable. */
   type: { text: string; family: string; sizePx: number };
+  /** POINTS PER IMAGE PIXEL for the frame this session last composited
+   *  into, or null before the first composite.
+   *
+   *  It is CACHED here rather than computed on demand, and that is the
+   *  point: `submitLayer` already derives this exact number to lay the
+   *  image out (`min(box.w/width, box.h/height)`), so reading the cache
+   *  guarantees a converted size agrees with the pixels actually on
+   *  screen. Recomputing would let the two drift the moment a frame is
+   *  resized between a composite and a panel read.
+   *
+   *  Null is meaningful: nothing has been laid out, so no conversion is
+   *  possible and callers must say so rather than assume 1. */
+  ptPerPx: number | null;
   /** The clone/heal source anchor in IMAGE px, or null before one is
    *  set. Session state rather than stroke state: the anchor SURVIVES a
    *  stroke, which is what makes repeated retouching strokes usable. */
@@ -571,6 +584,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     history: null,
     layersNote: null,
     type: { text: "", family: "Helvetica", sizePx: 48 },
+    ptPerPx: null,
     cloneSource: null,
     channels: null,
     brushLibrary: null,
@@ -1066,6 +1080,10 @@ export function createImageSession(host: BundleHost): ImageSession {
     const surface = scene();
     if (!surface) return false;
     const scale = Math.min(box.w / width, box.h / height);
+    // The SAME number the layout uses — see `state.ptPerPx`. Recorded
+    // here so a panel converting image px to points cannot disagree
+    // with what was drawn.
+    state.ptPerPx = scale;
     const w = width * scale;
     const h = height * scale;
     await surface.submit(target, {

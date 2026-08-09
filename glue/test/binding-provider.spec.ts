@@ -218,16 +218,15 @@ describe("the character provider", () => {
     handle.dispose();
   });
 
-  it("declines the FONT SIZE — the unit mismatch, asserted not assumed", () => {
-    // `characterFontSize` binds to a length widget formatting in
-    // points; raster type measures in pixels. The conversion IS
-    // available (the composite path already computes points-per-pixel
-    // from the frame box) — what is unresolved is the PRODUCT question
-    // of what that field means. So this is owned-and-absent, a
-    // different claim from "not mine".
+  it("SERVES the font size in POINTS — the unit question, answered", () => {
+    // This test used to assert the opposite, and said why: "the day
+    // someone wires the bridge, it fails and makes them state the
+    // decision rather than inherit it." The bridge is wired and the
+    // decision is stated — `characterFontSize` means "the size unit of
+    // whatever you are editing", surfaced in the panel's own unit.
     //
-    // The test exists so that the day someone wires the bridge, it
-    // fails and makes them state the decision rather than inherit it.
+    // A pin that documents an open question is worth keeping precisely
+    // because it becomes a liability the day the question is answered.
     const { registry, bundle, handle } = boot();
     const text = registry
       .activeProviders()
@@ -235,11 +234,14 @@ describe("the character provider", () => {
       .find((p) => p.paths?.includes("characterFontFamily"))!;
 
     expect(text.paths).toContain("characterFontSize");
-    expect(text.writablePaths).not.toContain("characterFontSize");
+    // WRITABLE now — the half that changed. A size control the user can
+    // read but not set would be a worse answer than a blank one.
+    expect(text.writablePaths).toContain("characterFontSize");
 
     bundle.dispose();
     handle.dispose();
   });
+
 
 });
 
@@ -274,6 +276,87 @@ describe("the character provider scopes by TOOL, not only by context", () => {
     expect(await session.ingestSelection(), "the fixture ingested").toBe(true);
     return { session, handle };
   }
+
+  it("CONVERTS the font size through the layout's own points-per-pixel", async () => {
+    // The conversion is the whole feature, so it is measured rather
+    // than declared. `ptPerPx` is not recomputed here — it is the SAME
+    // number `submitLayer` used to lay the composite out, which is why
+    // a converted size cannot disagree with the pixels on screen.
+    const { session, handle } = await ingestedSession();
+    const { provider } = makeTextBindingProvider(
+      session,
+      () => "media.paged.image.tool.type",
+    );
+    const req = {
+      path: "characterFontSize",
+      target: { kind: "selection", scope: "content" },
+    } as never;
+
+    // BEFORE a composite there is no layout, so there is no conversion.
+    // ABSENT rather than a 1:1 guess — a wrong number in a size field
+    // is worse than a blank one, because it looks right.
+    expect(session.state().ptPerPx).toBeNull();
+    const cold = await provider.readProperty!(req);
+    expect(cold.kind, "no layout ⇒ no size").toBe("absent");
+
+    // Composite once so the session learns the frame's scale.
+    await session.apply();
+    const ptPerPx = session.state().ptPerPx;
+    expect(ptPerPx, "the composite recorded the scale").not.toBeNull();
+    expect(ptPerPx!).toBeGreaterThan(0);
+
+    // READ: image px → points, through that exact number.
+    const sizePx = session.state().type.sizePx;
+    const read = await provider.readProperty!(req);
+    expect(read.kind).toBe("value");
+    expect((read as unknown as { value: number }).value).toBeCloseTo(
+      sizePx * ptPerPx!,
+      5,
+    );
+
+    // WRITE: points → image px, the inverse. Asserted as a ROUND TRIP
+    // rather than against a hand-computed pixel count, so the test
+    // cannot pass by mirroring the implementation's arithmetic.
+    //
+    // The target is DERIVED from the layout rather than picked: the
+    // conversion lands on a PIXEL GRID, so a point size finer than one
+    // pixel is not representable and comes back quantized. Writing a
+    // literal 36 here failed on this fixture for exactly that reason —
+    // its image is tiny against its frame, so 36 pt is a third of a
+    // pixel. Twenty pixels' worth is representable by construction.
+    const target = 20 * ptPerPx!;
+    const wrote = await provider.writeProperty!({
+      ...(req as object),
+      value: target,
+    } as never);
+    expect(wrote.kind).toBe("applied");
+    expect(session.state().type.sizePx).toBe(20);
+    const back = await provider.readProperty!(req);
+    expect((back as unknown as { value: number }).value).toBeCloseTo(target, 5);
+
+    // THE QUANTIZATION, asserted rather than left as a footnote: a size
+    // below one pixel clamps to one pixel instead of rounding to zero
+    // and rasterizing nothing. The user sees the clamped value reflected
+    // back, which is the honest signal that the grid is the limit.
+    await provider.writeProperty!({
+      ...(req as object),
+      value: ptPerPx! / 4,
+    } as never);
+    expect(session.state().type.sizePx, "never below one pixel").toBe(1);
+
+    // A nonsense size is refused, not rounded into existence.
+    expect(
+      (
+        await provider.writeProperty!({
+          ...(req as object),
+          value: 0,
+        } as never)
+      ).kind,
+    ).toBe("decline");
+
+    session.dispose();
+    handle.dispose();
+  });
 
   it("answers with the tool in hand and declines without it", async () => {
     const { session, handle } = await ingestedSession();

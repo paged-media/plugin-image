@@ -64,7 +64,35 @@ import type { ImageSession } from "../session";
  * them. Exactly one, and the reason the list is that short is the most
  * interesting thing in this file — see `characterFontSize` below.
  */
-export const VALUED_PATHS: readonly PropertyPath[] = ["characterFontFamily"];
+export const VALUED_PATHS: readonly PropertyPath[] = [
+  "characterFontFamily",
+  // C-25-adjacent, and the resolution of THE UNIT QUESTION this file
+  // used to leave open (2026-08-09). The reading taken: this field
+  // means "the size unit of whatever you are editing", surfaced in the
+  // panel's own unit — POINTS — with the plugin doing the conversion.
+  //
+  // Why that reading and not "points, absolutely": raster type IS
+  // typography, and a Character panel that goes blank over it is the
+  // context-sensitivity failure ADR 024 exists to prevent. The
+  // conversion is honest because the number it needs is real and
+  // already in production — `submitLayer` computes points-per-image-
+  // pixel to lay the composite out, and `state.ptPerPx` is that exact
+  // value, cached at the point of use so panel and pixels cannot
+  // disagree.
+  //
+  // NO CONTRACT CHANGE. The seam does not grow a declared unit per
+  // path — the third option in the old note — because the governing
+  // rule puts every other content type in the document-units family,
+  // so that axis would have a population of one. If a second
+  // intrinsic-space content type ever appears, revisit; until then a
+  // per-path unit is a generalisation with one instance.
+  //
+  // FIT-DEPENDENCE IS THE FEATURE. Scaling the frame changes the type's
+  // physical size, so the reported points change with it. That is a
+  // fact about placed rasters — Photoshop models exactly it — not an
+  // artifact of the conversion.
+  "characterFontSize",
+];
 
 /**
  * Paths this provider OWNS and has nothing to say about.
@@ -82,43 +110,16 @@ export const VALUED_PATHS: readonly PropertyPath[] = ["characterFontFamily"];
  * grows a style axis this row moves up and nothing else changes.
  */
 export const ABSENT_PATHS: readonly PropertyPath[] = [
-  // THE UNIT MISMATCH — a real one, but NOT for the reason first given
-  // here, and the correction matters because it changes what unblocks
-  // this row.
+  // `characterFontSize` MOVED to VALUED_PATHS on 2026-08-09 — the
+  // product question that kept it here was answered. See the note
+  // there for the reading taken and why it needed no contract change.
   //
-  // `characterFontSize` is a TYPOGRAPHIC size: the host binds it to a
-  // `PAGED_INPUT_LENGTH` widget and a length on the wire is a bare
-  // number whose unit is points BY CONVENTION (core has no unit type at
-  // all — `DocumentMeta.units` is hard-coded empty). Raster type's size
-  // is `sizePx`, a count of pixels in the image raster.
-  //
-  // WHAT WAS WRONG: this comment claimed the conversion was impossible
-  // because "the image model carries no DPI". It does — under another
-  // name, in production, a few hundred lines away. `frameBox()` returns
-  // the frame's content box IN PAGE PT and the composite path computes
-  // `scale = min(box.w/width, box.h/height)`, which is points per
-  // pixel. Every submitted frame already uses it. A grep for "dpi"
-  // found nothing and I stopped there.
-  //
-  // Nor is the fit-dependence disqualifying, which was the second wrong
-  // reason. Scaling the frame really does change the type's physical
-  // size — that is a fact about placed rasters, not an artifact of the
-  // conversion, and Photoshop models exactly it.
-  //
-  // WHAT IS ACTUALLY UNRESOLVED is a PRODUCT question: does this field
-  // mean "points, absolutely" or "the size unit of whatever you are
-  // editing"? Under the first reading this row stays absent forever and
-  // px belongs only in the image panel. Under the second, the provider
-  // converts through the scale above and serves points (no contract
-  // change), or the seam grows a declared unit per path (a contract
-  // change, designed but deliberately unbuilt — the governing rule puts
-  // every other content type in the document-units family, so this axis
-  // has a population of one).
-  //
-  // Until that is answered, ABSENT is the honest position: it shows no
-  // value rather than a pixel count in a control labelled in points.
-  // The blocker is a decision, not a missing capability.
-  "characterFontSize",
+  // Every path below is real on a core story run and meaningless on a
+  // SINGLE rasterized run: there is no second line to lead, no
+  // paragraph to align, no style to inherit. Several (tracking, case,
+  // underline) would become real if the type lane grew past one run on
+  // one line — they are absent because the FEATURE is absent, not
+  // because of any unit or binding problem.
   "characterFontStyle",
   "characterLeading",
   "characterTracking",
@@ -186,10 +187,29 @@ export function makeTextBindingProvider(
       if (!session.state().source) {
         return { kind: "decline", reason: "no raster image is ingested" };
       }
-      const t = session.state().type;
+      const st = session.state();
+      const t = st.type;
       switch (request.path) {
         case "characterFontFamily":
           return { kind: "value", value: t.family as unknown as Value };
+        case "characterFontSize": {
+          const ptPerPx = st.ptPerPx;
+          if (ptPerPx === null || !(ptPerPx > 0)) {
+            // Nothing has been composited, so there is no layout to
+            // convert against. ABSENT, not a guess at 1:1 — a wrong
+            // number in a size field is worse than a blank one, because
+            // the user cannot tell it is wrong.
+            return {
+              kind: "absent",
+              reason:
+                "no composite yet — points per pixel is unknown until the image is laid out",
+            };
+          }
+          return {
+            kind: "value",
+            value: (t.sizePx * ptPerPx) as unknown as Value,
+          };
+        }
         default:
           if (ABSENT_PATHS.includes(request.path)) {
             return {
@@ -228,6 +248,29 @@ export function makeTextBindingProvider(
             return { kind: "decline", reason: "a face name cannot be empty" };
           }
           session.setType({ family });
+          return ok();
+        }
+        case "characterFontSize": {
+          const pt = Number(request.value);
+          if (!Number.isFinite(pt) || pt <= 0) {
+            return { kind: "decline", reason: "a type size must be positive" };
+          }
+          const ptPerPx = session.state().ptPerPx;
+          if (ptPerPx === null || !(ptPerPx > 0)) {
+            // Symmetric with the read: without a layout there is no
+            // conversion, and writing an unconverted point count as a
+            // pixel count would silently resize type by the frame's
+            // scale factor.
+            return {
+              kind: "decline",
+              reason:
+                "no composite yet — points per pixel is unknown until the image is laid out",
+            };
+          }
+          // Round, because sizePx feeds a rasterizer that will floor it
+          // anyway; rounding here keeps the value the panel reads back
+          // equal to the one it committed, within a pixel.
+          session.setType({ sizePx: Math.max(1, Math.round(pt / ptPerPx)) });
           return ok();
         }
         default:
