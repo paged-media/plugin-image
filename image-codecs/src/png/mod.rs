@@ -69,10 +69,10 @@ pub(crate) const PNG: &str = "png";
 /// The fixed transfer/space/alpha PNG decodes into at M0: sRGB-encoded,
 /// straight alpha, per the §10.3 ruling for PNG-without-gamma-info. Only
 /// `channels` varies by the file's color type; depth is always U8 here.
-pub(crate) const fn png_format(channels: ChannelLayout) -> PixelFormat {
+pub(crate) const fn png_format(channels: ChannelLayout, depth: SampleDepth) -> PixelFormat {
     PixelFormat {
         channels,
-        depth: SampleDepth::U8,
+        depth,
         alpha: AlphaMode::Straight,
         transfer: Transfer::Gamma(TransferCurve::Srgb),
         space: ColorSpaceRef::Named(NamedSpace::Srgb),

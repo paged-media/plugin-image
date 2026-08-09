@@ -81,50 +81,64 @@ const PROBE: [u16; 8] = [
 ];
 
 #[test]
-fn image_codec_png_16bit_opens_at_all() {
-    // It used to error `Unsupported` — the file simply would not open.
+fn image_codec_png_16bit_opens_and_keeps_its_depth() {
+    // It used to error `Unsupported` — the file would not open at all.
+    // Then it opened NARROWED. It now opens at full depth: the source
+    // reports U16 and the buffer is eight bytes per pixel.
     let png = encode_rgba16(2, 1, &PROBE);
-    let (info, _) = decode_full(png);
+    let (info, buf) = decode_full(png);
     assert_eq!(info.width, 2);
     assert_eq!(info.height, 1);
     assert_eq!(info.format.channels, ChannelLayout::Rgba);
-    // Narrowed on the way out, so the buffer the pipeline sees is U8.
-    assert_eq!(info.format.depth, SampleDepth::U8);
+    assert_eq!(info.format.depth, SampleDepth::U16);
+    assert_eq!(buf.len(), 16, "2 px x 4 ch x 2 bytes");
 }
 
 #[test]
 fn image_codec_png_16bit_byte_order_is_measured_not_assumed() {
     let png = encode_rgba16(2, 1, &PROBE);
-    let (_, pixels) = decode_full(png);
-    assert_eq!(pixels.len(), 8, "2x1 RGBA8");
+    let (_, buf) = decode_full(png);
 
-    // The HIGH byte of each sample. If the decode read the pair the
-    // other way round, every one of these would be the low byte —
-    // 0x34, 0x78, 0xBC … — so this comparison is the byte-order check.
-    let want: Vec<u8> = PROBE.iter().map(|s| (s >> 8) as u8).collect();
+    // Reassemble the native-endian pairs the decoder emits and compare
+    // against the samples that went in. A byte-swap anywhere in the
+    // chain turns 0x1234 into 0x3412, so this is the order check — and
+    // it is now EXACT rather than a comparison of narrowed high bytes,
+    // because nothing is narrowed any more.
+    let got: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|p| u16::from_ne_bytes([p[0], p[1]]))
+        .collect();
     assert_eq!(
-        pixels, want,
-        "16-bit samples narrowed wrong. Expected the HIGH bytes {want:02X?}; \
-         getting the LOW bytes instead would mean the pair is being read \
-         little-endian, which is exactly the 'plausible-looking wrong image' \
-         the catalog warned a guess could produce."
+        got,
+        PROBE.to_vec(),
+        "16-bit samples came back reordered. The probe values have \
+         DIFFERING bytes precisely so a swap cannot hide — which is the \
+         'plausible-looking wrong image' the catalog warned a guess \
+         could produce."
     );
-    // And state the negative explicitly, so the test cannot pass by
-    // some accident that also matches the low bytes.
-    let low: Vec<u8> = PROBE.iter().map(|s| (s & 0xFF) as u8).collect();
-    assert_ne!(pixels, low, "read little-endian");
+    // State the negative too, so this cannot pass by an accident that
+    // also matches a byte-swapped read.
+    let swapped: Vec<u16> = PROBE.iter().map(|s| s.swap_bytes()).collect();
+    assert_ne!(got, swapped, "read with the bytes reversed");
 }
 
 #[test]
-fn image_codec_png_16bit_extremes_narrow_sanely() {
-    // Full white must stay full white — a naive `v / 256` would give
-    // 255 here too, but `v >> 8` is the one that also keeps 0xFF00
-    // (the largest sample whose high byte is 255) distinct from 0xFFFF
-    // only in bits that an 8-bit consumer cannot represent anyway.
-    let samples = [0xFFFFu16, 0x0000, 0x8000, 0xFFFF];
+fn image_codec_png_16bit_extremes_survive_intact() {
+    // The values an 8-bit round trip cannot tell apart. 0xFF00 and
+    // 0xFFFF both narrow to 255; keeping them DISTINCT is the whole
+    // point of the depth surviving.
+    let samples = [0xFFFFu16, 0x0000, 0x8000, 0xFF00];
     let png = encode_rgba16(1, 1, &samples);
-    let (_, pixels) = decode_full(png);
-    assert_eq!(pixels, vec![0xFF, 0x00, 0x80, 0xFF]);
+    let (_, buf) = decode_full(png);
+    let got: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|p| u16::from_ne_bytes([p[0], p[1]]))
+        .collect();
+    assert_eq!(got, samples.to_vec());
+    assert_ne!(
+        got[0], got[3],
+        "0xFFFF and 0xFF00 must stay distinguishable"
+    );
 }
 
 #[test]

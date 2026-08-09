@@ -593,7 +593,12 @@ fn decode_source<S: ImageSource>(
     let info = source
         .probe()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
-    if info.format.depth != SampleDepth::U8 {
+    // 16-BIT RGBA rides through at full depth (16-bit-stack-plan.md
+    // step 5). Other layouts at 16 bits would need their own widening
+    // arms below, so they still take the narrowing path and say so.
+    let keep16 =
+        info.format.depth == SampleDepth::U16 && info.format.channels == ChannelLayout::Rgba;
+    if info.format.depth != SampleDepth::U8 && !keep16 {
         // A codec adapter narrows in its own lane and reports `U8` here,
         // so reaching this arm means a depth NO adapter has a
         // documented reduction for.
@@ -648,6 +653,31 @@ fn decode_source<S: ImageSource>(
     source
         .read_region(roi, 1, &mut out)
         .map_err(|e| IngestError::Decode(e.to_string()))?;
+
+    if keep16 {
+        // Straight through: `buf` already holds native-endian u16
+        // pairs, which is exactly what `Pixels` stores at `U16`.
+        let samples: Vec<u16> = buf
+            .chunks_exact(2)
+            .map(|p| u16::from_ne_bytes([p[0], p[1]]))
+            .collect();
+        let px = crate::pixels::Pixels::from_rgba16(&samples);
+        let (px, w, h) = if orientation == Orientation::TopLeft {
+            (px, w, h)
+        } else {
+            // Reorientation is written against RGBA8; narrow first
+            // rather than silently skip the rotation, and say so.
+            let (b, w2, h2) = apply_orientation(px.to_rgba8().into_owned(), w, h, orientation);
+            (crate::pixels::Pixels::from_rgba8(b.into()), w2, h2)
+        };
+        return Ok(DecodedImage {
+            width: w,
+            height: h,
+            display: crate::display::DisplayTreatment::AssumedSrgb,
+            depth_reduced: !px.is_16bit(),
+            rgba: px,
+        });
+    }
 
     let n = w as usize * h as usize;
     let rgba: Vec<u8> = match channels {

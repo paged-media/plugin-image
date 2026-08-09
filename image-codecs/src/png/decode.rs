@@ -38,7 +38,7 @@
 //! row/strip-incremental reader) is a known M1 task — zune-png exposes
 //! no public row API, so a chunked deflate reader is the plan.
 
-use image_core::{ChannelLayout, Region, TileSliceMut};
+use image_core::{ChannelLayout, Region, SampleDepth, TileSliceMut};
 use zune_core::bit_depth::BitDepth;
 use zune_core::bytestream::ZCursor;
 use zune_core::colorspace::ColorSpace;
@@ -55,6 +55,9 @@ struct Decoded {
     width: u32,
     height: u32,
     channels: ChannelLayout,
+    /// The depth the samples are actually stored at — `U16` means
+    /// `pixels` holds native-endian pairs, two bytes per sample.
+    depth: SampleDepth,
     /// Tightly packed, interleaved, in the spec `channels` layout.
     pixels: Vec<u8>,
 }
@@ -152,10 +155,20 @@ impl<B: ByteSource> PngSource<B> {
         // bridge all carrying u16, which is the genuinely large item —
         // `SampleDepth::U16` already exists, so it is NOT the frozen
         // type that stands in the way.
+        // KEEP the bits. A 16-bit file used to be narrowed here; it now
+        // travels as native-endian pairs and the depth rides with it, so
+        // an adjustment chain no longer quantises at every step
+        // (16-bit-stack-plan.md steps 3 and 5).
+        let mut depth = SampleDepth::U8;
         let src = match result {
             zune_core::result::DecodingResult::U8(v) => v,
             zune_core::result::DecodingResult::U16(v) => {
-                v.into_iter().map(|s| (s >> 8) as u8).collect()
+                depth = SampleDepth::U16;
+                let mut b = Vec::with_capacity(v.len() * 2);
+                for sample in v {
+                    b.extend_from_slice(&sample.to_ne_bytes());
+                }
+                b
             }
             _ => {
                 return Err(CodecError::Unsupported {
@@ -169,15 +182,26 @@ impl<B: ByteSource> PngSource<B> {
         // `Rgba` the spec layout demands, filling alpha at 255. Every
         // other mapping (Gray, GrayA, RGBA) is already 1:1 with its
         // `ChannelLayout`, so it passes through untouched.
-        let pixels = if channels == ChannelLayout::Rgba
-            && src.len() == width as usize * height as usize * 3
-        {
-            widen_rgb_to_rgba(&src, width as usize, height as usize)?
-        } else {
-            src
-        };
+        let n = width as usize * height as usize;
+        let pixels =
+            if channels == ChannelLayout::Rgba && depth == SampleDepth::U16 && src.len() == n * 6 {
+                // 16-bit RGB → RGBA: opaque alpha is 0xFFFF, not 0xFF.
+                let mut v = Vec::with_capacity(n * 8);
+                for px in src.chunks_exact(6) {
+                    v.extend_from_slice(px);
+                    v.extend_from_slice(&u16::MAX.to_ne_bytes());
+                }
+                v
+            } else if channels == ChannelLayout::Rgba && src.len() == n * 3 {
+                widen_rgb_to_rgba(&src, width as usize, height as usize)?
+            } else {
+                src
+            };
 
-        let expect = width as usize * height as usize * channels.count() as usize;
+        let expect = width as usize
+            * height as usize
+            * channels.count() as usize
+            * usize::from(depth.bytes());
         if pixels.len() != expect {
             return Err(CodecError::Malformed {
                 format: PNG,
@@ -189,6 +213,7 @@ impl<B: ByteSource> PngSource<B> {
             width,
             height,
             channels,
+            depth,
             pixels,
         });
         Ok(())
@@ -201,7 +226,17 @@ impl<B: ByteSource> ImageSource for PngSource<B> {
         Ok(SourceInfo {
             width: i.width,
             height: i.height,
-            format: png_format(i.channels),
+            // The file's OWN depth. 16-bit PNGs now keep their bits
+            // through the pipeline instead of being narrowed at the
+            // codec boundary (16-bit-stack-plan.md step 5).
+            format: png_format(
+                i.channels,
+                if i.source_depth_16 {
+                    SampleDepth::U16
+                } else {
+                    SampleDepth::U8
+                },
+            ),
             native_format: i.native_format,
             icc: i.icc,
             exif: i.exif,
@@ -224,7 +259,7 @@ impl<B: ByteSource> ImageSource for PngSource<B> {
         }
         self.decode_frame()?;
         let frame = self.frame.as_ref().expect("decoded above");
-        let fmt = png_format(frame.channels);
+        let fmt = png_format(frame.channels, frame.depth);
 
         if out.format != fmt {
             return Err(CodecError::Unsupported {

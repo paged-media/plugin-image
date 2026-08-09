@@ -1249,6 +1249,44 @@ mod wasm {
     // `init_gpu`.
 
     /// Register `pixels` as a new engine-held image, returning its handle.
+    /// [`register`] for a buffer that already knows its depth.
+    fn register_px(
+        width: u32,
+        height: u32,
+        pixels: crate::pixels::Pixels,
+    ) -> Result<DecodedHandle, JsValue> {
+        let expected = (width as usize) * (height as usize);
+        if pixels.pixel_count() != expected {
+            return Err(JsValue::from_str(&format!(
+                "register: {} pixels for {width}x{height} (expected {expected})",
+                pixels.pixel_count()
+            )));
+        }
+        let img = DecodedImage {
+            width,
+            height,
+            rgba: pixels,
+            display: crate::display::DisplayTreatment::AssumedSrgb,
+            depth_reduced: false,
+        };
+        let handle = NEXT_HANDLE.with(|n| {
+            let h = n.get();
+            n.set(h + 1);
+            h
+        });
+        let img_display = display_code(img.display);
+        IMAGES.with(|m| m.borrow_mut().insert(handle, img));
+        Ok(DecodedHandle {
+            handle,
+            width,
+            height,
+            display: img_display,
+            // Nothing was narrowed getting here — this door takes the
+            // buffer at whatever depth it already had.
+            depth_reduced: false,
+        })
+    }
+
     fn register(width: u32, height: u32, pixels: Vec<u8>) -> Result<DecodedHandle, JsValue> {
         let img = DecodedImage::from_rgba8(width, height, pixels)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1326,6 +1364,26 @@ mod wasm {
     /// Land a fill result: into the ACTIVE LAYER (journaled, then
     /// re-composited into the same handle) when a stack is bound, else
     /// as a NEW engine-held image (the pre-layer destructive commit).
+    /// [`land_fill`] for a buffer that already knows its depth.
+    ///
+    /// The FLAT path keeps whatever depth it was handed, so an
+    /// adjustment chain on a 16-bit image no longer quantises between
+    /// steps. The LAYERED path still narrows, because the layer edit
+    /// journal is tile-granular over `Arc<[u8]>` — that is step 4 of
+    /// `16-bit-stack-plan.md`, and narrowing HERE rather than pretending
+    /// otherwise is what keeps `depth_reduced` honest.
+    async fn land_fill_px(
+        width: u32,
+        height: u32,
+        pixels: crate::pixels::Pixels,
+        layered: bool,
+    ) -> Result<DecodedHandle, JsValue> {
+        if !layered {
+            return register_px(width, height, pixels);
+        }
+        land_fill(width, height, pixels.to_rgba8().into_owned(), layered).await
+    }
+
     async fn land_fill(
         width: u32,
         height: u32,
@@ -2256,11 +2314,17 @@ mod wasm {
         // over a fully opaque backdrop `rgb·1 = rgb` and the round trip
         // is PROVABLY the identity, so the common case (a JPEG, a PSD
         // composite, most placed photographs) pays nothing.
-        let img8 = img.rgba.to_rgba8();
-        let associate = img8.chunks_exact(4).any(|px| px[3] != 255);
-        let px_f16 = |i: usize, c: usize| -> [u8; 2] {
-            let v = img.rgba.to_rgba8()[i + c] as f32 / 255.0;
-            let a = img.rgba.to_rgba8()[i + 3] as f32 / 255.0;
+        // Alpha association is a question about the ALPHA, so ask the
+        // buffer at its own depth rather than a narrowed copy.
+        let n_px = img.rgba.pixel_count();
+        let associate = (0..n_px).any(|i| img.rgba.sample16(i, 3) != u16::MAX);
+        // DEPTH-AGNOSTIC upload. `sample16` widens an 8-bit sample as
+        // `(v << 8) | v`, which maps 255 to 65535 exactly, so an 8-bit
+        // image produces byte-identical f16 to the old `/ 255.0` path
+        // while a 16-bit one keeps every bit it has.
+        let px_f16 = |px: usize, c: usize| -> [u8; 2] {
+            let v = f32::from(img.rgba.sample16(px, c)) / 65535.0;
+            let a = f32::from(img.rgba.sample16(px, 3)) / 65535.0;
             let v = if associate && c < 3 { v * a } else { v };
             f16::from_f32(v).to_le_bytes()
         };
@@ -2297,9 +2361,12 @@ mod wasm {
                     let sy = (wy as i64 - ry as i64).clamp(0, img.height as i64 - 1) as usize;
                     for wx in 0..ww {
                         let sx = (wx as i64 - rx as i64).clamp(0, img.width as i64 - 1) as usize;
-                        let i = (sy * img.width as usize + sx) * 4;
+                        // PIXEL index, not a byte offset — `px_f16`
+                        // reads through `sample16`, which is depth-aware
+                        // and therefore cannot take a byte position.
+                        let px = sy * img.width as usize + sx;
                         for c in 0..4 {
-                            win.extend_from_slice(&px_f16(i, c));
+                            win.extend_from_slice(&px_f16(px, c));
                         }
                     }
                 }
@@ -2317,10 +2384,10 @@ mod wasm {
                 .await
             }
             _ => {
-                let mut win = Vec::with_capacity(img.rgba.len() * 2);
-                for i in (0..img.rgba.len()).step_by(4) {
+                let mut win = Vec::with_capacity(n_px * 8);
+                for px in 0..n_px {
                     for c in 0..4 {
-                        win.extend_from_slice(&px_f16(i, c));
+                        win.extend_from_slice(&px_f16(px, c));
                     }
                 }
                 image_gpu::execute_tile_once_async(
@@ -2336,12 +2403,28 @@ mod wasm {
             }
         }
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let rgba = if associate {
-            crate::fill::f16_to_rgba8_unpremul(&out)
+        // READ BACK AT THE SOURCE'S DEPTH. Narrowing a 16-bit image to
+        // 8 here is exactly the quantisation a 16-bit pipeline exists to
+        // avoid: the GPU already computes in f32 and stores rgba16float,
+        // so this step was the ONLY place precision was ever lost — and
+        // it was lost once per operation, so a chain of N adjustments
+        // quantised N times.
+        let landed = if img.rgba.is_16bit() {
+            let s16 = if associate {
+                crate::fill::f16_to_rgba16_unpremul(&out)
+            } else {
+                crate::fill::f16_to_rgba16(&out)
+            };
+            crate::pixels::Pixels::from_rgba16(&s16)
         } else {
-            crate::fill::f16_to_rgba8(&out)
+            let s8 = if associate {
+                crate::fill::f16_to_rgba8_unpremul(&out)
+            } else {
+                crate::fill::f16_to_rgba8(&out)
+            };
+            crate::pixels::Pixels::from_rgba8(Arc::from(s8))
         };
-        land_fill(img.width, img.height, rgba, layered).await
+        land_fill_px(img.width, img.height, landed, layered).await
     }
 
     // ─────────────────────── LAYER doors (§6.2) ──────────────────────

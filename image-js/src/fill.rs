@@ -254,6 +254,42 @@ pub(crate) fn f16_to_rgba8(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// [`f16_to_rgba8`]'s 16-BIT twin: keep the precision the GPU computed
+/// instead of quantising it to 8 bits on the way home.
+///
+/// This is where a 16-bit pipeline actually pays. Every kernel already
+/// computes in f32 and stores rgba16float; the loss was entirely in the
+/// readback, which rounded to a byte after every single operation. A
+/// chain of N adjustments quantised N times.
+// Only the wasm realm's kernel doors read this back; on a host build
+// it has no caller and -D warnings turns that into an error. Gate
+// rather than #[allow(dead_code)], which would hide a real orphaning.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn f16_to_rgba16(bytes: &[u8]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let v = f16::from_le_bytes([pair[0], pair[1]]).to_f32();
+        out.push((v.clamp(0.0, 1.0) * 65535.0).round() as u16);
+    }
+    out
+}
+
+/// The 16-bit twin of [`f16_to_rgba8_unpremul`].
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn f16_to_rgba16_unpremul(bytes: &[u8]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for px in bytes.chunks_exact(8) {
+        let v = |i: usize| f16::from_le_bytes([px[i * 2], px[i * 2 + 1]]).to_f32();
+        let a = v(3).clamp(0.0, 1.0);
+        for c in 0..3 {
+            let s = if a > 0.0 { v(c) / a } else { 0.0 };
+            out.push((s.clamp(0.0, 1.0) * 65535.0).round() as u16);
+        }
+        out.push((a * 65535.0).round() as u16);
+    }
+    out
+}
+
 /// [`f16_to_rgba8`]'s twin for a PREMULTIPLIED buffer: dissociate the
 /// alpha on the way back to straight RGBA8.
 ///
