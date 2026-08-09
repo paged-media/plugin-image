@@ -204,10 +204,17 @@ describe("the character provider", () => {
       .map((p) => p.provides)
       .find((p) => p.paths?.includes("characterFontFamily"))!;
 
-    // Paragraph alignment and a style axis are meaningless on a raster
-    // run — but they are DECLARED, so the host asks us and gets a blank
-    // rather than asking core and painting the text caret's paragraph
-    // over an image frame.
+    // These two are STRUCTURALLY meaningless on a raster run — not
+    // merely unbuilt — but they are DECLARED, so the host asks us and
+    // gets a blank rather than asking core and painting the text
+    // caret's paragraph over an image frame.
+    //
+    // Hyphenation needs LINE BREAKING to hyphenate at, and this lane
+    // breaks only where the author typed a newline. Kerning method
+    // (optical vs metrics) is a CHOICE the shaper does not expose — it
+    // applies the face's own kerning and offers no alternative. Both
+    // will stay here however far the lane grows, which is what makes
+    // them the right examples after three earlier ones moved.
     //
     // NOTE the example has now moved TWICE in one day: first off
     // `characterLeading` (writable once the lane laid out more than one
@@ -215,13 +222,63 @@ describe("the character provider", () => {
     // passed a style to the face door). A test whose example keeps
     // moving out from under it is the test doing its job — the claim is
     // about ownership-WITHOUT-value, so it needs a path that still has
-    // none. Underline is one: nothing in the lane draws a rule.
-    expect(text.paths).toContain("paragraphJustification");
-    expect(text.paths).toContain("characterUnderline");
+    // none.
+    //
+    // THIRD MOVE, and the last one this example can make: leading,
+    // then style, then underline all became writable as the lane grew.
+    // `characterKerningMethod` is structurally absent rather than
+    // merely unbuilt — the shaper applies the face's kerning and
+    // exposes no choice of METHOD (optical vs metrics), so there is no
+    // value to have. That is why it will not move.
+    expect(text.paths).toContain("paragraphHyphenation");
+    expect(text.paths).toContain("characterKerningMethod");
     // …and they are NOT writable, so the control renders read-only
     // instead of offering a commit that lands nowhere.
-    expect(text.writablePaths).not.toContain("paragraphJustification");
-    expect(text.writablePaths).not.toContain("characterUnderline");
+    expect(text.writablePaths).not.toContain("paragraphHyphenation");
+    expect(text.writablePaths).not.toContain("characterKerningMethod");
+
+    bundle.dispose();
+    handle.dispose();
+  });
+
+  it("EVERY absent path is absent STRUCTURALLY, not merely unbuilt", () => {
+    // THE CLOSING ASSERTION for the type lane. The interesting property
+    // is not how many paths are served — it is that the ones which are
+    // NOT have a reason that no amount of building would remove.
+    //
+    // Each of the eight below fails for one of three structural
+    // reasons, and every one of them traces back to a single fact: a
+    // raster layer is not a text COLUMN.
+    //   · no measure to lay out against — indents, space before/after
+    //   · no line BREAKING, so nothing to hyphenate or keep together
+    //   · no CHOICE exposed by the shaper — kerning method
+    // If a future lane ever wraps, the first two groups become real and
+    // this test is where that decision surfaces.
+    const { registry, bundle, handle } = boot();
+    const text = registry
+      .activeProviders()
+      .map((p) => p.provides)
+      .find((p) => p.paths?.includes("characterFontFamily"))!;
+
+    const absent = (text.paths ?? []).filter(
+      (p) => !(text.writablePaths ?? []).includes(p),
+    );
+    expect([...absent].sort()).toEqual(
+      [
+        // NOT `characterCase` — that one IS served (upper/lower), with
+        // SMALL CAPS refused on write rather than faked by scaling
+        // capitals. A refusal with a reason is a served path, not an
+        // absent one.
+        "characterKerningMethod",
+        "paragraphFirstLineIndent",
+        "paragraphHyphenation",
+        "paragraphKeepLinesTogether",
+        "paragraphLeftIndent",
+        "paragraphRightIndent",
+        "paragraphSpaceAfter",
+        "paragraphSpaceBefore",
+      ].sort(),
+    );
 
     bundle.dispose();
     handle.dispose();

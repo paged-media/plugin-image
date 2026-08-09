@@ -730,12 +730,16 @@ export function TypeSection({
         replaced with a box.
       </div>
       <div style={note}>
-        This paints PIXELS, not a text object. Newlines break lines and
-        leading, tracking and size are live on the Character panel — but
-        there is no WRAPPING (a line ends where you end it), no
-        paragraph layout and no styles. For live, editable, wrapping
-        text use the host&apos;s text frame, which is a real text
-        engine; a second one living in here would drift from it.
+        This paints PIXELS, not a text object. The Character panel is
+        live over a run — family, style, size, tracking, leading, case,
+        scale, slant, baseline shift, super/subscript, underline,
+        strikethrough, ligatures and line alignment all apply. What is
+        NOT here is everything that needs a text COLUMN: no WRAPPING (a
+        line ends where you end it), no indents, no hyphenation. A
+        raster layer is not a column, which is why those are absent
+        rather than pending. For live, editable, wrapping text use the
+        host&apos;s text frame, which is a real text engine; a second
+        one living in here would drift from it.
       </div>
     </>
   );

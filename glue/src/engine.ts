@@ -909,6 +909,21 @@ export interface ImageEngine {
      *  and each line is shaped INDEPENDENTLY so ligatures and kerning
      *  never reach across a break. */
     leadingPx: number,
+    /** Baseline offset in image px, positive = UP. */
+    baselineShiftPx: number,
+    /** Scale MULTIPLES (1 = natural), not percents — the percent lives
+     *  panel-side and is converted once, at the session seam. */
+    hScale: number,
+    vScale: number,
+    /** Faux-italic slant in degrees. */
+    skewDeg: number,
+    /** 0/1 flags, and `align` 0=left 1=centre 2=right. Flat scalars
+     *  rather than an options object: wasm-bindgen would otherwise need
+     *  a serde hop for a handful of numbers. */
+    underline: number,
+    strikethrough: number,
+    ligatures: number,
+    align: number,
   ): Promise<number>;
   /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
    *  image as tightly packed RGBA8. Edge tiles are clamped to the image
@@ -1229,6 +1244,14 @@ export interface ImageWasmModule {
     color: Float32Array,
     trackingPerMille: number,
     leadingPx: number,
+    baselineShiftPx: number,
+    hScale: number,
+    vScale: number,
+    skewDeg: number,
+    underline: number,
+    strikethrough: number,
+    ligatures: number,
+    align: number,
   ): Promise<number>;
   encode_image(
     rgba: Uint8Array,
@@ -1561,6 +1584,14 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       color,
       trackingPerMille,
       leadingPx,
+      baselineShiftPx,
+      hScale,
+      vScale,
+      skewDeg,
+      underline,
+      strikethrough,
+      ligatures,
+      align,
     ) =>
       wasm.text_paint(
         handle,
@@ -1572,6 +1603,14 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         Float32Array.from(color),
         trackingPerMille,
         leadingPx,
+        baselineShiftPx,
+        hScale,
+        vScale,
+        skewDeg,
+        underline,
+        strikethrough,
+        ligatures,
+        align,
       ),
     async fillContentAware(handle) {
       const h = await wasm.fill_content_aware(handle);

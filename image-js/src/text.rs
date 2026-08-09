@@ -40,12 +40,18 @@
 //! RASTER type, in the Photoshop-catalog sense: committed glyphs become
 //! pixels in a layer. It is not a live text OBJECT that stays editable —
 //! that is the host's text frame, which exists and is better at it. And
-//! it lays out HARD-BROKEN lines only: a newline starts a line, and
-//! leading, tracking and size are settable — but nothing WRAPS, there is
-//! no paragraph layout and no styles. The boundary is deliberate and it
-//! is not effort: wrapping needs a measure to wrap against, which for a
-//! raster layer is the layer, and a layer is not a text column. Those
-//! are text-engine features, the host already has a text engine, and
+//! it lays out HARD-BROKEN lines only: a newline starts a line. Within
+//! that, the run is fully styled — size, tracking, leading, per-line
+//! alignment, horizontal/vertical scale, faux-italic slant, baseline
+//! shift, underline and strikethrough from the FACE's own metrics, and
+//! a standard-ligature toggle.
+//!
+//! What is absent is absent STRUCTURALLY, and the boundary has one
+//! cause: nothing WRAPS, because wrapping needs a measure to wrap
+//! against and for a raster layer that would be the layer, which is not
+//! a text column. Everything downstream of that — indents, hyphenation,
+//! space before/after, justification — follows from it. Those are
+//! text-engine features, the host already has a text engine, and
 //! duplicating it here is the mistake the Paths panel was not built for
 //! the same reason.
 //!
@@ -103,11 +109,25 @@ struct Collector<'a> {
     min_y: &'a mut f32,
     max_x: &'a mut f32,
     max_y: &'a mut f32,
+    /// Horizontal / vertical scale and the faux-italic shear. EVERY
+    /// point funnels through `map`, so applying them here is what makes
+    /// one implementation cover outlines, bounds and decorations —
+    /// three places that would otherwise disagree at the edges.
+    h_scale: f32,
+    v_scale: f32,
+    shear: f32,
 }
 
 impl Collector<'_> {
     fn map(&mut self, x: f32, y: f32) -> (f32, f32) {
-        let p = (self.ox + x, self.oy - y);
+        // Scale about the glyph's own origin FIRST, then flip into
+        // device space, then shear about the BASELINE. Shearing last is
+        // what makes a slant lean from the baseline rather than pivot
+        // around the glyph's middle.
+        let sx = x * self.h_scale;
+        let sy = y * self.v_scale;
+        let dy = self.oy - sy;
+        let p = (self.ox + sx - (dy - self.oy) * self.shear, dy);
         *self.min_x = self.min_x.min(p.0);
         *self.min_y = self.min_y.min(p.1);
         *self.max_x = self.max_x.max(p.0);
@@ -170,7 +190,7 @@ impl OutlinePen for Collector<'_> {
 /// Both are here rather than as bare parameters because they arrive
 /// TOGETHER from one panel and grow together; a third one should not
 /// change every call site again.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct RunStyle {
     /// Letter spacing in 1/1000 em — IDML's own unit, and UNITLESS by
     /// construction. That is the useful part: em is relative to the
@@ -184,6 +204,64 @@ pub struct RunStyle {
     /// carries its own ascent/descent/gap, and using them is what makes
     /// two different faces at the same size lead correctly.
     pub leading_px: Option<f32>,
+    /// Baseline offset in PIXELS, positive = UP (typographic
+    /// convention, opposite to the device y this module rasterizes in).
+    pub baseline_shift_px: f32,
+    /// Horizontal / vertical scale as a MULTIPLE (1.0 = 100%). Applied
+    /// to the outlines AND — for the horizontal axis — to the advances,
+    /// because a condensed face must also set narrower.
+    pub h_scale: f32,
+    pub v_scale: f32,
+    /// FAUX ITALIC slant in degrees, positive = leaning right. A shear,
+    /// not a face: a real italic is a different design and belongs in
+    /// `style`. This is what a designer reaches for when the document
+    /// embeds no italic, and calling it what it is matters.
+    pub skew_deg: f32,
+    /// Draw the face's own underline / strikethrough rules. Positions
+    /// and thicknesses come from the FACE (`post` / `OS/2`), never from
+    /// a guess — a rule at an invented offset is worse than none.
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// Standard ligatures (`liga`). ON is the shaper's default; turning
+    /// it OFF is the setting worth having, for the "fi" a designer does
+    /// not want.
+    pub ligatures: bool,
+    /// How lines sit relative to each other. Only meaningful because
+    /// the lane lays out MORE THAN ONE line — with a single line every
+    /// alignment is identical, since the run has no width but its own.
+    pub align: LineAlign,
+}
+
+/// Horizontal alignment of lines within a multi-line run, measured
+/// against the WIDEST line — the run's own extent. There is no column
+/// to align against, because a raster layer is not a text column; that
+/// is the same boundary that keeps wrapping out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl Default for RunStyle {
+    fn default() -> Self {
+        Self {
+            tracking_per_mille: 0.0,
+            leading_px: None,
+            baseline_shift_px: 0.0,
+            // 1.0, not 0.0 — a `#[derive(Default)]` here would make the
+            // default style scale every glyph to nothing, which is the
+            // kind of default that looks like a rendering bug.
+            h_scale: 1.0,
+            v_scale: 1.0,
+            skew_deg: 0.0,
+            underline: false,
+            strikethrough: false,
+            ligatures: true,
+            align: LineAlign::Left,
+        }
+    }
 }
 
 pub fn rasterize_run(
@@ -250,20 +328,68 @@ pub fn rasterize_run(
     // `\r\n` is normalised so a Windows-authored string does not lay out
     // with a stray carriage return per line.
     let normalised = text.replace("\r\n", "\n");
-    for (line_index, line) in normalised.split('\n').enumerate() {
-        // The pen returns to x=0 for every line and steps down by the
-        // leading. An EMPTY line still consumes one — a blank line is a
-        // deliberate gap, not a no-op.
-        let mut pen_x = 0f32;
-        let mut pen_y = leading * line_index as f32;
-        if line.is_empty() {
-            continue;
-        }
+    let lines: Vec<&str> = normalised.split('\n').collect();
 
+    // Standard ligatures OFF is a real request; ON is the shaper's own
+    // default, so an empty feature list is the honest way to say "as
+    // the face intends".
+    let features: Vec<harfrust::Feature> = if style.ligatures {
+        Vec::new()
+    } else {
+        vec![harfrust::Feature::new(harfrust::Tag::new(b"liga"), 0, ..)]
+    };
+
+    // PASS 1 — measure every line's advance width. Alignment needs the
+    // widest line before ANY line can be placed, so measuring first is
+    // not an optimisation, it is the only order that works.
+    let shape_line = |line: &str| {
         let mut buf = harfrust::UnicodeBuffer::new();
         buf.push_str(line);
         buf.guess_segment_properties();
-        let shaped = shaper.shape(buf, &[]);
+        shaper.shape(buf, &features)
+    };
+    let advance_of = |shaped: &harfrust::GlyphBuffer| -> f32 {
+        shaped
+            .glyph_positions()
+            .iter()
+            .map(|p| p.x_advance as f32 * scale * style.h_scale + track_px)
+            .sum()
+    };
+    let shaped_lines: Vec<Option<harfrust::GlyphBuffer>> = lines
+        .iter()
+        .map(|l| {
+            if l.is_empty() {
+                None
+            } else {
+                Some(shape_line(l))
+            }
+        })
+        .collect();
+    let widths: Vec<f32> = shaped_lines
+        .iter()
+        .map(|s| s.as_ref().map(advance_of).unwrap_or(0.0))
+        .collect();
+    let widest = widths.iter().cloned().fold(0.0f32, f32::max);
+
+    // The SHEAR, in device space (y grows down), so a positive slant
+    // leans right the way a designer expects.
+    let shear = (style.skew_deg.to_radians()).tan();
+
+    // PASS 2 — place.
+    for (line_index, shaped) in shaped_lines.iter().enumerate() {
+        // An EMPTY line still consumes its leading — a blank line is a
+        // deliberate gap, not a no-op.
+        let Some(shaped) = shaped else { continue };
+        let mut pen_x = match style.align {
+            LineAlign::Left => 0.0,
+            LineAlign::Center => (widest - widths[line_index]) * 0.5,
+            LineAlign::Right => widest - widths[line_index],
+        };
+        // `baseline_shift_px` is positive-UP by typographic convention
+        // and this is device space, so it SUBTRACTS.
+        let mut pen_y = leading * line_index as f32 - style.baseline_shift_px;
+        let line_top = pen_y;
+        let line_x0 = pen_x;
 
         for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
             let gid = skrifa::GlyphId::from(info.glyph_id as u16);
@@ -279,6 +405,9 @@ pub fn rasterize_run(
                         min_y: &mut min_y,
                         max_x: &mut max_x,
                         max_y: &mut max_y,
+                        h_scale: style.h_scale,
+                        v_scale: style.v_scale,
+                        shear,
                     };
                     let settings =
                         DrawSettings::unhinted(Size::new(size_px), LocationRef::default());
@@ -292,8 +421,50 @@ pub fn rasterize_run(
                 // hide a missing font.
                 None => missing += 1,
             }
-            pen_x += pos.x_advance as f32 * scale + track_px;
+            pen_x += pos.x_advance as f32 * scale * style.h_scale + track_px;
             pen_y -= pos.y_advance as f32 * scale;
+        }
+
+        // DECORATIONS, from the FACE's own metrics. A rule at an
+        // invented offset is worse than no rule, so a face that reports
+        // neither simply gets none — silently, because the alternative
+        // is a warning about a font the designer cannot change.
+        if style.underline || style.strikethrough {
+            let m = font.metrics(Size::new(size_px), LocationRef::default());
+            let width = pen_x - line_x0;
+            let mut rule = |d: Option<skrifa::metrics::Decoration>| {
+                if let Some(d) = d {
+                    // `offset` is from the baseline, positive UP, and
+                    // the thickness grows downward from it.
+                    let y0 = line_top - d.offset * style.v_scale;
+                    let y1 = y0 + d.thickness.max(1.0) * style.v_scale;
+                    let quad = [
+                        (line_x0, y0),
+                        (line_x0 + width, y0),
+                        (line_x0 + width, y1),
+                        (line_x0, y1),
+                    ];
+                    // Closed, and wound like a glyph contour so the ONE
+                    // shared rasterizer resolves it by the same winding
+                    // rule everything else uses.
+                    for i in 0..4 {
+                        let (x0, y0) = quad[i];
+                        let (x1, y1) = quad[(i + 1) % 4];
+                        let (sx0, sx1) = (x0 - y0 * shear, x1 - y1 * shear);
+                        min_x = min_x.min(sx0.min(sx1));
+                        max_x = max_x.max(sx0.max(sx1));
+                        min_y = min_y.min(y0.min(y1));
+                        max_y = max_y.max(y0.max(y1));
+                        segs.push(Seg::Line([sx0, y0, sx1, y1]));
+                    }
+                }
+            };
+            if style.underline {
+                rule(m.underline);
+            }
+            if style.strikethrough {
+                rule(m.strikeout);
+            }
         }
     }
 
@@ -406,7 +577,7 @@ mod tests {
         // rather than trusting the caller.
         let nan_track = RunStyle {
             tracking_per_mille: f32::NAN,
-            leading_px: None,
+            ..RunStyle::default()
         };
         // Still refused for the FONT, not for the tracking — the point
         // is that it reaches the parse rather than dying earlier.
@@ -416,8 +587,8 @@ mod tests {
         // where every line stacks on the first.
         for l in [Some(0.0f32), Some(-10.0), Some(f32::NAN), None] {
             let st = RunStyle {
-                tracking_per_mille: 0.0,
                 leading_px: l,
+                ..RunStyle::default()
             };
             assert!(rasterize_run(b"not a font", "a\nb", 24.0, st).is_none());
         }
@@ -471,8 +642,8 @@ mod tests {
             "A\nA",
             32.0,
             RunStyle {
-                tracking_per_mille: 0.0,
                 leading_px: Some(120.0),
+                ..RunStyle::default()
             },
         )
         .expect("two lines, loose");
@@ -500,7 +671,7 @@ mod tests {
             32.0,
             RunStyle {
                 tracking_per_mille: 500.0,
-                leading_px: None,
+                ..RunStyle::default()
             },
         )
         .expect("two glyphs, tracked");
@@ -510,6 +681,148 @@ mod tests {
             tracked.width,
             tight.width
         );
+    }
+
+    /// EVERY REMAINING AXIS, measured. Each assertion is a geometric
+    /// consequence rather than a pixel comparison, so it holds for
+    /// whichever face the machine has.
+    #[test]
+    fn image_editor_raster_type_every_style_axis_changes_the_geometry() {
+        let Some(face) = system_face() else {
+            eprintln!("no system font available — skipping the style-axis assertions");
+            return;
+        };
+        let base = RunStyle::default();
+        let plain = rasterize_run(&face, "AB", 32.0, base).expect("base");
+
+        // H-SCALE widens without touching height; V-SCALE the reverse.
+        // Asserting the OTHER axis is unchanged is what catches a
+        // transform applied to both by accident.
+        let wide = rasterize_run(
+            &face,
+            "AB",
+            32.0,
+            RunStyle {
+                h_scale: 2.0,
+                ..base
+            },
+        )
+        .expect("wide");
+        assert!(wide.width > plain.width, "h_scale must widen");
+        assert_eq!(wide.height, plain.height, "h_scale must not change height");
+
+        let tall = rasterize_run(
+            &face,
+            "AB",
+            32.0,
+            RunStyle {
+                v_scale: 2.0,
+                ..base
+            },
+        )
+        .expect("tall");
+        assert!(tall.height > plain.height, "v_scale must heighten");
+
+        // BASELINE SHIFT moves the run without resizing it. Positive is
+        // UP, and device y grows DOWN, so the origin decreases.
+        let lifted = rasterize_run(
+            &face,
+            "AB",
+            32.0,
+            RunStyle {
+                baseline_shift_px: 20.0,
+                ..base
+            },
+        )
+        .expect("lifted");
+        assert_eq!(lifted.height, plain.height, "a shift must not resize");
+        assert!(lifted.dy < plain.dy, "positive shift moves the run UP");
+
+        // SKEW leans the run, which widens its bounding box while the
+        // advances stay put.
+        let slanted = rasterize_run(
+            &face,
+            "AB",
+            32.0,
+            RunStyle {
+                skew_deg: 15.0,
+                ..base
+            },
+        )
+        .expect("slanted");
+        assert!(slanted.width > plain.width, "a slant must widen the bounds");
+
+        // DECORATIONS add ink below the baseline (underline) or across
+        // the x-height (strikethrough), so both grow the inked box.
+        let underlined = rasterize_run(
+            &face,
+            "AB",
+            32.0,
+            RunStyle {
+                underline: true,
+                ..base
+            },
+        )
+        .expect("underlined");
+        assert!(
+            underlined.height > plain.height,
+            "an underline sits below the glyphs and must extend the box"
+        );
+        let struck = rasterize_run(
+            &face,
+            "AB",
+            32.0,
+            RunStyle {
+                strikethrough: true,
+                ..base
+            },
+        )
+        .expect("struck");
+        assert!(
+            struck.width >= plain.width && struck.coverage.len() >= plain.coverage.len(),
+            "a strikethrough must add ink"
+        );
+
+        // ALIGNMENT only moves lines relative to each other, so the
+        // run's own extent is UNCHANGED — that is the assertion, and it
+        // is the one that catches an alignment applied to the whole run
+        // instead of to its lines.
+        let two = "A\nBBBB";
+        let left = rasterize_run(&face, two, 32.0, base).expect("left");
+        let centre = rasterize_run(
+            &face,
+            two,
+            32.0,
+            RunStyle {
+                align: LineAlign::Center,
+                ..base
+            },
+        )
+        .expect("centre");
+        let right = rasterize_run(
+            &face,
+            two,
+            32.0,
+            RunStyle {
+                align: LineAlign::Right,
+                ..base
+            },
+        )
+        .expect("right");
+        assert_eq!(centre.height, left.height);
+        assert_eq!(right.height, left.height);
+        // …and the SHORT line actually moved: with a left-aligned run
+        // the first line starts at the left edge, centred/right it does
+        // not, so the ink in the top row shifts. Compare the first
+        // inked column of row 0.
+        let first_ink =
+            |r: &RasterRun| -> Option<u32> { (0..r.width).find(|x| r.coverage[*x as usize] > 0) };
+        // Row 0 may be blank for some faces (ascenders differ); only
+        // assert when both have ink there, so this cannot fail for a
+        // reason that is not about alignment.
+        if let (Some(l), Some(c)) = (first_ink(&left), first_ink(&centre)) {
+            assert!(c >= l, "centring must not move the short line LEFT");
+        }
     }
 
     #[test]

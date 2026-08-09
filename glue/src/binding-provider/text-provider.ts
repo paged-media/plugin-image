@@ -118,6 +118,33 @@ export const VALUED_PATHS: readonly PropertyPath[] = [
   // no bold face resolves to what it has, and the session says so in
   // its status line rather than letting the drift pass silently.
   "characterFontStyle",
+  // THE TRANSFORM AND DECORATION AXES (2026-08-09). Each is a real
+  // property of a rasterized run, and each needed only geometry the
+  // shaper already had: a scale, a shear, an offset, a rule from the
+  // face's own metrics, a shaper feature toggle.
+  "characterBaselineShift",
+  "characterHorizontalScale",
+  "characterVerticalScale",
+  "characterSkew",
+  "characterUnderline",
+  "characterStrikethru",
+  "characterLigatures",
+  // POSITION is superscript/subscript, and it is a DERIVED setting —
+  // a baseline shift plus a scale, not a mode of its own. Serving it
+  // means the panel's control works; the two axes it moves stay
+  // independently settable, which is what a designer wants when the
+  // preset is not quite right.
+  "characterPosition",
+  // ALIGNMENT is meaningful ONLY because the lane lays out more than
+  // one line: lines align against the WIDEST line, which is the run's
+  // own extent. There is no column to align against — a raster layer
+  // is not a text column, the same boundary that keeps wrapping out.
+  "paragraphJustification",
+  // CASE is a string transform, applied before shaping. Upper/lower
+  // only — SMALL CAPS is a font feature (`smcp`) and a face without it
+  // would silently render full caps, so it is refused on write rather
+  // than faked by scaling capitals.
+  "characterCase",
 ];
 
 /**
@@ -147,16 +174,6 @@ export const ABSENT_PATHS: readonly PropertyPath[] = [
   // one line — they are absent because the FEATURE is absent, not
   // because of any unit or binding problem.
   "characterKerningMethod",
-  "characterBaselineShift",
-  "characterHorizontalScale",
-  "characterVerticalScale",
-  "characterSkew",
-  "characterCase",
-  "characterPosition",
-  "characterUnderline",
-  "characterStrikethru",
-  "characterLigatures",
-  "paragraphJustification",
   "paragraphLeftIndent",
   "paragraphRightIndent",
   "paragraphFirstLineIndent",
@@ -242,6 +259,50 @@ export function makeTextBindingProvider(
           return t.style === null
             ? { kind: "absent", reason: "no style set — the family's default face" }
             : { kind: "value", value: t.style as unknown as Value };
+        case "characterHorizontalScale":
+          return { kind: "value", value: t.hScalePct as unknown as Value };
+        case "characterVerticalScale":
+          return { kind: "value", value: t.vScalePct as unknown as Value };
+        case "characterSkew":
+          return { kind: "value", value: t.skewDeg as unknown as Value };
+        case "characterUnderline":
+          return { kind: "value", value: t.underline as unknown as Value };
+        case "characterStrikethru":
+          return { kind: "value", value: t.strikethrough as unknown as Value };
+        case "characterLigatures":
+          return { kind: "value", value: t.ligatures as unknown as Value };
+        case "characterCase":
+          return { kind: "value", value: t.textCase as unknown as Value };
+        case "paragraphJustification":
+          return { kind: "value", value: t.align as unknown as Value };
+        case "characterBaselineShift": {
+          // A LENGTH, so it converts like size and leading.
+          const ptPerPx = st.ptPerPx;
+          if (ptPerPx === null || !(ptPerPx > 0)) {
+            return {
+              kind: "absent",
+              reason: "no composite yet — points per pixel is unknown",
+            };
+          }
+          return {
+            kind: "value",
+            value: (t.baselineShiftPx * ptPerPx) as unknown as Value,
+          };
+        }
+        case "characterPosition":
+          // DERIVED, and derived on the way OUT as well as in: the
+          // preset is whatever the two underlying axes currently say,
+          // so a designer who nudges the shift by hand sees the
+          // position control fall back to "normal" rather than keep
+          // claiming a preset that no longer describes the run.
+          return {
+            kind: "value",
+            value: (t.baselineShiftPx > 0 && t.vScalePct < 100
+              ? "superscript"
+              : t.baselineShiftPx < 0 && t.vScalePct < 100
+                ? "subscript"
+                : "normal") as unknown as Value,
+          };
         case "characterTracking":
           // No conversion, and that is the point — 1/1000 em is
           // size-relative, so it is already the panel's number.
@@ -342,6 +403,123 @@ export function makeTextBindingProvider(
           // as clearing leading back to AUTO.
           session.setType({ style: style === "" ? null : style });
           return ok();
+        }
+        case "characterHorizontalScale":
+        case "characterVerticalScale": {
+          const pct = Number(request.value);
+          // Zero or negative would rasterize nothing, which reads as a
+          // broken renderer rather than a rejected input.
+          if (!Number.isFinite(pct) || pct <= 0) {
+            return { kind: "decline", reason: "scale must be a positive percent" };
+          }
+          session.setType(
+            request.path === "characterHorizontalScale"
+              ? { hScalePct: pct }
+              : { vScalePct: pct },
+          );
+          return ok();
+        }
+        case "characterSkew": {
+          const deg = Number(request.value);
+          if (!Number.isFinite(deg) || Math.abs(deg) >= 90) {
+            // At ±90° the shear is infinite and the run degenerates to
+            // a line; refusing names the limit instead of rendering
+            // nothing.
+            return { kind: "decline", reason: "slant must be between -90 and 90" };
+          }
+          session.setType({ skewDeg: deg });
+          return ok();
+        }
+        case "characterUnderline":
+          session.setType({ underline: Boolean(request.value) });
+          return ok();
+        case "characterStrikethru":
+          session.setType({ strikethrough: Boolean(request.value) });
+          return ok();
+        case "characterLigatures":
+          session.setType({ ligatures: Boolean(request.value) });
+          return ok();
+        case "characterCase": {
+          const v = String(request.value ?? "").toLowerCase();
+          if (v === "smallcaps" || v === "small caps") {
+            // REFUSED, not faked. Small caps is a font FEATURE; a face
+            // without `smcp` would silently render full caps, and
+            // scaling capitals to imitate it is a forgery a designer
+            // would not choose knowingly.
+            return {
+              kind: "decline",
+              reason:
+                "small caps needs the face's own smcp feature — scaled capitals would be a forgery",
+            };
+          }
+          if (v !== "none" && v !== "upper" && v !== "lower") {
+            return { kind: "decline", reason: `unknown case "${v}"` };
+          }
+          session.setType({ textCase: v });
+          return ok();
+        }
+        case "paragraphJustification": {
+          const v = String(request.value ?? "").toLowerCase();
+          if (v !== "left" && v !== "center" && v !== "right") {
+            // JUSTIFIED is refused for a structural reason, not an
+            // unbuilt one: justification stretches lines to a MEASURE,
+            // and a raster run has no measure — it is as wide as its
+            // widest line.
+            return {
+              kind: "decline",
+              reason:
+                v === "justify"
+                  ? "a raster run has no measure to justify against"
+                  : `unknown alignment "${v}"`,
+            };
+          }
+          session.setType({ align: v });
+          return ok();
+        }
+        case "characterBaselineShift": {
+          const pt = Number(request.value);
+          const ptPerPx = session.state().ptPerPx;
+          if (ptPerPx === null || !(ptPerPx > 0)) {
+            return {
+              kind: "decline",
+              reason: "no composite yet — points per pixel is unknown",
+            };
+          }
+          if (!Number.isFinite(pt)) {
+            return { kind: "decline", reason: "baseline shift must be a number" };
+          }
+          // NOT clamped to positive: a negative shift is a subscript.
+          session.setType({ baselineShiftPx: Math.round(pt / ptPerPx) });
+          return ok();
+        }
+        case "characterPosition": {
+          const v = String(request.value ?? "").toLowerCase();
+          const st = session.state();
+          const em = st.type.sizePx;
+          // The presets are the classic ones and they are written to
+          // the two REAL axes, so the result stays hand-editable
+          // afterwards rather than locking into a mode.
+          if (v === "superscript") {
+            session.setType({
+              baselineShiftPx: Math.round(em * 0.33),
+              hScalePct: 58,
+              vScalePct: 58,
+            });
+            return ok();
+          }
+          if (v === "subscript") {
+            session.setType({
+              baselineShiftPx: -Math.round(em * 0.12),
+              hScalePct: 58,
+              vScalePct: 58,
+            });
+            return ok();
+          }
+          if (v === "normal" || v === "none") {
+            session.setType({ baselineShiftPx: 0, hScalePct: 100, vScalePct: 100 });
+            return ok();
+          }
+          return { kind: "decline", reason: `unknown position "${v}"` };
         }
         case "characterTracking": {
           const per = Number(request.value);

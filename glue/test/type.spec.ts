@@ -174,6 +174,19 @@ describe("the raster type lane", () => {
       // "Regular": naming a face the plugin did not resolve would be
       // inventing a value.
       style: null,
+      // The transform axes default to IDENTITY — 100%, not 0, because
+      // a zero scale would rasterize nothing and read as a broken
+      // renderer rather than a default.
+      baselineShiftPx: 0,
+      hScalePct: 100,
+      vScalePct: 100,
+      skewDeg: 0,
+      underline: false,
+      strikethrough: false,
+      // Ligatures ON is the FACE's own intent; off is the setting.
+      ligatures: true,
+      align: "left",
+      textCase: "none",
       // Tracking defaults to ZERO — the face's own advances, untouched.
       trackingPerMille: 0,
       // Leading defaults to AUTO (null), not to a multiple of the size:

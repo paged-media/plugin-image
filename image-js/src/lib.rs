@@ -1427,6 +1427,19 @@ mod wasm {
         // parameters because rustc allows no doc comment there.
         tracking_per_mille: f32,
         leading_px: f32,
+        // The remaining style axes, passed as a flat list rather than a
+        // struct because wasm-bindgen would otherwise need a serde hop
+        // for a handful of scalars. `h_scale`/`v_scale` are MULTIPLES
+        // (1.0 = 100%); `align` is 0=left, 1=centre, 2=right; the three
+        // flags are 0/1.
+        baseline_shift_px: f32,
+        h_scale: f32,
+        v_scale: f32,
+        skew_deg: f32,
+        underline: u32,
+        strikethrough: u32,
+        ligatures: u32,
+        align: u32,
     ) -> Result<usize, JsValue> {
         if color.len() != 4 {
             return Err(JsValue::from_str(
@@ -1440,6 +1453,33 @@ mod wasm {
                 0.0
             },
             leading_px: (leading_px.is_finite() && leading_px > 0.0).then_some(leading_px),
+            baseline_shift_px: if baseline_shift_px.is_finite() {
+                baseline_shift_px
+            } else {
+                0.0
+            },
+            // A scale of zero or NaN would rasterize nothing at all,
+            // which reads as a broken renderer rather than as a bad
+            // input — so it falls back to 100% at the boundary.
+            h_scale: if h_scale.is_finite() && h_scale > 0.0 {
+                h_scale
+            } else {
+                1.0
+            },
+            v_scale: if v_scale.is_finite() && v_scale > 0.0 {
+                v_scale
+            } else {
+                1.0
+            },
+            skew_deg: if skew_deg.is_finite() { skew_deg } else { 0.0 },
+            underline: underline != 0,
+            strikethrough: strikethrough != 0,
+            ligatures: ligatures != 0,
+            align: match align {
+                1 => crate::text::LineAlign::Center,
+                2 => crate::text::LineAlign::Right,
+                _ => crate::text::LineAlign::Left,
+            },
         };
         let run =
             crate::text::rasterize_run(font_bytes, text, size_px, style).ok_or_else(|| {

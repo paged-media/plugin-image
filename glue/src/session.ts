@@ -212,6 +212,29 @@ export interface ImageSessionState {
     /** Letter spacing in 1/1000 em — IDML's unit, and UNITLESS, so it
      *  crosses the px/pt boundary unchanged (unlike size and leading). */
     trackingPerMille: number;
+    /** Baseline offset in IMAGE PX, positive = UP. Superscript and
+     *  subscript are this plus a scale, not a separate mode. */
+    baselineShiftPx: number;
+    /** Horizontal / vertical scale as a PERCENT (100 = natural), which
+     *  is the unit both the IDML property and the panel use. */
+    hScalePct: number;
+    vScalePct: number;
+    /** FAUX ITALIC slant in degrees. A shear, not a face — a real
+     *  italic is a different design and lives on `style`. */
+    skewDeg: number;
+    underline: boolean;
+    strikethrough: boolean;
+    /** Standard ligatures. ON is the face's own intent. */
+    ligatures: boolean;
+    /** How the lines of a multi-line run sit relative to each other. */
+    align: "left" | "center" | "right";
+    /** CASE, applied to the string before shaping. Upper/lower are
+     *  plain Unicode mappings and always available. SMALL CAPS is
+     *  deliberately NOT here: it is a font FEATURE (`smcp`), a face
+     *  without it would silently render full caps, and faking it by
+     *  scaling capitals is the kind of forgery this plugin does not
+     *  do. */
+    textCase: "none" | "upper" | "lower";
     /** Baseline-to-baseline distance in IMAGE PX, or null for AUTO —
      *  the face's own line height. Auto is not `1.2 × size`: a face
      *  carries its own ascent/descent/gap, and honouring them is what
@@ -387,6 +410,15 @@ export interface ImageSession {
       family: string;
       sizePx: number;
       style: string | null;
+      baselineShiftPx: number;
+      hScalePct: number;
+      vScalePct: number;
+      skewDeg: number;
+      underline: boolean;
+      strikethrough: boolean;
+      ligatures: boolean;
+      align: "left" | "center" | "right";
+      textCase: "none" | "upper" | "lower";
       trackingPerMille: number;
       leadingPx: number | null;
     }>,
@@ -618,6 +650,15 @@ export function createImageSession(host: BundleHost): ImageSession {
       family: "Helvetica",
       sizePx: 48,
       style: null,
+      baselineShiftPx: 0,
+      hScalePct: 100,
+      vScalePct: 100,
+      skewDeg: 0,
+      underline: false,
+      strikethrough: false,
+      ligatures: true,
+      align: "left",
+      textCase: "none",
       trackingPerMille: 0,
       leadingPx: null,
     },
@@ -2106,10 +2147,20 @@ export function createImageSession(host: BundleHost): ImageSession {
       emit();
       let missing = 0;
       try {
+        // CASE is applied to the STRING, before shaping — it is a
+        // different text, not a different rendering, and shaping the
+        // mapped string is what makes locale-aware casing (and the
+        // ligatures that follow from it) come out right.
+        const cased =
+          state.type.textCase === "upper"
+            ? text.toUpperCase()
+            : state.type.textCase === "lower"
+              ? text.toLowerCase()
+              : text;
         missing = await engine.textPaint(
           src.handle,
           face.bytes,
-          text,
+          cased,
           sizePx,
           x,
           y,
@@ -2118,6 +2169,16 @@ export function createImageSession(host: BundleHost): ImageSession {
           // The wasm reads non-positive as AUTO, so null passes through
           // as 0 rather than needing a second parameter to mean "unset".
           state.type.leadingPx ?? 0,
+          state.type.baselineShiftPx,
+          // PERCENT here, MULTIPLE across the boundary — converted once,
+          // at the seam, rather than letting two units travel together.
+          state.type.hScalePct / 100,
+          state.type.vScalePct / 100,
+          state.type.skewDeg,
+          state.type.underline ? 1 : 0,
+          state.type.strikethrough ? 1 : 0,
+          state.type.ligatures ? 1 : 0,
+          state.type.align === "center" ? 1 : state.type.align === "right" ? 2 : 0,
         );
       } catch (err) {
         setStatus(`Type failed: ${err instanceof Error ? err.message : err}`);
