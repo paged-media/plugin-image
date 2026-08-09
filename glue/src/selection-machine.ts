@@ -26,6 +26,12 @@
 // `host.overlay.setToolPreview`; `end()` / `wand()` commit the shape into
 // the engine selection.
 //
+// QUICK SELECTION is the one shape that does NOT rasterize engine-side:
+// paint-to-grow has to read pixels, so the machine grows a coverage
+// plane in `quick-select.ts` (through the C-6 tile door) and commits it
+// once, on release, via the channel door. The growth rule and its
+// rationale live in that module's header.
+//
 // Marching-ants fidelity (v0, stated honestly): the committed-selection
 // outline is the coverage BOUNDS rectangle (or the lasso's own polygon
 // while drawing) rendered as a dashed preview path — a coarse outline,
@@ -34,8 +40,19 @@
 // either way.
 
 import type { ImageEngine, SelectionMode, SelectionStats } from "./engine";
+import {
+  coverageToRgba8,
+  createQuickSelectStroke,
+  type QuickSelectOptions,
+  type QuickSelectStroke,
+} from "./quick-select";
 
-export type SelectionShapeKind = "rect" | "ellipse" | "lasso" | "polygon";
+export type SelectionShapeKind =
+  | "rect"
+  | "ellipse"
+  | "lasso"
+  | "polygon"
+  | "quick";
 
 /** Minimum drag extent (image px) below which a marquee is treated as a
  *  no-op click (avoids committing invisible slivers). */
@@ -50,6 +67,26 @@ export const WAND_TOLERANCE_DEFAULT = 32;
  *  The non-contiguous global threshold is reachable through the engine
  *  door; no tool toggle yet (stated in the tool docs). */
 export const WAND_CONTIGUOUS_DEFAULT = true;
+
+/** WHERE QUICK SELECTION READS PIXELS. The machine is otherwise blind to
+ *  the bound image (every other shape rasterizes engine-side), but
+ *  paint-to-grow has to look at the pixels, and no engine door reports
+ *  which handle/extent the selection is bound to. So the owner of that
+ *  fact — the session — supplies it. */
+export interface QuickSelectSource {
+  /** The engine handle whose LEVEL-0 pixels the growth reads. */
+  handle: number;
+  width: number;
+  height: number;
+}
+
+/** The in-flight quick-selection readout (for a panel / a test). */
+export interface QuickSelectProgress {
+  /** Pixels grown so far this stroke. */
+  count: number;
+  /** True once [`QUICK_SELECT_MAX_PIXELS`] stopped the growth. */
+  capped: boolean;
+}
 
 export interface SelectionMachine {
   /** Begin a marquee/lasso gesture at `point` (image px). */
@@ -88,6 +125,10 @@ export interface SelectionMachine {
   /** True while a polygon is being placed, so a tool can route keys it
    *  would otherwise ignore. */
   placingPolygon(): boolean;
+  /** The in-flight quick-selection readout, or null when no quick
+   *  stroke is running (or the source was unavailable, so nothing can
+   *  grow — the caller sees null rather than a fake zero). */
+  quickProgress(): QuickSelectProgress | null;
   /** The polygon's FIRST vertex, so a tool can offer click-to-close
    *  without keeping its own copy of the trail — two copies of the same
    *  list is how they drift. Null when no polygon is in progress. */
@@ -111,6 +152,14 @@ export function createSelectionMachine(
   /** Called after every committed change (the session refreshes its
    *  readout + notifies the panel). */
   onCommit: () => void = () => {},
+  /** Where QUICK SELECTION reads pixels. Default: none — then a quick
+   *  gesture is an honest no-op (`end()` returns false, `quickProgress()`
+   *  is null) and every other shape is unaffected. Read per gesture, so
+   *  a re-ingest under the same machine is picked up. */
+  quickSource: () => QuickSelectSource | null = () => null,
+  /** Growth-rule overrides (radius / tolerance / cap) — the tool-option
+   *  seam; the defaults are the documented ones. */
+  quickOptions: QuickSelectOptions = {},
 ): SelectionMachine {
   let active: {
     kind: SelectionShapeKind;
@@ -119,7 +168,83 @@ export function createSelectionMachine(
     current: [number, number];
     /** Lasso trail (kind === "lasso" only), anchor included. */
     trail: Array<[number, number]>;
+    /** The paint-to-grow stroke (kind === "quick" only). Null when the
+     *  source was unavailable — the gesture then grows nothing. */
+    quick: QuickSelectStroke | null;
+    /** The source the quick stroke reads (kind === "quick" only). */
+    quickExtent: { width: number; height: number } | null;
   } | null = null;
+
+  /** Open a paint-to-grow stroke over the current source, or null. */
+  const openQuickStroke = (): {
+    stroke: QuickSelectStroke;
+    width: number;
+    height: number;
+  } | null => {
+    let src: QuickSelectSource | null = null;
+    try {
+      src = quickSource();
+    } catch {
+      return null;
+    }
+    if (!src || src.width <= 0 || src.height <= 0) return null;
+    const { handle, width, height } = src;
+    const stroke = createQuickSelectStroke(
+      {
+        width,
+        height,
+        // The C-6 tile door IS the window reader (§ quick-select.ts):
+        // level-0, clipped, tightly packed RGBA8. A throwing read (freed
+        // handle mid-stroke) degrades to "no pixels here" rather than
+        // taking the gesture down.
+        readWindow(x, y, w, h) {
+          try {
+            return engine.tile(handle, x, y, w, h);
+          } catch {
+            return new Uint8Array(0);
+          }
+        },
+      },
+      quickOptions,
+    );
+    return { stroke, width, height };
+  };
+
+  /** Commit an accumulated quick-selection coverage plane through the
+   *  channel door (see `coverageToRgba8`). */
+  const commitQuick = (
+    stroke: QuickSelectStroke,
+    extent: { width: number; height: number },
+    mode: SelectionMode,
+  ): boolean => {
+    // Nothing grew: refuse rather than replace the selection with an
+    // empty plane — the polygon's stance, for the same reason (a silent
+    // deselect the user did not ask for).
+    if (stroke.count() === 0) return false;
+    let handle: number | null = null;
+    try {
+      const info = engine.ingestRgba8(
+        extent.width,
+        extent.height,
+        coverageToRgba8(stroke.coverage()),
+      );
+      handle = info.handle;
+      engine.selectionFromChannel(handle, "red", mode);
+    } catch {
+      return false;
+    } finally {
+      if (handle !== null) {
+        try {
+          engine.freeImage(handle);
+        } catch {
+          // The coverage was already copied into the selection; a failed
+          // free is a leak to log, not a reason to report failure.
+        }
+      }
+    }
+    onCommit();
+    return true;
+  };
 
   const rectCorners = (
     a: [number, number],
@@ -161,13 +286,28 @@ export function createSelectionMachine(
         anchor: point,
         current: point,
         trail: [point],
+        quick: null,
+        quickExtent: null,
       };
+      if (kind !== "quick") return;
+      const opened = openQuickStroke();
+      if (!opened) return;
+      active.quick = opened.stroke;
+      active.quickExtent = { width: opened.width, height: opened.height };
+      // The press itself is the first dab — a click with no drag is a
+      // legitimate quick selection (it is a wand seeded by a disc rather
+      // than by one pixel).
+      opened.stroke.dab(point[0], point[1]);
     },
 
     update(point) {
       if (!active) return;
       active.current = point;
       if (active.kind === "lasso") active.trail.push(point);
+      // Every pointer move is another dab: the stroke ACCUMULATES (the
+      // coverage plane and the painted statistics both persist), so this
+      // is O(dab + perimeter), never a re-flood.
+      if (active.kind === "quick") active.quick?.dab(point[0], point[1]);
     },
 
     end() {
@@ -176,8 +316,18 @@ export function createSelectionMachine(
       // only at `polygonCommit` / `polygonCancel`. Returning early here
       // is what keeps a click from committing a one-vertex shape.
       if (active.kind === "polygon") return false;
-      const { kind, mode, anchor, current, trail } = active;
+      const { kind, mode, anchor, current, trail, quick, quickExtent } = active;
       active = null;
+      // QUICK SELECTION commits ONCE, on release, not once per dab. One
+      // engine write per stroke means one coverage upload, one undo step
+      // and — the load-bearing part — an `intersect` that intersects the
+      // WHOLE painted region rather than intersecting away against each
+      // dab in turn. The live feedback during the drag is the gesture
+      // outline, which needs no engine round trip.
+      if (kind === "quick") {
+        if (!quick || !quickExtent) return false;
+        return commitQuick(quick, quickExtent, mode);
+      }
       try {
         if (kind === "lasso") {
           // Close on release (last → first is implicit engine-side).
@@ -218,6 +368,8 @@ export function createSelectionMachine(
           anchor: point,
           current: point,
           trail: [point],
+          quick: null,
+          quickExtent: null,
         };
         return;
       }
@@ -288,8 +440,27 @@ export function createSelectionMachine(
 
     dragging: () => active !== null,
 
+    quickProgress() {
+      if (!active || active.kind !== "quick" || !active.quick) return null;
+      return { count: active.quick.count(), capped: active.quick.capped() };
+    },
+
     gestureOutline() {
       if (!active) return null;
+      // The grown region's BOUNDS box, live — the same coarse v0
+      // vocabulary `committedOutline` speaks (see the header note), so
+      // the preview and the commit do not disagree about what an outline
+      // is. Tracing the real contour upgrades both at once.
+      if (active.kind === "quick") {
+        const b = active.quick?.bounds();
+        if (!b) return null;
+        return [
+          [b.x, b.y],
+          [b.x + b.w, b.y],
+          [b.x + b.w, b.y + b.h],
+          [b.x, b.y + b.h],
+        ] as Array<[number, number]>;
+      }
       if (active.kind === "lasso" || active.kind === "polygon") {
         return active.trail.length >= 2 ? [...active.trail] : null;
       }

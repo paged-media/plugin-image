@@ -45,6 +45,7 @@ pub mod boolean;
 pub mod cast;
 pub mod compose;
 pub mod conv;
+pub mod gallery;
 pub mod gen;
 pub mod geom;
 pub mod linear;
@@ -66,6 +67,7 @@ pub static ALL_FAMILIES: &[&[&KernelDef]] = &[
     cast::FAMILY,
     compose::FAMILY,
     conv::FAMILY,
+    gallery::FAMILY,
     gen::FAMILY,
     geom::FAMILY,
     linear::FAMILY,

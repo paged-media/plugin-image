@@ -146,11 +146,7 @@ const H: i32 = 7;
 #[test]
 fn image_editor_geom_offset_zero_is_the_identity() {
     let img = labeled(W, H);
-    for edge in [
-        EdgePolicy::Transparent,
-        EdgePolicy::Clamp,
-        EdgePolicy::Wrap,
-    ] {
+    for edge in [EdgePolicy::Transparent, EdgePolicy::Clamp, EdgePolicy::Wrap] {
         for mask in [0.0f32, 0.25, 0.5, 1.0] {
             let p = OffsetParams::identity(edge);
             assert!(p.is_identity());
@@ -207,8 +203,20 @@ fn image_editor_geom_offset_integer_move_is_bit_exact() {
 #[test]
 fn image_editor_geom_offset_integer_move_round_trips_under_wrap() {
     let img = labeled(W, H);
-    let fwd = offset_model(&img, W, H, &OffsetParams::new(4.0, 3.0, EdgePolicy::Wrap), 1.0);
-    let back = offset_model(&fwd, W, H, &OffsetParams::new(-4.0, -3.0, EdgePolicy::Wrap), 1.0);
+    let fwd = offset_model(
+        &img,
+        W,
+        H,
+        &OffsetParams::new(4.0, 3.0, EdgePolicy::Wrap),
+        1.0,
+    );
+    let back = offset_model(
+        &fwd,
+        W,
+        H,
+        &OffsetParams::new(-4.0, -3.0, EdgePolicy::Wrap),
+        1.0,
+    );
     assert_eq!(back, img);
 }
 
@@ -219,7 +227,13 @@ fn image_editor_geom_offset_integer_move_round_trips_under_wrap() {
 #[test]
 fn image_editor_geom_offset_subpixel_is_bilinear_not_rounded() {
     let img = labeled(W, H);
-    let out = offset_model(&img, W, H, &OffsetParams::new(0.5, 0.0, EdgePolicy::Clamp), 1.0);
+    let out = offset_model(
+        &img,
+        W,
+        H,
+        &OffsetParams::new(0.5, 0.0, EdgePolicy::Clamp),
+        1.0,
+    );
     for y in 0..H {
         for x in 2..W {
             let here = out[(y * W + x) as usize][0];
@@ -244,7 +258,13 @@ fn image_editor_geom_offset_subpixel_is_bilinear_not_rounded() {
 #[test]
 fn image_editor_geom_offset_subpixel_weights_follow_the_fraction() {
     let img = labeled(W, H);
-    let out = offset_model(&img, W, H, &OffsetParams::new(0.25, 0.0, EdgePolicy::Clamp), 1.0);
+    let out = offset_model(
+        &img,
+        W,
+        H,
+        &OffsetParams::new(0.25, 0.0, EdgePolicy::Clamp),
+        1.0,
+    );
     let (x, y) = (5, 3);
     let expected = 0.25 * img[(y * W + x - 1) as usize][0] + 0.75 * img[(y * W + x) as usize][0];
     assert!((out[(y * W + x) as usize][0] - expected).abs() < 1e-6);
@@ -283,7 +303,13 @@ fn image_editor_geom_offset_transparent_vacates_the_uncovered_band() {
 #[test]
 fn image_editor_geom_offset_clamp_extends_the_edge() {
     let img = labeled(W, H);
-    let out = offset_model(&img, W, H, &OffsetParams::new(3.0, 0.0, EdgePolicy::Clamp), 1.0);
+    let out = offset_model(
+        &img,
+        W,
+        H,
+        &OffsetParams::new(3.0, 0.0, EdgePolicy::Clamp),
+        1.0,
+    );
     for y in 0..H {
         for x in 0..3 {
             assert_eq!(out[(y * W + x) as usize], img[(y * W) as usize]);
@@ -296,7 +322,13 @@ fn image_editor_geom_offset_clamp_extends_the_edge() {
 #[test]
 fn image_editor_geom_offset_wrap_is_periodic() {
     let img = labeled(W, H);
-    let out = offset_model(&img, W, H, &OffsetParams::new(3.0, 0.0, EdgePolicy::Wrap), 1.0);
+    let out = offset_model(
+        &img,
+        W,
+        H,
+        &OffsetParams::new(3.0, 0.0, EdgePolicy::Wrap),
+        1.0,
+    );
     for y in 0..H {
         for x in 0..W {
             let sx = ((x - 3) % W + W) % W;
@@ -340,11 +372,7 @@ fn image_editor_geom_offset_edge_policy_encoding_is_frozen() {
     assert_eq!(EdgePolicy::Transparent.as_u32(), 0);
     assert_eq!(EdgePolicy::Clamp.as_u32(), 1);
     assert_eq!(EdgePolicy::Wrap.as_u32(), 2);
-    for e in [
-        EdgePolicy::Transparent,
-        EdgePolicy::Clamp,
-        EdgePolicy::Wrap,
-    ] {
+    for e in [EdgePolicy::Transparent, EdgePolicy::Clamp, EdgePolicy::Wrap] {
         assert_eq!(EdgePolicy::from_u32(e.as_u32()), Some(e));
     }
 }
@@ -407,7 +435,12 @@ fn image_editor_geom_offset_params_encoding() {
     assert_eq!(GEOM_OFFSET.params.size % 16, 0, "16-aligned uniform block");
 
     let names: Vec<&str> = GEOM_OFFSET.params.fields.iter().map(|f| f.name).collect();
-    let types: Vec<&str> = GEOM_OFFSET.params.fields.iter().map(|f| f.wgsl_ty).collect();
+    let types: Vec<&str> = GEOM_OFFSET
+        .params
+        .fields
+        .iter()
+        .map(|f| f.wgsl_ty)
+        .collect();
     assert_eq!(names, ["dx", "dy", "edge"]);
     assert_eq!(types, ["f32", "f32", "u32"]);
     // fields + the trailing `_abi_pad`, all 4-byte scalars.

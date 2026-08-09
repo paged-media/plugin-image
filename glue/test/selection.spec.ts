@@ -37,9 +37,15 @@ import type {
 
 import manifestJson from "@paged-media/image-manifest/manifest.json";
 
+import { bootEngine, type ImageEngine } from "../src/engine";
 import { createImageSession } from "../src/session";
 import { makeSelectionGesture } from "../src/selection-tool";
-import { modeFromModifiers } from "../src/selection-machine";
+import {
+  createSelectionMachine,
+  modeFromModifiers,
+  WAND_CONTIGUOUS_DEFAULT,
+  WAND_TOLERANCE_DEFAULT,
+} from "../src/selection-machine";
 import {
   makeFakeEditor,
   mapBacking,
@@ -298,6 +304,200 @@ describe("the session selection surface (real engine wasm)", () => {
     expect(session.state().selection).toBeNull();
     session.dispose();
     handle.dispose();
+  });
+});
+
+// ── QUICK SELECTION over the real engine ─────────────────────────────
+//
+// The growth RULE is proven pixel-by-pixel in quick-select.spec.ts. What
+// is proven here is the seam: that the grown coverage reaches the ENGINE
+// selection through the channel door, under every combine mode, and that
+// what lands is indistinguishable from what the magic wand lands — the
+// masked-adjust pipeline reads one coverage plane at `@group(2)` and
+// must not be able to tell the two tools apart.
+
+const QDARK: [number, number, number, number] = [60, 60, 60, 255];
+const QLIGHT: [number, number, number, number] = [180, 180, 180, 255];
+
+/** Register a synthetic image in the REAL engine, bind the selection to
+ *  it, and hand back a machine wired to it as its quick-select source. */
+async function quickRig(
+  width: number,
+  height: number,
+  at: (x: number, y: number) => [number, number, number, number],
+  radius = 4,
+) {
+  const engine: ImageEngine = await bootEngine();
+  const rgba = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = at(x, y);
+      const o = (y * width + x) * 4;
+      rgba[o] = p[0];
+      rgba[o + 1] = p[1];
+      rgba[o + 2] = p[2];
+      rgba[o + 3] = p[3];
+    }
+  }
+  const info = engine.ingestRgba8(width, height, rgba);
+  engine.selectionBind(info.handle);
+  let commits = 0;
+  const machine = createSelectionMachine(
+    engine,
+    () => {
+      commits++;
+    },
+    () => ({ handle: info.handle, width, height }),
+    { radius },
+  );
+  return { engine, machine, handle: info.handle, commits: () => commits };
+}
+
+/** 32×16, DARK left of x = 16, LIGHT from it. */
+const qSplit = (x: number) => (x < 16 ? QDARK : QLIGHT);
+
+describe("quick selection reaching the engine selection", () => {
+  it("a paint-to-grow stroke commits the grown region and stops at the edge", async () => {
+    const { engine, machine, commits } = await quickRig(32, 16, qSplit);
+
+    machine.begin("quick", [6, 8], "replace");
+    // Live, before any engine write: the gesture already knows what it
+    // grew, and the preview outline is that region's box.
+    expect(machine.quickProgress()!.count).toBe(16 * 16);
+    expect(machine.quickProgress()!.capped).toBe(false);
+    expect(machine.gestureOutline()).toEqual([
+      [0, 0],
+      [16, 0],
+      [16, 16],
+      [0, 16],
+    ]);
+    expect(engine.selectionStats(), "nothing committed mid-drag").toBeNull();
+
+    machine.update([8, 10]); // still inside the dark half
+    expect(machine.end()).toBe(true);
+    expect(commits()).toBe(1);
+
+    const s = engine.selectionStats()!;
+    expect([s.x, s.y, s.w, s.h]).toEqual([0, 0, 16, 16]);
+    expect(s.coverage).toBeCloseTo(0.5, 5);
+
+    // Per-pixel on the coverage plane the kernels read: the boundary held.
+    const cov = engine.selectionCoverageBytes();
+    expect(cov.length).toBe(32 * 16);
+    for (let y = 0; y < 16; y++) {
+      expect(cov[y * 32 + 15]).toBe(255);
+      expect(cov[y * 32 + 16]).toBe(0);
+    }
+  });
+
+  it("a drag into a differently-coloured region extends what commits", async () => {
+    const { engine, machine } = await quickRig(32, 16, qSplit);
+    machine.begin("quick", [6, 8], "replace");
+    machine.update([26, 8]); // a dab in the LIGHT half
+    expect(machine.quickProgress()!.count).toBe(32 * 16);
+    expect(machine.end()).toBe(true);
+    const s = engine.selectionStats()!;
+    expect([s.x, s.y, s.w, s.h]).toEqual([0, 0, 32, 16]);
+    expect(s.coverage).toBeCloseTo(1, 5);
+  });
+
+  it("produces the SAME coverage plane as the magic wand for the same input", async () => {
+    // An 8×8 split image on which both tools have the same right answer
+    // (the wand's 32 tolerance and the quick gate's 16 floor both refuse
+    // a 120-level step). If quick selection built its mask any other way
+    // — per-pixel rects, a threshold, a different combine fold — these
+    // two planes would differ.
+    const at = (x: number) => (x < 4 ? QDARK : QLIGHT);
+    const { engine, machine } = await quickRig(8, 8, at, 2);
+
+    engine.selectionMagicWand(
+      1,
+      4,
+      WAND_TOLERANCE_DEFAULT,
+      WAND_CONTIGUOUS_DEFAULT,
+      "replace",
+    );
+    const wandBytes = Uint8Array.from(engine.selectionCoverageBytes());
+    const wandStats = engine.selectionStats()!;
+
+    engine.selectionClear();
+    machine.begin("quick", [1, 4], "replace");
+    expect(machine.end()).toBe(true);
+    const quickBytes = engine.selectionCoverageBytes();
+    const quickStats = engine.selectionStats()!;
+
+    expect(quickBytes).toBeInstanceOf(Uint8Array);
+    expect(quickBytes.length).toBe(wandBytes.length);
+    expect(Array.from(quickBytes)).toEqual(Array.from(wandBytes));
+    expect([quickStats.x, quickStats.y, quickStats.w, quickStats.h]).toEqual([
+      wandStats.x,
+      wandStats.y,
+      wandStats.w,
+      wandStats.h,
+    ]);
+    expect(quickStats.coverage).toBeCloseTo(wandStats.coverage, 6);
+    expect(quickStats.coverage).toBeCloseTo(0.5, 5);
+  });
+
+  it("honours the combine modes — alt SUBTRACTS, shift+alt INTERSECTS", async () => {
+    // The documented convention is `modeFromModifiers`; quick selection
+    // adds no vocabulary of its own, it just carries the mode through.
+    const { engine, machine } = await quickRig(32, 16, qSplit);
+
+    engine.selectionSelectAll();
+    machine.begin("quick", [6, 8], modeFromModifiers({ shift: false, alt: true }));
+    expect(machine.end()).toBe(true);
+    let s = engine.selectionStats()!;
+    expect(
+      [s.x, s.y, s.w, s.h],
+      "alt removed the dark half, leaving the light one",
+    ).toEqual([16, 0, 16, 16]);
+
+    // INTERSECT is the reason the commit goes through the channel door as
+    // ONE plane: intersecting per dab (or per run) would narrow against
+    // each piece in turn and leave nothing.
+    engine.selectionClear();
+    engine.selectionSetRect(0, 0, 32, 8, "replace"); // the top half
+    machine.begin("quick", [6, 8], modeFromModifiers({ shift: true, alt: true }));
+    machine.update([8, 10]);
+    expect(machine.end()).toBe(true);
+    s = engine.selectionStats()!;
+    expect([s.x, s.y, s.w, s.h], "top ∩ dark = the top-left quadrant").toEqual([
+      0, 0, 16, 8,
+    ]);
+    expect(s.coverage).toBeCloseTo(0.25, 5);
+  });
+
+  it("commits nothing when nothing grew, and never silently deselects", async () => {
+    const { engine, machine } = await quickRig(32, 16, qSplit);
+    engine.selectionSetRect(0, 0, 32, 8, "replace");
+    const before = engine.selectionStats()!;
+    // A press entirely outside the image paints no evidence.
+    machine.begin("quick", [-40, -40], "replace");
+    expect(machine.quickProgress()!.count).toBe(0);
+    expect(machine.end(), "an empty stroke refuses to commit").toBe(false);
+    const after = engine.selectionStats()!;
+    expect([after.x, after.y, after.w, after.h]).toEqual([
+      before.x,
+      before.y,
+      before.w,
+      before.h,
+    ]);
+  });
+
+  it("WITHOUT a pixel source the gesture is an honest no-op", async () => {
+    // This is exactly how the session builds the machine today (two
+    // args). Quick selection must degrade to "nothing happened" rather
+    // than throw or fake a selection.
+    const { engine } = await quickRig(32, 16, qSplit);
+    engine.selectionClear();
+    const machine = createSelectionMachine(engine, () => {});
+    machine.begin("quick", [6, 8], "replace");
+    expect(machine.quickProgress()).toBeNull();
+    expect(machine.gestureOutline()).toBeNull();
+    machine.update([8, 8]);
+    expect(machine.end()).toBe(false);
+    expect(engine.selectionStats()).toBeNull();
   });
 });
 

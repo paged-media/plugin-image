@@ -1708,6 +1708,202 @@ mod wasm {
         apply_point_kernel(handle, &ADJUST_SELECTIVE_COLOR, params.as_bytes()).await
     }
 
+    // ───────────────── FILTER GALLERY (§18) ─────────────────
+    //
+    // Twelve primitives spanning the gallery's six families. They are
+    // primitives rather than 47 near-duplicates because the gallery's
+    // filters differ by PARAMETER, not by mechanism — Crosshatch and
+    // Sumi-e are the same hatching with a different set count.
+    //
+    // Every one takes `amount`, and `amount == 0` is the identity, so a
+    // slider needs no special cases and a preset cannot half-apply.
+    //
+    // The position-dependent ones take a tile origin in the kernel; the
+    // JS door pins it to (0, 0) because this path dispatches the WHOLE
+    // image in one go. Tiled dispatch would have to inject the real
+    // origin or every tile restarts its lattice and the seams show.
+    /// Painterly flattening (Kuwahara): the lowest-variance quadrant's mean,
+    /// so a region moves toward paint while its boundary stays put. Serves
+    /// Paint Daubs, Palette Knife, Watercolor, Underpainting, Dry Brush.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_kuwahara(
+        handle: u32,
+        radius_px: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryKuwaharaParams, GALLERY_KUWAHARA};
+        let params = GalleryKuwaharaParams::new(radius_px, amount);
+        apply_point_kernel(handle, &GALLERY_KUWAHARA, params.as_bytes()).await
+    }
+
+    /// Posterised colour plus a darkened outline. The two halves are
+    /// independent, which is what separates Cutout (flat, no ink) from Ink
+    /// Outlines (ink, little flattening).
+    #[wasm_bindgen]
+    pub async fn apply_gallery_posterize_edges(
+        handle: u32,
+        levels: f32,
+        edge_amount: f32,
+        edge_threshold: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryPosterizeEdgesParams, GALLERY_POSTERIZE_EDGES};
+        let params = GalleryPosterizeEdgesParams::new(levels, edge_amount, edge_threshold, amount);
+        apply_point_kernel(handle, &GALLERY_POSTERIZE_EDGES, params.as_bytes()).await
+    }
+
+    /// Edge magnitude colourised and boosted — keeps the source hue rather
+    /// than going grey, which is the difference from an inverted find-edges.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_glowing_edges(
+        handle: u32,
+        intensity: f32,
+        smoothness: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryGlowingEdgesParams, GALLERY_GLOWING_EDGES};
+        let params = GalleryGlowingEdgesParams::new(intensity, smoothness, amount);
+        apply_point_kernel(handle, &GALLERY_GLOWING_EDGES, params.as_bytes()).await
+    }
+
+    /// Screen-angle halftone. Dot AREA carries the tone, not dot darkness —
+    /// the property that lets a halftone survive a 1-bit output.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_halftone(
+        handle: u32,
+        cell_px: f32,
+        angle_deg: f32,
+        contrast: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryHalftoneParams, GALLERY_HALFTONE};
+        let params = GalleryHalftoneParams::new(0, 0, cell_px, angle_deg, contrast, amount);
+        apply_point_kernel(handle, &GALLERY_HALFTONE, params.as_bytes()).await
+    }
+
+    /// Film grain. The noise is a deterministic hash of the coordinate and
+    /// the seed, never host randomness, so undo/redo cannot shimmer.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_grain(
+        handle: u32,
+        seed: u32,
+        size_px: f32,
+        mono: bool,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryGrainParams, GALLERY_GRAIN};
+        let params = GalleryGrainParams::new(0, 0, seed, size_px, mono, amount);
+        apply_point_kernel(handle, &GALLERY_GRAIN, params.as_bytes()).await
+    }
+
+    /// Random local displacement. `anisotropy` is the whole difference
+    /// between Spatter (isotropic) and Sprayed Strokes (directional).
+    #[wasm_bindgen]
+    pub async fn apply_gallery_diffuse(
+        handle: u32,
+        seed: u32,
+        radius_px: f32,
+        angle_deg: f32,
+        anisotropy: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryDiffuseParams, GALLERY_DIFFUSE};
+        let params = GalleryDiffuseParams::new(0, 0, seed, radius_px, angle_deg, anisotropy, amount);
+        apply_point_kernel(handle, &GALLERY_DIFFUSE, params.as_bytes()).await
+    }
+
+    /// Directional hatching modulated by luminance. `sets` alone separates
+    /// three named gallery filters: 1 = Graphic Pen, 2 = Crosshatch,
+    /// 3 = Sumi-e — which is why they are one kernel and not three.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_crosshatch(
+        handle: u32,
+        angle_deg: f32,
+        spacing_px: f32,
+        strength: f32,
+        sets: u32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryCrosshatchParams, GALLERY_CROSSHATCH};
+        let params = GalleryCrosshatchParams::new(0, 0, angle_deg, spacing_px, strength, sets, amount);
+        apply_point_kernel(handle, &GALLERY_CROSSHATCH, params.as_bytes()).await
+    }
+
+    /// Directional lighting over a luminance heightfield. Chrome and Plastic
+    /// Wrap are APPROXIMATED at extreme settings, not genuinely modelled.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_bas_relief(
+        handle: u32,
+        angle_deg: f32,
+        elevation_deg: f32,
+        height: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryBasReliefParams, GALLERY_BAS_RELIEF};
+        let params = GalleryBasReliefParams::new(angle_deg, elevation_deg, height, amount);
+        apply_point_kernel(handle, &GALLERY_BAS_RELIEF, params.as_bytes()).await
+    }
+
+    /// Luminance threshold with a soft ramp; the ramp width is what makes
+    /// Stamp hard and Charcoal soft.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_threshold_ink(
+        handle: u32,
+        threshold: f32,
+        softness: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryThresholdInkParams, GALLERY_THRESHOLD_INK};
+        let params = GalleryThresholdInkParams::new(threshold, softness, amount);
+        apply_point_kernel(handle, &GALLERY_THRESHOLD_INK, params.as_bytes()).await
+    }
+
+    /// Cellular tiling with a border term. The border weight alone separates
+    /// Crystallize (none) from Stained Glass (heavy).
+    #[wasm_bindgen]
+    pub async fn apply_gallery_stained_glass(
+        handle: u32,
+        seed: u32,
+        cell_px: f32,
+        border: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryStainedGlassParams, GALLERY_STAINED_GLASS};
+        let params = GalleryStainedGlassParams::new(0, 0, seed, cell_px, border, amount);
+        apply_point_kernel(handle, &GALLERY_STAINED_GLASS, params.as_bytes()).await
+    }
+
+    /// Refraction-style displacement through a procedural normal field.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_glass(
+        handle: u32,
+        seed: u32,
+        scale_px: f32,
+        distortion: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryGlassParams, GALLERY_GLASS};
+        let params = GalleryGlassParams::new(0, 0, seed, scale_px, distortion, amount);
+        apply_point_kernel(handle, &GALLERY_GLASS, params.as_bytes()).await
+    }
+
+    /// Procedural surface texture modulating shading; `kind` picks the
+    /// surface (Canvas / Burlap / Brick) rather than a kernel per material.
+    #[wasm_bindgen]
+    pub async fn apply_gallery_texturizer(
+        handle: u32,
+        seed: u32,
+        kind: u32,
+        scale_px: f32,
+        relief: f32,
+        angle_deg: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gallery::{GalleryTexturizerParams, GALLERY_TEXTURIZER};
+        let params = GalleryTexturizerParams::new(0, 0, seed, kind, scale_px, relief, angle_deg, amount);
+        apply_point_kernel(handle, &GALLERY_TEXTURIZER, params.as_bytes()).await
+    }
+
     /// NOISE — despeckle. `amount` 0 is the identity. The edge gate
     /// means this smooths speckle WITHOUT softening an edge, which a
     /// plain median cannot do.

@@ -92,6 +92,7 @@ describe("imageBundle.activate", () => {
       // one is drag-driven.
       "media.paged.image.tool.polygonal-lasso",
       "media.paged.image.tool.magicWand",
+      "media.paged.image.tool.quickSelect",
       "media.paged.image.tool.brush",
       "media.paged.image.tool.pencil",
       "media.paged.image.tool.eraser",

@@ -79,11 +79,165 @@ export function adjust_image_ext(handle: number, exposure_ev: number, brightness
 export function adjust_image_full(handle: number, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean): Promise<Uint8Array>;
 
 /**
+ * NOISE — despeckle. `amount` 0 is the identity. The edge gate
+ * means this smooths speckle WITHOUT softening an edge, which a
+ * plain median cannot do.
+ */
+export function apply_despeckle(handle: number, edge_threshold: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * NOISE — dust & scratches. `threshold` 1.0 is the identity for
+ * display-referred data, and `radius` 0 is the unconditional one.
+ * The radius is CLAMPED to the kernel's declared ROI rather than
+ * silently reading outside it.
+ */
+export function apply_dust_scratches(handle: number, radius: number, threshold: number): Promise<DecodedHandle>;
+
+/**
+ * STYLIZE — emboss. `angle_deg` is the light direction, `height`
+ * the relief strength; height 0 is the identity (flat mid-grey
+ * plus nothing).
+ */
+export function apply_emboss(handle: number, angle_deg: number, height: number): Promise<DecodedHandle>;
+
+/**
+ * STYLIZE — find edges. `strength` scales the gradient before the
+ * inversion; the result is dark lines on white.
+ */
+export function apply_find_edges(handle: number, strength: number): Promise<DecodedHandle>;
+
+/**
+ * Directional lighting over a luminance heightfield. Chrome and Plastic
+ * Wrap are APPROXIMATED at extreme settings, not genuinely modelled.
+ */
+export function apply_gallery_bas_relief(handle: number, angle_deg: number, elevation_deg: number, height: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Directional hatching modulated by luminance. `sets` alone separates
+ * three named gallery filters: 1 = Graphic Pen, 2 = Crosshatch,
+ * 3 = Sumi-e — which is why they are one kernel and not three.
+ */
+export function apply_gallery_crosshatch(handle: number, angle_deg: number, spacing_px: number, strength: number, sets: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Random local displacement. `anisotropy` is the whole difference
+ * between Spatter (isotropic) and Sprayed Strokes (directional).
+ */
+export function apply_gallery_diffuse(handle: number, seed: number, radius_px: number, angle_deg: number, anisotropy: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Refraction-style displacement through a procedural normal field.
+ */
+export function apply_gallery_glass(handle: number, seed: number, scale_px: number, distortion: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Edge magnitude colourised and boosted — keeps the source hue rather
+ * than going grey, which is the difference from an inverted find-edges.
+ */
+export function apply_gallery_glowing_edges(handle: number, intensity: number, smoothness: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Film grain. The noise is a deterministic hash of the coordinate and
+ * the seed, never host randomness, so undo/redo cannot shimmer.
+ */
+export function apply_gallery_grain(handle: number, seed: number, size_px: number, mono: boolean, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Screen-angle halftone. Dot AREA carries the tone, not dot darkness —
+ * the property that lets a halftone survive a 1-bit output.
+ */
+export function apply_gallery_halftone(handle: number, cell_px: number, angle_deg: number, contrast: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Painterly flattening (Kuwahara): the lowest-variance quadrant's mean,
+ * so a region moves toward paint while its boundary stays put. Serves
+ * Paint Daubs, Palette Knife, Watercolor, Underpainting, Dry Brush.
+ */
+export function apply_gallery_kuwahara(handle: number, radius_px: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Posterised colour plus a darkened outline. The two halves are
+ * independent, which is what separates Cutout (flat, no ink) from Ink
+ * Outlines (ink, little flattening).
+ */
+export function apply_gallery_posterize_edges(handle: number, levels: number, edge_amount: number, edge_threshold: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Cellular tiling with a border term. The border weight alone separates
+ * Crystallize (none) from Stained Glass (heavy).
+ */
+export function apply_gallery_stained_glass(handle: number, seed: number, cell_px: number, border: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Procedural surface texture modulating shading; `kind` picks the
+ * surface (Canvas / Burlap / Brick) rather than a kernel per material.
+ */
+export function apply_gallery_texturizer(handle: number, seed: number, kind: number, scale_px: number, relief: number, angle_deg: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * Luminance threshold with a soft ramp; the ramp width is what makes
+ * Stamp hard and Charcoal soft.
+ */
+export function apply_gallery_threshold_ink(handle: number, threshold: number, softness: number, amount: number): Promise<DecodedHandle>;
+
+/**
  * APPLY a gradient map — luminance through a two-stop colour ramp.
  * A pixel edit into the active layer, journaled and selection-masked
  * exactly like a fill, because that is what it is.
  */
 export function apply_gradient_map(handle: number, shadow: Float32Array, highlight: Float32Array): Promise<DecodedHandle>;
+
+/**
+ * BLUR — lens / bokeh. `radius_px` below 0.5 is the identity.
+ * `threshold` is the luminance above which a pixel counts as a
+ * highlight and gets weighted up; `boost` is how hard.
+ */
+export function apply_lens_blur(handle: number, radius_px: number, threshold: number, boost: number): Promise<DecodedHandle>;
+
+/**
+ * PIXELATE — mosaic. `cell_px` <= 1 is the identity.
+ */
+export function apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandle>;
+
+/**
+ * BLUR GALLERY — motion. `length_px` 0 is the identity.
+ */
+export function apply_motion_blur(handle: number, angle_deg: number, length_px: number): Promise<DecodedHandle>;
+
+/**
+ * MOVE the pixels of the active layer by (dx, dy). `edge` is
+ * 0 transparent / 1 clamp / 2 wrap; dx=dy=0 is the identity for
+ * every policy. At edge=2 this is Photoshop's Filter > Other >
+ * Offset — one kernel, two surfaces.
+ */
+export function apply_offset(handle: number, dx: number, dy: number, edge: number): Promise<DecodedHandle>;
+
+/**
+ * BLUR GALLERY — radial. `spin` picks the mode; `amount` 0 is the
+ * identity for both. The centre is NORMALISED (0..1) so it survives
+ * a resize, unlike a pixel centre which would drift.
+ */
+export function apply_radial_blur(handle: number, cx: number, cy: number, amount: number, spin: boolean): Promise<DecodedHandle>;
+
+/**
+ * NOISE — reduce noise (bilateral). `amount` 0 is the identity, and
+ * so is a `sigma_range` small enough that only the centre tap
+ * carries weight.
+ */
+export function apply_reduce_noise(handle: number, radius_px: number, sigma_range: number, amount: number): Promise<DecodedHandle>;
+
+/**
+ * ADJUST — selective colour. `range` 0..8; all-zero deltas are the
+ * identity for every range.
+ */
+export function apply_selective_color(handle: number, range: number, cyan: number, magenta: number, yellow: number, black: number, absolute: boolean): Promise<DecodedHandle>;
+
+/**
+ * SHARPEN — smart sharpen. `amount` 0 is the identity; regions
+ * whose local contrast is below `threshold` are left untouched
+ * whatever the amount, which is the point of the "smart".
+ */
+export function apply_smart_sharpen(handle: number, radius_px: number, amount: number, threshold: number, clamp_hi: number): Promise<DecodedHandle>;
 
 /**
  * APPLY a parametric distortion (`geom.warp_backward`). `kind` is
@@ -844,7 +998,31 @@ export interface InitOutput {
     readonly adjust_image: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly adjust_image_ext: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => any;
     readonly adjust_image_full: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => any;
+    readonly apply_despeckle: (a: number, b: number, c: number) => any;
+    readonly apply_dust_scratches: (a: number, b: number, c: number) => any;
+    readonly apply_emboss: (a: number, b: number, c: number) => any;
+    readonly apply_find_edges: (a: number, b: number) => any;
+    readonly apply_gallery_bas_relief: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_gallery_crosshatch: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+    readonly apply_gallery_diffuse: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+    readonly apply_gallery_glass: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_gallery_glowing_edges: (a: number, b: number, c: number, d: number) => any;
+    readonly apply_gallery_grain: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_gallery_halftone: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_gallery_kuwahara: (a: number, b: number, c: number) => any;
+    readonly apply_gallery_posterize_edges: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_gallery_stained_glass: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_gallery_texturizer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly apply_gallery_threshold_ink: (a: number, b: number, c: number, d: number) => any;
     readonly apply_gradient_map: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_lens_blur: (a: number, b: number, c: number, d: number) => any;
+    readonly apply_mosaic: (a: number, b: number) => any;
+    readonly apply_motion_blur: (a: number, b: number, c: number) => any;
+    readonly apply_offset: (a: number, b: number, c: number, d: number) => any;
+    readonly apply_radial_blur: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_reduce_noise: (a: number, b: number, c: number, d: number) => any;
+    readonly apply_selective_color: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly apply_smart_sharpen: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly apply_warp: (a: number, b: number, c: number, d: number) => any;
     readonly brush_blend_modes: () => [number, number];
     readonly brush_stroke_active: () => number;

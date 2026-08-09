@@ -2526,6 +2526,114 @@ export function makeImagePanel(session: ImageSession) {
           </button>
           <button
             type="button"
+            data-image-paint-daubs
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Kuwahara: takes the lowest-variance quadrant's mean, so a region flattens toward paint while its boundary stays put."
+            onClick={() => void session.galleryKuwahara(6, 1)}
+          >
+            Paint daubs
+          </button>
+          <button
+            type="button"
+            data-image-poster-edges
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Posterised colour plus a darkened outline. The two halves are independent — that is what separates Cutout from Ink Outlines."
+            onClick={() => void session.galleryPosterizeEdges(6, 1, 0.08, 1)}
+          >
+            Poster edges
+          </button>
+          <button
+            type="button"
+            data-image-glowing-edges
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Edge magnitude colourised and boosted; keeps the source hue instead of going grey."
+            onClick={() => void session.galleryGlowingEdges(1.6, 0.4, 1)}
+          >
+            Glowing edges
+          </button>
+          <button
+            type="button"
+            data-image-halftone
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Screen-angle halftone. Dot AREA carries the tone, not dot darkness — which is what lets it survive a 1-bit output."
+            onClick={() => void session.galleryHalftone(6, 45, 1.2, 1)}
+          >
+            Halftone
+          </button>
+          <button
+            type="button"
+            data-image-film-grain
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Deterministic hash of the coordinate and seed, never host randomness, so undo/redo cannot shimmer."
+            onClick={() => void session.galleryGrain(1, 1, false, 0.5)}
+          >
+            Film grain
+          </button>
+          <button
+            type="button"
+            data-image-spatter
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Random local displacement. Anisotropy is the whole difference between Spatter and Sprayed Strokes."
+            onClick={() => void session.galleryDiffuse(1, 4, 0, 0, 1)}
+          >
+            Spatter
+          </button>
+          <button
+            type="button"
+            data-image-crosshatch
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Hatching modulated by luminance. The SET COUNT alone gives Graphic Pen (1), Crosshatch (2) and Sumi-e (3)."
+            onClick={() => void session.galleryCrosshatch(45, 6, 0.7, 2, 1)}
+          >
+            Crosshatch
+          </button>
+          <button
+            type="button"
+            data-image-bas-relief
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Directional lighting over a luminance heightfield. Chrome and Plastic Wrap are approximated at extreme settings, not modelled."
+            onClick={() => void session.galleryBasRelief(135, 30, 1.5, 1)}
+          >
+            Bas relief
+          </button>
+          <button
+            type="button"
+            data-image-photocopy
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Luminance threshold with a soft ramp; the ramp width is what makes Stamp hard and Charcoal soft."
+            onClick={() => void session.galleryThresholdInk(0.5, 0.08, 1)}
+          >
+            Photocopy
+          </button>
+          <button
+            type="button"
+            data-image-stained-glass
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Cellular tiling with a border term. The border weight alone separates Crystallize from Stained Glass."
+            onClick={() => void session.galleryStainedGlass(1, 24, 0.5, 1)}
+          >
+            Stained glass
+          </button>
+          <button
+            type="button"
+            data-image-glass
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Refraction-style displacement through a procedural normal field."
+            onClick={() => void session.galleryGlass(1, 24, 0.4, 1)}
+          >
+            Glass
+          </button>
+          <button
+            type="button"
+            data-image-texturizer
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Procedural surface texture modulating shading; kind picks Canvas / Burlap / Brick rather than a kernel per material."
+            onClick={() => void session.galleryTexturizer(1, 0, 24, 0.6, 135, 1)}
+          >
+            Texturizer
+          </button>
+          <button
+            type="button"
             data-image-despeckle
             disabled={s.busy || !s.gpu || !s.source}
             title="Smooths speckle without softening edges: it gates on the INNER range, which a speckle inflates and an edge does not."

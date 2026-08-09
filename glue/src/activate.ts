@@ -52,6 +52,7 @@ const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
 const POLY_LASSO_TOOL_ID = "media.paged.image.tool.polygonal-lasso";
 const MAGIC_WAND_TOOL_ID = "media.paged.image.tool.magicWand";
+const QUICK_SELECT_TOOL_ID = "media.paged.image.tool.quickSelect";
 const BRUSH_TOOL_ID = "media.paged.image.tool.brush";
 const PENCIL_TOOL_ID = "media.paged.image.tool.pencil";
 const ERASER_TOOL_ID = "media.paged.image.tool.eraser";
@@ -202,7 +203,11 @@ export function activate(host: BundleHost): BundleHandle {
   // POLYGONAL lasso — the same lasso SLOT, because a designer picks one
   // or the other for a given edge and never wants both on the rail at
   // once. Click places a vertex, Backspace/Delete removes the last,
-  // Enter or a double-click closes, Esc abandons.
+  // Enter or a click on the FIRST vertex closes, Esc abandons.
+  // Closing on the start rather than a double-click is deliberate:
+  // `CanvasPointerEvent` carries no `detail`, and reconstructing a
+  // double-click from timing needs a threshold constant that is wrong
+  // for somebody.
   //
   // No shortcut of its own: it shares the lasso's `shift+l` slot, and
   // stealing another global register for a variant of a tool that is
@@ -228,6 +233,23 @@ export function activate(host: BundleHost): BundleHandle {
     section: "selection",
     shortcut: "shift+w",
     gesture: () => makeSelectionGesture(host, session, "wand"),
+  });
+  // QUICK selection — paint-to-grow. Shares the wand's SLOT and its
+  // shift+w register for the same reason the polygonal lasso shares the
+  // lasso's: it is the other way to do the same job, and a designer
+  // picks one per edge rather than wanting both on the rail.
+  //
+  // It grows from the statistics of what the brush has ACTUALLY painted
+  // rather than from a threshold anchored on the first pixel, so the
+  // result does not depend on precisely where the drag started — the
+  // complaint that makes a wand feel unpredictable.
+  contributeTool(host, {
+    id: QUICK_SELECT_TOOL_ID,
+    title: "Quick selection",
+    icon: "tool-magic-wand",
+    group: MAGIC_WAND_TOOL_ID,
+    section: "selection",
+    gesture: () => makeSelectionGesture(host, session, "quick"),
   });
 
   // ── PAINT tools (spec §6.3 — the brush engine's editor reach) ──

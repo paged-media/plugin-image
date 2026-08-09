@@ -110,6 +110,32 @@ fn unpremul4(c: vec4<f32>) -> vec4<f32> {
 ///   output texel `(x, y)` corresponds to window center
 ///   `(x + rx, y + ry)` in `in0` coords. The module applies the
 ///   selection mask itself: `mix(center_sample, result, m)`.
+///
+///   **The one-shot dispatcher does not honour this, and a kernel must
+///   not assume it does.** `image_gpu::execute_tile_once_async` sizes
+///   `in0` at the OUTPUT dims with no halo (it was written for
+///   `Point`), while `image_graph`'s `gather_window` expands correctly.
+///   A kernel that hardcodes `xy + (rx, ry)` is therefore right under
+///   one dispatcher and shifted by the radius under the other —
+///   `conv.box` and the Gaussian pair hardcode it and are dispatched
+///   only through the expanding path, which is why nothing is visibly
+///   broken today.
+///
+///   DERIVE the offset instead:
+///
+///   ```wgsl
+///   let wd   = textureDimensions(in0);
+///   let win  = vec2<i32>(i32(wd.x), i32(wd.y));
+///   let halo = (win - dims) / 2;          // = (rx, ry), or 0 unexpanded
+///   let base = xy + halo;                 // sample from `base`, clamp to `win`
+///   ```
+///
+///   This yields `(rx, ry)` under the tiled path and `(0, 0)` under the
+///   one-shot path, so the module is correct under both. The
+///   `gallery.*` family and the seven windowed `conv.*` kernels do
+///   this. Fixing the dispatcher is the better long-term answer but it
+///   is an amendment to a FROZEN interface (see the repo constitution),
+///   not a drive-by edit, so the kernels defend themselves meanwhile.
 /// - `Resample { .. }`: `in0` is the full source window; the mapping
 ///   (scale/offset) travels in the params. The module writes `result`
 ///   directly — masked resample is reserved until the selections

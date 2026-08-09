@@ -242,6 +242,243 @@ export function adjust_image_full(handle, exposure_ev, brightness, contrast, sat
 }
 
 /**
+ * NOISE — despeckle. `amount` 0 is the identity. The edge gate
+ * means this smooths speckle WITHOUT softening an edge, which a
+ * plain median cannot do.
+ * @param {number} handle
+ * @param {number} edge_threshold
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_despeckle(handle, edge_threshold, amount) {
+    const ret = wasm.apply_despeckle(handle, edge_threshold, amount);
+    return ret;
+}
+
+/**
+ * NOISE — dust & scratches. `threshold` 1.0 is the identity for
+ * display-referred data, and `radius` 0 is the unconditional one.
+ * The radius is CLAMPED to the kernel's declared ROI rather than
+ * silently reading outside it.
+ * @param {number} handle
+ * @param {number} radius
+ * @param {number} threshold
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_dust_scratches(handle, radius, threshold) {
+    const ret = wasm.apply_dust_scratches(handle, radius, threshold);
+    return ret;
+}
+
+/**
+ * STYLIZE — emboss. `angle_deg` is the light direction, `height`
+ * the relief strength; height 0 is the identity (flat mid-grey
+ * plus nothing).
+ * @param {number} handle
+ * @param {number} angle_deg
+ * @param {number} height
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_emboss(handle, angle_deg, height) {
+    const ret = wasm.apply_emboss(handle, angle_deg, height);
+    return ret;
+}
+
+/**
+ * STYLIZE — find edges. `strength` scales the gradient before the
+ * inversion; the result is dark lines on white.
+ * @param {number} handle
+ * @param {number} strength
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_find_edges(handle, strength) {
+    const ret = wasm.apply_find_edges(handle, strength);
+    return ret;
+}
+
+/**
+ * Directional lighting over a luminance heightfield. Chrome and Plastic
+ * Wrap are APPROXIMATED at extreme settings, not genuinely modelled.
+ * @param {number} handle
+ * @param {number} angle_deg
+ * @param {number} elevation_deg
+ * @param {number} height
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_bas_relief(handle, angle_deg, elevation_deg, height, amount) {
+    const ret = wasm.apply_gallery_bas_relief(handle, angle_deg, elevation_deg, height, amount);
+    return ret;
+}
+
+/**
+ * Directional hatching modulated by luminance. `sets` alone separates
+ * three named gallery filters: 1 = Graphic Pen, 2 = Crosshatch,
+ * 3 = Sumi-e — which is why they are one kernel and not three.
+ * @param {number} handle
+ * @param {number} angle_deg
+ * @param {number} spacing_px
+ * @param {number} strength
+ * @param {number} sets
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_crosshatch(handle, angle_deg, spacing_px, strength, sets, amount) {
+    const ret = wasm.apply_gallery_crosshatch(handle, angle_deg, spacing_px, strength, sets, amount);
+    return ret;
+}
+
+/**
+ * Random local displacement. `anisotropy` is the whole difference
+ * between Spatter (isotropic) and Sprayed Strokes (directional).
+ * @param {number} handle
+ * @param {number} seed
+ * @param {number} radius_px
+ * @param {number} angle_deg
+ * @param {number} anisotropy
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_diffuse(handle, seed, radius_px, angle_deg, anisotropy, amount) {
+    const ret = wasm.apply_gallery_diffuse(handle, seed, radius_px, angle_deg, anisotropy, amount);
+    return ret;
+}
+
+/**
+ * Refraction-style displacement through a procedural normal field.
+ * @param {number} handle
+ * @param {number} seed
+ * @param {number} scale_px
+ * @param {number} distortion
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_glass(handle, seed, scale_px, distortion, amount) {
+    const ret = wasm.apply_gallery_glass(handle, seed, scale_px, distortion, amount);
+    return ret;
+}
+
+/**
+ * Edge magnitude colourised and boosted — keeps the source hue rather
+ * than going grey, which is the difference from an inverted find-edges.
+ * @param {number} handle
+ * @param {number} intensity
+ * @param {number} smoothness
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_glowing_edges(handle, intensity, smoothness, amount) {
+    const ret = wasm.apply_gallery_glowing_edges(handle, intensity, smoothness, amount);
+    return ret;
+}
+
+/**
+ * Film grain. The noise is a deterministic hash of the coordinate and
+ * the seed, never host randomness, so undo/redo cannot shimmer.
+ * @param {number} handle
+ * @param {number} seed
+ * @param {number} size_px
+ * @param {boolean} mono
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_grain(handle, seed, size_px, mono, amount) {
+    const ret = wasm.apply_gallery_grain(handle, seed, size_px, mono, amount);
+    return ret;
+}
+
+/**
+ * Screen-angle halftone. Dot AREA carries the tone, not dot darkness —
+ * the property that lets a halftone survive a 1-bit output.
+ * @param {number} handle
+ * @param {number} cell_px
+ * @param {number} angle_deg
+ * @param {number} contrast
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_halftone(handle, cell_px, angle_deg, contrast, amount) {
+    const ret = wasm.apply_gallery_halftone(handle, cell_px, angle_deg, contrast, amount);
+    return ret;
+}
+
+/**
+ * Painterly flattening (Kuwahara): the lowest-variance quadrant's mean,
+ * so a region moves toward paint while its boundary stays put. Serves
+ * Paint Daubs, Palette Knife, Watercolor, Underpainting, Dry Brush.
+ * @param {number} handle
+ * @param {number} radius_px
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_kuwahara(handle, radius_px, amount) {
+    const ret = wasm.apply_gallery_kuwahara(handle, radius_px, amount);
+    return ret;
+}
+
+/**
+ * Posterised colour plus a darkened outline. The two halves are
+ * independent, which is what separates Cutout (flat, no ink) from Ink
+ * Outlines (ink, little flattening).
+ * @param {number} handle
+ * @param {number} levels
+ * @param {number} edge_amount
+ * @param {number} edge_threshold
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_posterize_edges(handle, levels, edge_amount, edge_threshold, amount) {
+    const ret = wasm.apply_gallery_posterize_edges(handle, levels, edge_amount, edge_threshold, amount);
+    return ret;
+}
+
+/**
+ * Cellular tiling with a border term. The border weight alone separates
+ * Crystallize (none) from Stained Glass (heavy).
+ * @param {number} handle
+ * @param {number} seed
+ * @param {number} cell_px
+ * @param {number} border
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_stained_glass(handle, seed, cell_px, border, amount) {
+    const ret = wasm.apply_gallery_stained_glass(handle, seed, cell_px, border, amount);
+    return ret;
+}
+
+/**
+ * Procedural surface texture modulating shading; `kind` picks the
+ * surface (Canvas / Burlap / Brick) rather than a kernel per material.
+ * @param {number} handle
+ * @param {number} seed
+ * @param {number} kind
+ * @param {number} scale_px
+ * @param {number} relief
+ * @param {number} angle_deg
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_texturizer(handle, seed, kind, scale_px, relief, angle_deg, amount) {
+    const ret = wasm.apply_gallery_texturizer(handle, seed, kind, scale_px, relief, angle_deg, amount);
+    return ret;
+}
+
+/**
+ * Luminance threshold with a soft ramp; the ramp width is what makes
+ * Stamp hard and Charcoal soft.
+ * @param {number} handle
+ * @param {number} threshold
+ * @param {number} softness
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_gallery_threshold_ink(handle, threshold, softness, amount) {
+    const ret = wasm.apply_gallery_threshold_ink(handle, threshold, softness, amount);
+    return ret;
+}
+
+/**
  * APPLY a gradient map — luminance through a two-stop colour ramp.
  * A pixel edit into the active layer, journaled and selection-masked
  * exactly like a fill, because that is what it is.
@@ -256,6 +493,124 @@ export function apply_gradient_map(handle, shadow, highlight) {
     const ptr1 = passArrayF32ToWasm0(highlight, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.apply_gradient_map(handle, ptr0, len0, ptr1, len1);
+    return ret;
+}
+
+/**
+ * BLUR — lens / bokeh. `radius_px` below 0.5 is the identity.
+ * `threshold` is the luminance above which a pixel counts as a
+ * highlight and gets weighted up; `boost` is how hard.
+ * @param {number} handle
+ * @param {number} radius_px
+ * @param {number} threshold
+ * @param {number} boost
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_lens_blur(handle, radius_px, threshold, boost) {
+    const ret = wasm.apply_lens_blur(handle, radius_px, threshold, boost);
+    return ret;
+}
+
+/**
+ * PIXELATE — mosaic. `cell_px` <= 1 is the identity.
+ * @param {number} handle
+ * @param {number} cell_px
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_mosaic(handle, cell_px) {
+    const ret = wasm.apply_mosaic(handle, cell_px);
+    return ret;
+}
+
+/**
+ * BLUR GALLERY — motion. `length_px` 0 is the identity.
+ * @param {number} handle
+ * @param {number} angle_deg
+ * @param {number} length_px
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_motion_blur(handle, angle_deg, length_px) {
+    const ret = wasm.apply_motion_blur(handle, angle_deg, length_px);
+    return ret;
+}
+
+/**
+ * MOVE the pixels of the active layer by (dx, dy). `edge` is
+ * 0 transparent / 1 clamp / 2 wrap; dx=dy=0 is the identity for
+ * every policy. At edge=2 this is Photoshop's Filter > Other >
+ * Offset — one kernel, two surfaces.
+ * @param {number} handle
+ * @param {number} dx
+ * @param {number} dy
+ * @param {number} edge
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_offset(handle, dx, dy, edge) {
+    const ret = wasm.apply_offset(handle, dx, dy, edge);
+    return ret;
+}
+
+/**
+ * BLUR GALLERY — radial. `spin` picks the mode; `amount` 0 is the
+ * identity for both. The centre is NORMALISED (0..1) so it survives
+ * a resize, unlike a pixel centre which would drift.
+ * @param {number} handle
+ * @param {number} cx
+ * @param {number} cy
+ * @param {number} amount
+ * @param {boolean} spin
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_radial_blur(handle, cx, cy, amount, spin) {
+    const ret = wasm.apply_radial_blur(handle, cx, cy, amount, spin);
+    return ret;
+}
+
+/**
+ * NOISE — reduce noise (bilateral). `amount` 0 is the identity, and
+ * so is a `sigma_range` small enough that only the centre tap
+ * carries weight.
+ * @param {number} handle
+ * @param {number} radius_px
+ * @param {number} sigma_range
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_reduce_noise(handle, radius_px, sigma_range, amount) {
+    const ret = wasm.apply_reduce_noise(handle, radius_px, sigma_range, amount);
+    return ret;
+}
+
+/**
+ * ADJUST — selective colour. `range` 0..8; all-zero deltas are the
+ * identity for every range.
+ * @param {number} handle
+ * @param {number} range
+ * @param {number} cyan
+ * @param {number} magenta
+ * @param {number} yellow
+ * @param {number} black
+ * @param {boolean} absolute
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_selective_color(handle, range, cyan, magenta, yellow, black, absolute) {
+    const ret = wasm.apply_selective_color(handle, range, cyan, magenta, yellow, black, absolute);
+    return ret;
+}
+
+/**
+ * SHARPEN — smart sharpen. `amount` 0 is the identity; regions
+ * whose local contrast is below `threshold` are left untouched
+ * whatever the amount, which is the point of the "smart".
+ * @param {number} handle
+ * @param {number} radius_px
+ * @param {number} amount
+ * @param {number} threshold
+ * @param {number} clamp_hi
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_smart_sharpen(handle, radius_px, amount, threshold, clamp_hi) {
+    const ret = wasm.apply_smart_sharpen(handle, radius_px, amount, threshold, clamp_hi);
     return ret;
 }
 
@@ -2528,12 +2883,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 493, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 583, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 528, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 618, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

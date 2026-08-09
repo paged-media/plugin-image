@@ -487,14 +487,26 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let dims = vec2<i32>(i32(d.x), i32(d.y));
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
-    let a = textureLoad(in0, xy, 0);
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
 
     // One offset pair along the light direction: the derivative is the
     // difference across the pixel, which is what gives relief a side.
     let r = radians(params.angle_deg);
     let off = vec2<i32>(i32(round(cos(r))), i32(round(-sin(r))));
-    let fwd = tap(xy + off, dims);
-    let bwd = tap(xy - off, dims);
+    let fwd = tap(base + off, win);
+    let bwd = tap(base - off, win);
     // 0.5 bias keeps a FLAT region mid-grey instead of black.
     let rel = vec3<f32>(0.5) + (fwd - bwd) * params.height * 0.5;
     let result = vec4<f32>(clamp(rel, vec3<f32>(0.0), vec3<f32>(1.0)), a.a);
@@ -571,19 +583,31 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let dims = vec2<i32>(i32(d.x), i32(d.y));
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
-    let a = textureLoad(in0, xy, 0);
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
 
     // Sobel, per channel. Run on COLOUR rather than luminance so a
     // red-on-green edge at equal luma still registers — a luma-only
     // gradient misses exactly the edges a designer drew deliberately.
-    let tl = tap(xy + vec2<i32>(-1, -1), dims);
-    let tc = tap(xy + vec2<i32>( 0, -1), dims);
-    let tr = tap(xy + vec2<i32>( 1, -1), dims);
-    let ml = tap(xy + vec2<i32>(-1,  0), dims);
-    let mr = tap(xy + vec2<i32>( 1,  0), dims);
-    let bl = tap(xy + vec2<i32>(-1,  1), dims);
-    let bc = tap(xy + vec2<i32>( 0,  1), dims);
-    let br = tap(xy + vec2<i32>( 1,  1), dims);
+    let tl = tap(base + vec2<i32>(-1, -1), win);
+    let tc = tap(base + vec2<i32>( 0, -1), win);
+    let tr = tap(base + vec2<i32>( 1, -1), win);
+    let ml = tap(base + vec2<i32>(-1,  0), win);
+    let mr = tap(base + vec2<i32>( 1,  0), win);
+    let bl = tap(base + vec2<i32>(-1,  1), win);
+    let bc = tap(base + vec2<i32>( 0,  1), win);
+    let br = tap(base + vec2<i32>( 1,  1), win);
 
     let gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
     let gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
@@ -685,7 +709,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let dims = vec2<i32>(i32(d.x), i32(d.y));
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
-    let a = textureLoad(in0, xy, 0);
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
 
     let r = radians(params.angle_deg);
     let dir = vec2<f32>(cos(r), -sin(r));
@@ -695,9 +731,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     var acc = vec4<f32>(0.0);
     for (var i : i32 = 0; i < TAPS; i = i + 1) {
         let t = (f32(i) / f32(TAPS - 1)) * 2.0 - 1.0;
-        let p = vec2<f32>(f32(xy.x), f32(xy.y)) + dir * (t * half);
+        let p = vec2<f32>(f32(base.x), f32(base.y)) + dir * (t * half);
         let c = clamp(vec2<i32>(i32(round(p.x)), i32(round(p.y))),
-                      vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+                      vec2<i32>(0, 0), win - vec2<i32>(1, 1));
         acc = acc + textureLoad(in0, c, 0);
     }
     let result = acc / f32(TAPS);
@@ -791,10 +827,23 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let dims = vec2<i32>(i32(d.x), i32(d.y));
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
-    let a = textureLoad(in0, xy, 0);
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
 
-    let centre = vec2<f32>(params.cx * f32(dims.x), params.cy * f32(dims.y));
-    let p = vec2<f32>(f32(xy.x), f32(xy.y));
+    let centre = vec2<f32>(params.cx * f32(dims.x), params.cy * f32(dims.y))
+               + vec2<f32>(f32(halo.x), f32(halo.y));
+    let p = vec2<f32>(f32(base.x), f32(base.y));
     let rel = p - centre;
     let rad = length(rel);
     let ang = atan2(rel.y, rel.x);
@@ -814,7 +863,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
             q = centre + rel * (1.0 + t * params.amount);
         }
         let c = clamp(vec2<i32>(i32(round(q.x)), i32(round(q.y))),
-                      vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+                      vec2<i32>(0, 0), win - vec2<i32>(1, 1));
         acc = acc + textureLoad(in0, c, 0);
     }
     let result = acc / f32(TAPS);
@@ -920,7 +969,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let dims = vec2<i32>(i32(d.x), i32(d.y));
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
-    let a = textureLoad(in0, xy, 0);
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
 
     let r = clamp(params.radius_px, 0.0, f32(R_MAX));
     let ri = i32(ceil(r));
@@ -941,8 +1002,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
             // FLAT-TOPPED support: inside the circle or not at all.
             // That hard edge is what gives a bokeh ball its rim.
             if (f32(dx * dx + dy * dy) > r * r) { continue; }
-            let c = clamp(xy + vec2<i32>(dx, dy),
-                          vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+            let c = clamp(base + vec2<i32>(dx, dy),
+                          vec2<i32>(0, 0), win - vec2<i32>(1, 1));
             let s = textureLoad(in0, c, 0);
             let lum = dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
             // Weight highlights UP so they survive the averaging, then
@@ -1055,7 +1116,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let dims = vec2<i32>(i32(d.x), i32(d.y));
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
-    let a = textureLoad(in0, xy, 0);
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
 
     let r = clamp(params.radius_px, 0.0, f32(R_MAX));
     let ri = i32(ceil(r));
@@ -1068,8 +1141,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         if (dy < -ri || dy > ri) { continue; }
         for (var dx : i32 = -R_MAX; dx <= R_MAX; dx = dx + 1) {
             if (dx < -ri || dx > ri) { continue; }
-            let c = clamp(xy + vec2<i32>(dx, dy),
-                          vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+            let c = clamp(base + vec2<i32>(dx, dy),
+                          vec2<i32>(0, 0), win - vec2<i32>(1, 1));
             let s = textureLoad(in0, c, 0);
             let d2 = f32(dx * dx + dy * dy);
             let ws = exp(-d2 / (2.0 * ss * ss));
@@ -1181,7 +1254,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let dims = vec2<i32>(i32(d.x), i32(d.y));
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
-    let a = textureLoad(in0, xy, 0);
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
 
     let r = clamp(params.radius_px, 0.0, f32(R_MAX));
     let ri = max(i32(ceil(r)), 1);
@@ -1193,8 +1278,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         if (dy < -ri || dy > ri) { continue; }
         for (var dx : i32 = -R_MAX; dx <= R_MAX; dx = dx + 1) {
             if (dx < -ri || dx > ri) { continue; }
-            let c = clamp(xy + vec2<i32>(dx, dy),
-                          vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+            let c = clamp(base + vec2<i32>(dx, dy),
+                          vec2<i32>(0, 0), win - vec2<i32>(1, 1));
             let w = exp(-f32(dx * dx + dy * dy) / (2.0 * ss * ss));
             acc = acc + textureLoad(in0, c, 0) * w;
             wsum = wsum + w;

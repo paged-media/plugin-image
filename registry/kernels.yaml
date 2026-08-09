@@ -1360,6 +1360,175 @@
   tests:
     rust: ["image-conformance/tests/family_gen.rs"]
 
+- id: gallery.kuwahara
+  rust_path: families::gallery::GALLERY_KUWAHARA
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Kuwahara (1976) edge-preserving smoothing: pick the quadrant with the LOWEST variance and take its mean, so a region flattens toward paint while its boundary stays put"
+    - "that is why one kernel serves six painterly gallery filters — they differ in radius and blend, not in mechanism"
+    - "serves the Filter Gallery rows: Paint Daubs, Palette Knife, Watercolor, Underpainting, Dry Brush, Smudge Stick"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.posterize_edges
+  rust_path: families::gallery::GALLERY_POSTERIZE_EDGES
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "posterised colour with a darkened gradient outline — the two halves are independent, which is what separates Cutout (flat, no ink) from Ink Outlines (ink, little flattening)"
+    - "serves the Filter Gallery rows: Poster Edges, Cutout, Ink Outlines, Torn Edges"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.glowing_edges
+  rust_path: families::gallery::GALLERY_GLOWING_EDGES
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "edge magnitude colourised and boosted rather than an inverted find-edges, so the glow keeps the source hue instead of going grey"
+    - "serves the Filter Gallery rows: Glowing Edges, Neon Glow"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.halftone
+  rust_path: families::gallery::GALLERY_HALFTONE
+  state_row: image.kernel.family-t3
+  class: point
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "screen-angle dot growth by luminance: the dot area, not its darkness, carries the tone — the property that makes a halftone survive a 1-bit output"
+    - "serves the Filter Gallery rows: Halftone Pattern, Color Halftone"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.grain
+  rust_path: families::gallery::GALLERY_GRAIN
+  state_row: image.kernel.family-t3
+  class: point
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "deterministic hash of the pixel coordinate plus a seed, never host randomness, so a re-run reproduces exactly and an undo/redo cannot shimmer"
+    - "serves the Filter Gallery rows: Film Grain, Grain, Reticulation, Mezzotint, Diffuse Glow"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.diffuse
+  rust_path: families::gallery::GALLERY_DIFFUSE
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "random local displacement with an anisotropy term, which is the whole difference between Spatter (isotropic) and Sprayed Strokes (directional)"
+    - "serves the Filter Gallery rows: Diffuse, Spatter, Sprayed Strokes, Ocean Ripple scatter"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.crosshatch
+  rust_path: families::gallery::GALLERY_CROSSHATCH
+  state_row: image.kernel.family-t3
+  class: point
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "directional line texture modulated by luminance; the SET COUNT is the parameter that separates three named gallery filters, so they are one kernel and not three"
+    - "serves the Filter Gallery rows: Crosshatch (sets=2), Angled Strokes / Graphic Pen (sets=1), Sumi-e (sets=3)"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.bas_relief
+  rust_path: families::gallery::GALLERY_BAS_RELIEF
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "directional lighting over a luminance heightfield — standard bump-mapped relief; Chrome and Plastic Wrap are APPROXIMATED at extreme settings rather than genuinely modelled, and the kernel doc says so"
+    - "serves the Filter Gallery rows: Bas Relief, Plaster, Note Paper, Chrome"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.threshold_ink
+  rust_path: families::gallery::GALLERY_THRESHOLD_INK
+  state_row: image.kernel.family-t3
+  class: point
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "luminance threshold with a soft ramp; the ramp width is what makes Stamp hard and Charcoal soft"
+    - "serves the Filter Gallery rows: Photocopy, Stamp, Charcoal, Chalk & Charcoal, Torn Edges, Conte Crayon"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.stained_glass
+  rust_path: families::gallery::GALLERY_STAINED_GLASS
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "cellular/Voronoi tiling with a border term — the border weight alone separates Crystallize (none) from Stained Glass (heavy)"
+    - "serves the Filter Gallery rows: Stained Glass, Mosaic Tiles, Craquelure, Patchwork, Crystallize"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.glass
+  rust_path: families::gallery::GALLERY_GLASS
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "refraction-style displacement through a procedural normal field"
+    - "serves the Filter Gallery rows: Glass, Ocean Ripple, Water Paper, Ripple"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
+- id: gallery.texturizer
+  rust_path: families::gallery::GALLERY_TEXTURIZER
+  state_row: image.kernel.family-t3
+  class: point
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "procedural surface texture modulating shading, with the surface chosen by a kind discriminant rather than by a separate kernel per material"
+    - "serves the Filter Gallery rows: Texturizer (Canvas/Burlap/Brick via kind), Rough Pastels, Sponge, Fresco"
+    - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
+  tests:
+    rust: ["image-kernels/src/families/gallery.rs"]
 - id: gen.angular_gradient
   rust_path: families::gen::GEN_ANGULAR_GRADIENT
   state_row: image.kernel.family-t2

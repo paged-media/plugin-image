@@ -385,6 +385,20 @@ export interface ImageSession {
   ): Promise<boolean>;
   /** PIXELATE — mosaic. `cellPx` <= 1 is the identity. */
   applyMosaic(cellPx: number): Promise<boolean>;
+  // FILTER GALLERY — twelve primitives spanning the six families.
+  // `amount` 0 is the identity on every one of them.
+  galleryKuwahara(radiusPx: number, amount: number): Promise<boolean>;
+  galleryPosterizeEdges(levels: number, edgeAmount: number, edgeThreshold: number, amount: number): Promise<boolean>;
+  galleryGlowingEdges(intensity: number, smoothness: number, amount: number): Promise<boolean>;
+  galleryHalftone(cellPx: number, angleDeg: number, contrast: number, amount: number): Promise<boolean>;
+  galleryGrain(seed: number, sizePx: number, mono: boolean, amount: number): Promise<boolean>;
+  galleryDiffuse(seed: number, radiusPx: number, angleDeg: number, anisotropy: number, amount: number): Promise<boolean>;
+  galleryCrosshatch(angleDeg: number, spacingPx: number, strength: number, sets: number, amount: number): Promise<boolean>;
+  galleryBasRelief(angleDeg: number, elevationDeg: number, height: number, amount: number): Promise<boolean>;
+  galleryThresholdInk(threshold: number, softness: number, amount: number): Promise<boolean>;
+  galleryStainedGlass(seed: number, cellPx: number, border: number, amount: number): Promise<boolean>;
+  galleryGlass(seed: number, scalePx: number, distortion: number, amount: number): Promise<boolean>;
+  galleryTexturizer(seed: number, kind: number, scalePx: number, relief: number, angleDeg: number, amount: number): Promise<boolean>;
   /** NOISE — despeckle; `amount` 0 is the identity. */
   applyDespeckle(edgeThreshold: number, amount: number): Promise<boolean>;
   /**
@@ -1192,8 +1206,21 @@ export function createImageSession(host: BundleHost): ImageSession {
     } catch (err) {
       host.log.debug("selection bind failed", err);
     }
-    selectionMachineRef = createSelectionMachine(engine, () =>
-      api.refreshSelection(),
+    // The third argument is what makes Quick Selection more than an
+    // inert tool: no engine door reports which handle a selection is
+    // bound to, so the grower needs the source handed to it or it has
+    // no pixels to read and honestly does nothing.
+    selectionMachineRef = createSelectionMachine(
+      engine,
+      () => api.refreshSelection(),
+      () =>
+        state.source
+          ? {
+              handle: state.source.handle,
+              width: state.source.width,
+              height: state.source.height,
+            }
+          : null,
     );
     state.selection = engine.selectionStats();
     // The paint machine is pure pointer bookkeeping, but it is rebuilt
@@ -1766,6 +1793,66 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     async applyMosaic(cellPx) {
       return this.applyEffect("Mosaic", (h) => engine!.applyMosaic(h, cellPx));
+    },
+    async galleryKuwahara(radiusPx, amount) {
+      return this.applyEffect("Paint daubs", (h) =>
+        engine!.galleryKuwahara(h, radiusPx, amount),
+      );
+    },
+    async galleryPosterizeEdges(levels, edgeAmount, edgeThreshold, amount) {
+      return this.applyEffect("Poster edges", (h) =>
+        engine!.galleryPosterizeEdges(h, levels, edgeAmount, edgeThreshold, amount),
+      );
+    },
+    async galleryGlowingEdges(intensity, smoothness, amount) {
+      return this.applyEffect("Glowing edges", (h) =>
+        engine!.galleryGlowingEdges(h, intensity, smoothness, amount),
+      );
+    },
+    async galleryHalftone(cellPx, angleDeg, contrast, amount) {
+      return this.applyEffect("Halftone", (h) =>
+        engine!.galleryHalftone(h, cellPx, angleDeg, contrast, amount),
+      );
+    },
+    async galleryGrain(seed, sizePx, mono, amount) {
+      return this.applyEffect("Film grain", (h) =>
+        engine!.galleryGrain(h, seed, sizePx, mono, amount),
+      );
+    },
+    async galleryDiffuse(seed, radiusPx, angleDeg, anisotropy, amount) {
+      return this.applyEffect("Spatter", (h) =>
+        engine!.galleryDiffuse(h, seed, radiusPx, angleDeg, anisotropy, amount),
+      );
+    },
+    async galleryCrosshatch(angleDeg, spacingPx, strength, sets, amount) {
+      return this.applyEffect("Crosshatch", (h) =>
+        engine!.galleryCrosshatch(h, angleDeg, spacingPx, strength, sets, amount),
+      );
+    },
+    async galleryBasRelief(angleDeg, elevationDeg, height, amount) {
+      return this.applyEffect("Bas relief", (h) =>
+        engine!.galleryBasRelief(h, angleDeg, elevationDeg, height, amount),
+      );
+    },
+    async galleryThresholdInk(threshold, softness, amount) {
+      return this.applyEffect("Photocopy", (h) =>
+        engine!.galleryThresholdInk(h, threshold, softness, amount),
+      );
+    },
+    async galleryStainedGlass(seed, cellPx, border, amount) {
+      return this.applyEffect("Stained glass", (h) =>
+        engine!.galleryStainedGlass(h, seed, cellPx, border, amount),
+      );
+    },
+    async galleryGlass(seed, scalePx, distortion, amount) {
+      return this.applyEffect("Glass", (h) =>
+        engine!.galleryGlass(h, seed, scalePx, distortion, amount),
+      );
+    },
+    async galleryTexturizer(seed, kind, scalePx, relief, angleDeg, amount) {
+      return this.applyEffect("Texturizer", (h) =>
+        engine!.galleryTexturizer(h, seed, kind, scalePx, relief, angleDeg, amount),
+      );
     },
     async applyDespeckle(edgeThreshold, amount) {
       return this.applyEffect("Despeckle", (h) =>
