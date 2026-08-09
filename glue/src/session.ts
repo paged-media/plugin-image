@@ -90,6 +90,24 @@ export const FEATHER_SIGMA_DEFAULT = 4;
  *  caller passes none (a seed field is a follow-up). */
 export const FILL_NOISE_SEED_DEFAULT = 1;
 
+/**
+ * What `geom.offset` does with the pixels a move exposes at the edge.
+ *
+ * These three values are the kernel's FROZEN wire encoding, not a UI
+ * convenience — the Rust `EdgePolicy` and the WGSL branch both read the
+ * same integers out of the params block, so renumbering here silently
+ * changes what a stored effect does.
+ */
+export const EdgePolicy = {
+  /** Photoshop "Set to Transparent" — the vacated region is cleared. */
+  Transparent: 0,
+  /** Photoshop "Repeat Edge Pixels" — the border smears outward. */
+  Clamp: 1,
+  /** Photoshop "Wrap Around" — the period is the image; makes tiles seamless. */
+  Wrap: 2,
+} as const;
+export type EdgePolicy = (typeof EdgePolicy)[keyof typeof EdgePolicy];
+
 /** What to paint into the selection (the `gen.*` family's editor
  *  reach). Colours are straight RGBA in [0,1]. */
 export type FillRequest =
@@ -367,6 +385,40 @@ export interface ImageSession {
   ): Promise<boolean>;
   /** PIXELATE — mosaic. `cellPx` <= 1 is the identity. */
   applyMosaic(cellPx: number): Promise<boolean>;
+  /**
+   * MOVE the active layer's pixels. The host Selection tool moves the
+   * FRAME on the page; this moves what is inside it.
+   *
+   * Whole-pixel offsets are bit-exact (single tap, no interpolation),
+   * so repeated integer moves never degrade the layer. Sub-pixel ones
+   * resample, which is the right trade for a drag that must track the
+   * pointer at any zoom rather than stutter between whole pixels.
+   */
+  offsetLayer(dx: number, dy: number, edge?: EdgePolicy): Promise<boolean>;
+  /**
+   * Filter > Other > Offset — the SAME kernel with the edge policy
+   * fixed to wrap, which is what makes a tile seamless.
+   */
+  offsetFilter(dx: number, dy: number): Promise<boolean>;
+  /** BLUR — lens/bokeh; `radiusPx` below 0.5 is the identity. */
+  applyLensBlur(
+    radiusPx: number,
+    threshold: number,
+    boost: number,
+  ): Promise<boolean>;
+  /** NOISE — bilateral denoise; `amount` 0 is the identity. */
+  applyReduceNoise(
+    radiusPx: number,
+    sigmaRange: number,
+    amount: number,
+  ): Promise<boolean>;
+  /** SHARPEN — smart sharpen; `amount` 0 is the identity. */
+  applySmartSharpen(
+    radiusPx: number,
+    amount: number,
+    threshold: number,
+    clampHi: number,
+  ): Promise<boolean>;
   /** Per-range CMYK shift (0 reds .. 8 blacks). */
   applySelectiveColor(
     range: number,
@@ -1705,6 +1757,29 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     async applyMosaic(cellPx) {
       return this.applyEffect("Mosaic", (h) => engine!.applyMosaic(h, cellPx));
+    },
+    async offsetLayer(dx, dy, edge = EdgePolicy.Transparent) {
+      return this.applyEffect("Move", (h) => engine!.applyOffset(h, dx, dy, edge));
+    },
+    async offsetFilter(dx, dy) {
+      return this.applyEffect("Offset", (h) =>
+        engine!.applyOffset(h, dx, dy, EdgePolicy.Wrap),
+      );
+    },
+    async applyLensBlur(radiusPx, threshold, boost) {
+      return this.applyEffect("Lens blur", (h) =>
+        engine!.applyLensBlur(h, radiusPx, threshold, boost),
+      );
+    },
+    async applyReduceNoise(radiusPx, sigmaRange, amount) {
+      return this.applyEffect("Reduce noise", (h) =>
+        engine!.applyReduceNoise(h, radiusPx, sigmaRange, amount),
+      );
+    },
+    async applySmartSharpen(radiusPx, amount, threshold, clampHi) {
+      return this.applyEffect("Smart sharpen", (h) =>
+        engine!.applySmartSharpen(h, radiusPx, amount, threshold, clampHi),
+      );
     },
     async applySelectiveColor(range, cmyk, absolute) {
       return this.applyEffect("Selective colour", (h) =>

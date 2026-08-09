@@ -2524,6 +2524,44 @@ export function makeImagePanel(session: ImageSession) {
           >
             Mosaic
           </button>
+          <button
+            type="button"
+            data-image-lens-blur
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Bokeh: a flat-topped disc, with highlights weighted up before the average and pulled back after — so a bright speck spreads as a bright ball, not a dim smudge."
+            onClick={() => void session.applyLensBlur(8, 0.75, 4)}
+          >
+            Lens blur
+          </button>
+          <button
+            type="button"
+            data-image-reduce-noise
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Bilateral denoise: taps are weighted by colour distance as well as distance, so it refuses to average across an edge."
+            onClick={() => void session.applyReduceNoise(4, 0.12, 0.8)}
+          >
+            Reduce noise
+          </button>
+          <button
+            type="button"
+            data-image-smart-sharpen
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Unsharp with two gates: local contrast below the threshold is left alone as noise, and the correction is clamped so a strong edge cannot ring into a halo."
+            onClick={() => void session.applySmartSharpen(2, 1.2, 0.02, 0.25)}
+          >
+            Smart sharpen
+          </button>
+          <button
+            type="button"
+            data-image-selective-color
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Per-range CMYK shift — this button targets the reds. Range membership goes by channel ORDER, so there is no seam at a hue boundary and no wraparound case."
+            onClick={() =>
+              void session.applySelectiveColor(0, [0, 0.2, 0.2, 0], false)
+            }
+          >
+            Selective colour
+          </button>
         </div>
         <div style={note}>
           One-click defaults, not a parameter surface: each of these is a

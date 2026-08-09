@@ -1136,6 +1136,38 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
   applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /**
+   * MOVE pixels by (dx, dy). `edge` 0 transparent / 1 clamp / 2 wrap.
+   * dx=dy=0 is the identity for every policy.
+   */
+  applyOffset(
+    handle: number,
+    dx: number,
+    dy: number,
+    edge: number,
+  ): Promise<DecodedInfo>;
+  /** BLUR — lens/bokeh. `radiusPx` below 0.5 is the identity. */
+  applyLensBlur(
+    handle: number,
+    radiusPx: number,
+    threshold: number,
+    boost: number,
+  ): Promise<DecodedInfo>;
+  /** NOISE — reduce noise (bilateral). `amount` 0 is the identity. */
+  applyReduceNoise(
+    handle: number,
+    radiusPx: number,
+    sigmaRange: number,
+    amount: number,
+  ): Promise<DecodedInfo>;
+  /** SHARPEN — smart sharpen. `amount` 0 is the identity. */
+  applySmartSharpen(
+    handle: number,
+    radiusPx: number,
+    amount: number,
+    threshold: number,
+    clampHi: number,
+  ): Promise<DecodedInfo>;
   /** Per-range CMYK shift. `range` 0..8; all-zero deltas are the
    *  identity for every range. */
   applySelectiveColor(
@@ -1506,6 +1538,31 @@ export interface ImageWasmModule {
     spin: boolean,
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
+  apply_offset(
+    handle: number,
+    dx: number,
+    dy: number,
+    edge: number,
+  ): Promise<DecodedHandleWasm>;
+  apply_lens_blur(
+    handle: number,
+    radius_px: number,
+    threshold: number,
+    boost: number,
+  ): Promise<DecodedHandleWasm>;
+  apply_reduce_noise(
+    handle: number,
+    radius_px: number,
+    sigma_range: number,
+    amount: number,
+  ): Promise<DecodedHandleWasm>;
+  apply_smart_sharpen(
+    handle: number,
+    radius_px: number,
+    amount: number,
+    threshold: number,
+    clamp_hi: number,
+  ): Promise<DecodedHandleWasm>;
   apply_selective_color(
     handle: number,
     range: number,
@@ -1998,6 +2055,30 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyMosaic(handle, cellPx) {
       return decodedInfoOf(await wasm.apply_mosaic(handle, cellPx));
+    },
+    async applyOffset(handle, dx, dy, edge) {
+      return decodedInfoOf(await wasm.apply_offset(handle, dx, dy, edge));
+    },
+    async applyLensBlur(handle, radiusPx, threshold, boost) {
+      return decodedInfoOf(
+        await wasm.apply_lens_blur(handle, radiusPx, threshold, boost),
+      );
+    },
+    async applyReduceNoise(handle, radiusPx, sigmaRange, amount) {
+      return decodedInfoOf(
+        await wasm.apply_reduce_noise(handle, radiusPx, sigmaRange, amount),
+      );
+    },
+    async applySmartSharpen(handle, radiusPx, amount, threshold, clampHi) {
+      return decodedInfoOf(
+        await wasm.apply_smart_sharpen(
+          handle,
+          radiusPx,
+          amount,
+          threshold,
+          clampHi,
+        ),
+      );
     },
     async applySelectiveColor(handle, range, cmyk, absolute) {
       return decodedInfoOf(

@@ -84,7 +84,17 @@ pub fn kernel_count() -> usize {
     image_kernels::registry().len()
 }
 
+// GATE — a `#[wasm_bindgen]` export is never called from Rust, so a
+// missing attribute makes the function dead code rather than a compile
+// error, and it silently does not reach JS at all. That is not
+// hypothetical: nine kernel entry points shipped without the attribute
+// on 2026-08-09 and the TS side was calling functions that did not
+// exist on the wasm module. The compiler had said so in a warning
+// nobody was obliged to read, so make it binding. Anything genuinely
+// unused in here is either an export missing its attribute or a helper
+// that should be deleted; both deserve to stop the build.
 #[cfg(target_arch = "wasm32")]
+#[deny(dead_code)]
 mod wasm {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
@@ -1620,6 +1630,7 @@ mod wasm {
     /// STYLIZE — emboss. `angle_deg` is the light direction, `height`
     /// the relief strength; height 0 is the identity (flat mid-grey
     /// plus nothing).
+    #[wasm_bindgen]
     pub async fn apply_emboss(
         handle: u32,
         angle_deg: f32,
@@ -1632,6 +1643,7 @@ mod wasm {
 
     /// STYLIZE — find edges. `strength` scales the gradient before the
     /// inversion; the result is dark lines on white.
+    #[wasm_bindgen]
     pub async fn apply_find_edges(handle: u32, strength: f32) -> Result<DecodedHandle, JsValue> {
         use image_kernels::families::conv::{ConvFindEdgesParams, CONV_FIND_EDGES};
         let params = ConvFindEdgesParams::new(strength);
@@ -1639,6 +1651,7 @@ mod wasm {
     }
 
     /// BLUR GALLERY — motion. `length_px` 0 is the identity.
+    #[wasm_bindgen]
     pub async fn apply_motion_blur(
         handle: u32,
         angle_deg: f32,
@@ -1652,6 +1665,7 @@ mod wasm {
     /// BLUR GALLERY — radial. `spin` picks the mode; `amount` 0 is the
     /// identity for both. The centre is NORMALISED (0..1) so it survives
     /// a resize, unlike a pixel centre which would drift.
+    #[wasm_bindgen]
     pub async fn apply_radial_blur(
         handle: u32,
         cx: f32,
@@ -1665,6 +1679,7 @@ mod wasm {
     }
 
     /// PIXELATE — mosaic. `cell_px` <= 1 is the identity.
+    #[wasm_bindgen]
     pub async fn apply_mosaic(handle: u32, cell_px: f32) -> Result<DecodedHandle, JsValue> {
         use image_kernels::families::geom::{MosaicParams, GEOM_MOSAIC};
         let params = MosaicParams::new(cell_px);
@@ -1673,6 +1688,7 @@ mod wasm {
 
     /// ADJUST — selective colour. `range` 0..8; all-zero deltas are the
     /// identity for every range.
+    #[wasm_bindgen]
     pub async fn apply_selective_color(
         handle: u32,
         range: u32,
@@ -1690,6 +1706,77 @@ mod wasm {
         }
         let params = SelectiveColorParams::new(range, cyan, magenta, yellow, black, absolute);
         apply_point_kernel(handle, &ADJUST_SELECTIVE_COLOR, params.as_bytes()).await
+    }
+
+    /// MOVE the pixels of the active layer by (dx, dy). `edge` is
+    /// 0 transparent / 1 clamp / 2 wrap; dx=dy=0 is the identity for
+    /// every policy. At edge=2 this is Photoshop's Filter > Other >
+    /// Offset — one kernel, two surfaces.
+    #[wasm_bindgen]
+    pub async fn apply_offset(
+        handle: u32,
+        dx: f32,
+        dy: f32,
+        edge: u32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::geom::{EdgePolicy, OffsetParams, GEOM_OFFSET};
+        // REJECTING decoder at the JS boundary. The clamping twin
+        // exists for replaying stored param blocks whose producer may
+        // be newer than this build; a live call with a bad policy is a
+        // caller bug and should say so rather than silently clamp.
+        let policy = EdgePolicy::from_u32(edge).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown edge policy {edge} (0 transparent | 1 clamp | 2 wrap)"
+            ))
+        })?;
+        let params = OffsetParams::new(dx, dy, policy);
+        apply_point_kernel(handle, &GEOM_OFFSET, params.as_bytes()).await
+    }
+
+    /// BLUR — lens / bokeh. `radius_px` below 0.5 is the identity.
+    /// `threshold` is the luminance above which a pixel counts as a
+    /// highlight and gets weighted up; `boost` is how hard.
+    #[wasm_bindgen]
+    pub async fn apply_lens_blur(
+        handle: u32,
+        radius_px: f32,
+        threshold: f32,
+        boost: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvLensParams, CONV_LENS};
+        let params = ConvLensParams::new(radius_px, threshold, boost);
+        apply_point_kernel(handle, &CONV_LENS, params.as_bytes()).await
+    }
+
+    /// NOISE — reduce noise (bilateral). `amount` 0 is the identity, and
+    /// so is a `sigma_range` small enough that only the centre tap
+    /// carries weight.
+    #[wasm_bindgen]
+    pub async fn apply_reduce_noise(
+        handle: u32,
+        radius_px: f32,
+        sigma_range: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvBilateralParams, CONV_BILATERAL};
+        let params = ConvBilateralParams::new(radius_px, sigma_range, amount);
+        apply_point_kernel(handle, &CONV_BILATERAL, params.as_bytes()).await
+    }
+
+    /// SHARPEN — smart sharpen. `amount` 0 is the identity; regions
+    /// whose local contrast is below `threshold` are left untouched
+    /// whatever the amount, which is the point of the "smart".
+    #[wasm_bindgen]
+    pub async fn apply_smart_sharpen(
+        handle: u32,
+        radius_px: f32,
+        amount: f32,
+        threshold: f32,
+        clamp_hi: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvSmartSharpenParams, CONV_SMART_SHARPEN};
+        let params = ConvSmartSharpenParams::new(radius_px, amount, threshold, clamp_hi);
+        apply_point_kernel(handle, &CONV_SMART_SHARPEN, params.as_bytes()).await
     }
 
     /// Shared body for "run ONE kernel over the whole image and land the

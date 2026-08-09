@@ -823,7 +823,408 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+/// Lens-blur (bokeh) params — a DISC, plus the highlight bloom that is
+/// the whole reason a lens blur does not look like a Gaussian.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvLensParams {
+    pub radius_px: f32,
+    pub threshold: f32,
+    pub boost: f32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvLensParams {
+    pub fn new(radius_px: f32, threshold: f32, boost: f32) -> Self {
+        Self {
+            radius_px,
+            threshold,
+            boost,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// LENS blur — a disc (circle-of-confusion) average with highlights
+/// weighted UP before the average and pulled back after.
+///
+/// This is the one blur that genuinely could not be reached by
+/// composing the ones already here. A Gaussian averages with a falloff,
+/// so a bright speck spreads into a dim smudge. A real lens spreads it
+/// into a bright DISC of roughly the source's brightness — the bokeh
+/// ball. Reproducing that needs two things a Gaussian has not got: a
+/// flat-topped support (so the disc has an edge), and a non-linear
+/// weight so bright pixels survive the division by the tap count.
+///
+/// Provenance: the weight-boost-then-unboost trick is the standard
+/// approximation of physical bokeh in real-time graphics; it is not a
+/// port of any Adobe code, whose lens blur additionally reads a depth
+/// map we have no equivalent for.
+pub static CONV_LENS: KernelDef = KernelDef {
+    id: "conv.lens",
+    class: KernelClass::Windowed { radius: (24, 24) },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvLensParams>(),
+        fields: &[
+            ParamField {
+                name: "radius_px",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "threshold",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "boost",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "_abi_pad",
+                wgsl_ty: "u32",
+            },
+        ],
+    },
+    wgsl: CONV_LENS_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CONV_LENS_WGSL: &str = "\
+// paged.image kernel `conv.lens` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    radius_px: f32,
+    threshold: f32,
+    boost: f32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+const R_MAX : i32 = 24;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    let r = clamp(params.radius_px, 0.0, f32(R_MAX));
+    let ri = i32(ceil(r));
+    // Radius below half a pixel cannot cover a second sample; the disc
+    // IS the centre pixel, so return it rather than divide by a
+    // one-tap sum and call that a blur.
+    if (ri < 1) {
+        textureStore(outp, xy, a);
+        return;
+    }
+
+    var acc = vec4<f32>(0.0);
+    var wsum = 0.0;
+    for (var dy : i32 = -R_MAX; dy <= R_MAX; dy = dy + 1) {
+        if (dy < -ri || dy > ri) { continue; }
+        for (var dx : i32 = -R_MAX; dx <= R_MAX; dx = dx + 1) {
+            if (dx < -ri || dx > ri) { continue; }
+            // FLAT-TOPPED support: inside the circle or not at all.
+            // That hard edge is what gives a bokeh ball its rim.
+            if (f32(dx * dx + dy * dy) > r * r) { continue; }
+            let c = clamp(xy + vec2<i32>(dx, dy),
+                          vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+            let s = textureLoad(in0, c, 0);
+            let lum = dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            // Weight highlights UP so they survive the averaging, then
+            // divide by the same weights: a bright speck stays bright
+            // across the whole disc instead of averaging away.
+            var w = 1.0;
+            if (lum > params.threshold) {
+                w = 1.0 + params.boost * (lum - params.threshold);
+            }
+            acc = acc + s * w;
+            wsum = wsum + w;
+        }
+    }
+    let result = select(a, acc / wsum, wsum > 0.0);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
+/// Bilateral / smart-sharpen shared params.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvBilateralParams {
+    pub radius_px: f32,
+    pub sigma_range: f32,
+    pub amount: f32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvBilateralParams {
+    pub fn new(radius_px: f32, sigma_range: f32, amount: f32) -> Self {
+        Self {
+            radius_px,
+            sigma_range,
+            amount,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// REDUCE NOISE — a bilateral filter: average the neighbourhood, but
+/// weight each tap by how close it is to the centre IN COLOUR as well
+/// as in space. Taps across an edge differ in colour, so they get
+/// almost no weight, and the edge survives a blur strong enough to
+/// flatten the noise beside it.
+///
+/// `sigma_range` is the whole control: large enough and this degrades
+/// to a Gaussian (every tap counts), small enough and it is the
+/// identity (only the centre counts).
+///
+/// Provenance: Tomasi & Manduchi's bilateral filter (ICCV 1998) is
+/// standard literature.
+pub static CONV_BILATERAL: KernelDef = KernelDef {
+    id: "conv.bilateral",
+    class: KernelClass::Windowed { radius: (8, 8) },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvBilateralParams>(),
+        fields: &[
+            ParamField {
+                name: "radius_px",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "sigma_range",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "amount",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "_abi_pad",
+                wgsl_ty: "u32",
+            },
+        ],
+    },
+    wgsl: CONV_BILATERAL_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CONV_BILATERAL_WGSL: &str = "\
+// paged.image kernel `conv.bilateral` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    radius_px: f32,
+    sigma_range: f32,
+    amount: f32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+const R_MAX : i32 = 8;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    let r = clamp(params.radius_px, 0.0, f32(R_MAX));
+    let ri = i32(ceil(r));
+    let sr = max(params.sigma_range, 0.0001);
+    let ss = max(r * 0.5, 0.0001);
+
+    var acc = vec4<f32>(0.0);
+    var wsum = 0.0;
+    for (var dy : i32 = -R_MAX; dy <= R_MAX; dy = dy + 1) {
+        if (dy < -ri || dy > ri) { continue; }
+        for (var dx : i32 = -R_MAX; dx <= R_MAX; dx = dx + 1) {
+            if (dx < -ri || dx > ri) { continue; }
+            let c = clamp(xy + vec2<i32>(dx, dy),
+                          vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+            let s = textureLoad(in0, c, 0);
+            let d2 = f32(dx * dx + dy * dy);
+            let ws = exp(-d2 / (2.0 * ss * ss));
+            // The RANGE term is the bilateral part: colour distance,
+            // not spatial distance. This is what refuses to average
+            // across an edge.
+            let cd = s.rgb - a.rgb;
+            let wr = exp(-dot(cd, cd) / (2.0 * sr * sr));
+            let w = ws * wr;
+            acc = acc + s * w;
+            wsum = wsum + w;
+        }
+    }
+    // The centre always contributes (dx=dy=0 gives w=1), so wsum is
+    // never zero and the blend below is always defined.
+    let filtered = acc / wsum;
+    let result = mix(a, filtered, clamp(params.amount, 0.0, 1.0));
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
+/// SMART SHARPEN — unsharp masking that only fires where there is an
+/// edge to sharpen.
+///
+/// Plain unsharp adds `amount·(a − blurred)` everywhere, which
+/// sharpens the noise in flat areas just as eagerly as it sharpens a
+/// real edge, and rings the strong edges into visible halos. This adds
+/// two gates over that: local contrast must clear `threshold` before
+/// any sharpening applies at all, and the correction is clamped so a
+/// high-contrast edge cannot overshoot into a halo.
+pub static CONV_SMART_SHARPEN: KernelDef = KernelDef {
+    id: "conv.smart_sharpen",
+    class: KernelClass::Windowed { radius: (8, 8) },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvSmartSharpenParams>(),
+        fields: &[
+            ParamField {
+                name: "radius_px",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "amount",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "threshold",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "clamp_hi",
+                wgsl_ty: "f32",
+            },
+        ],
+    },
+    wgsl: CONV_SMART_SHARPEN_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvSmartSharpenParams {
+    pub radius_px: f32,
+    pub amount: f32,
+    pub threshold: f32,
+    pub clamp_hi: f32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvSmartSharpenParams {
+    pub fn new(radius_px: f32, amount: f32, threshold: f32, clamp_hi: f32) -> Self {
+        Self {
+            radius_px,
+            amount,
+            threshold,
+            clamp_hi,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const CONV_SMART_SHARPEN_WGSL: &str = "\
+// paged.image kernel `conv.smart_sharpen` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    radius_px: f32,
+    amount: f32,
+    threshold: f32,
+    clamp_hi: f32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+const R_MAX : i32 = 8;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    let r = clamp(params.radius_px, 0.0, f32(R_MAX));
+    let ri = max(i32(ceil(r)), 1);
+    let ss = max(r * 0.5, 0.0001);
+
+    var acc = vec4<f32>(0.0);
+    var wsum = 0.0;
+    for (var dy : i32 = -R_MAX; dy <= R_MAX; dy = dy + 1) {
+        if (dy < -ri || dy > ri) { continue; }
+        for (var dx : i32 = -R_MAX; dx <= R_MAX; dx = dx + 1) {
+            if (dx < -ri || dx > ri) { continue; }
+            let c = clamp(xy + vec2<i32>(dx, dy),
+                          vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+            let w = exp(-f32(dx * dx + dy * dy) / (2.0 * ss * ss));
+            acc = acc + textureLoad(in0, c, 0) * w;
+            wsum = wsum + w;
+        }
+    }
+    let blurred = acc / wsum;
+
+    var diff = a.rgb - blurred.rgb;
+    // GATE 1 — below the threshold this is noise, not an edge. Leave
+    // it alone rather than amplify it.
+    let mag = max(max(abs(diff.r), abs(diff.g)), abs(diff.b));
+    if (mag < params.threshold) {
+        textureStore(outp, xy, a);
+        return;
+    }
+    // GATE 2 — clamp the correction. An unclamped high-contrast edge
+    // overshoots into the bright halo that makes oversharpening
+    // recognisable at a glance.
+    diff = clamp(diff * params.amount,
+                 vec3<f32>(-params.clamp_hi), vec3<f32>(params.clamp_hi));
+    let result = vec4<f32>(clamp(a.rgb + diff, vec3<f32>(0.0), vec3<f32>(1.0)), a.a);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
+    &CONV_LENS,
+    &CONV_BILATERAL,
+    &CONV_SMART_SHARPEN,
     &CONV_BOX,
     &CONV_GAUSSIAN_H,
     &CONV_GAUSSIAN_V,

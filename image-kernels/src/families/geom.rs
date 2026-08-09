@@ -895,6 +895,282 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+// ── Offset: the Move tool's kernel ────────────────────────────────
+//
+// TRANSLATE THE PIXELS OF A LAYER, which is not the same operation as
+// moving its FRAME on the page. The host's Selection tool already moves
+// the frame; nothing moved the CONTENT inside it. Photoshop's Move tool
+// (V) is this kernel, and Photoshop's Offset filter (Filter ▸ Other ▸
+// Offset) is the SAME kernel with the wrap edge policy — one
+// implementation, two surfaces.
+//
+// # Why this is not `geom.warp_backward` with a fifth `kind`
+//
+// It looks subsumed and is not, for three independent reasons:
+//
+// 1. NO TRANSLATION IS EXPRESSIBLE. `warp_backward`'s four kinds are
+//    Pinch/Spherize (radial SCALE of the centre-relative vector), Twirl
+//    (radius-dependent ROTATION) and Wave (an x displacement that is a
+//    sinusoid OF y). Every one is a function of the centre-relative
+//    coordinate `d` that fixes the centre; a translation moves the
+//    centre. Wave degenerates to the identity at `frequency == 0`, not
+//    to a constant shift. Its param block has no `dx`/`dy` — adding
+//    them would change `WarpBackwardParams`' size and `ParamsLayout`,
+//    i.e. re-cut a shipped kernel's frozen uniform block.
+// 2. THE EDGE RULE IS HARDCODED THERE. `warp_backward`'s `tap()` is
+//    clamp-to-edge and only clamp-to-edge, as is every other warp in
+//    this family. Offset needs all three of Photoshop's edge rules —
+//    transparent, edge-extend, wrap — and wrap is not a variation on a
+//    clamp, it is a different function of the same coordinate.
+// 3. COST PER TEXEL, AND THIS ONE IS DRAGGED. The Move tool re-runs
+//    this on every pointer-move over the whole layer. `warp_backward`
+//    pays a `length()`, a divide and a four-way branch per texel to
+//    decide it wanted an add.
+//
+// # Sub-pixel offsets are BILINEAR, deliberately, not rounded
+//
+// A drag at any zoom other than 100% produces fractional deltas. Round
+// them and the layer stutters — it sits still while the pointer travels
+// half a pixel, then jumps — which reads as the tool being broken.
+// Bilinear reconstruction makes the content track the pointer
+// continuously. The 2×2 footprint is why this is
+// `Resample { support: 1.0 }` and not the family's exact-remap class.
+//
+// The cost normally charged against resampling — that repeated
+// application softens the image — is NOT charged here for whole-pixel
+// moves: an integer `dx` gives `fx == 0.0` exactly, and `mix(p00, p10,
+// 0.0)` is bit-exactly `p00`. Integer moves are lossless no matter how
+// many of them you make; only a fractional move ever filters.
+//
+// # Transparent is exact because the working space is premultiplied
+//
+// `PixelFormat::GPU_WORKING` is premultiplied (image-core §5.2), so
+// `vec4(0)` IS transparent black and interpolating toward it is the
+// correct alpha-weighted result. On a straight-alpha buffer the same
+// blend would drag RGB toward black and fringe the moved edge; here it
+// does not, and that is a property of the working space rather than of
+// this kernel being careful.
+//
+// Provenance: integer translation with bilinear reconstruction under a
+// selectable boundary extension is textbook (Wolberg, *Digital Image
+// Warping*, IEEE CS Press 1990, §3 inverse mapping / §5 bilinear
+// interpolation; boundary extension per Gonzalez & Woods, *Digital
+// Image Processing*, "padding"). No reference reading.
+
+/// What a sample outside the source reads as. The wire encoding is
+/// frozen: it is what crosses the uniform block and the wasm boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum EdgePolicy {
+    /// Outside → premultiplied transparent black. Photoshop's "Set to
+    /// Transparent"; the Move tool's default (moving a layer must
+    /// expose emptiness, not smear its border).
+    Transparent = 0,
+    /// Outside → the nearest edge texel. Photoshop's "Repeat Edge
+    /// Pixels"; the rule the rest of this family already uses.
+    Clamp = 1,
+    /// Outside → the opposite side, period = the source dims. Photoshop's
+    /// "Wrap Around"; this is what makes the kernel double as the Offset
+    /// filter and as the standard way to check a texture tiles.
+    Wrap = 2,
+}
+
+impl EdgePolicy {
+    pub fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Decode a wire value, REJECTING anything unrecognised. This is the
+    /// boundary check for values arriving from JS/wasm, where the param
+    /// is just a number.
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Transparent),
+            1 => Some(Self::Clamp),
+            2 => Some(Self::Wrap),
+            _ => None,
+        }
+    }
+
+    /// Decode a wire value, CLAMPING anything unrecognised to `Clamp`.
+    /// This mirrors the shader term-for-term: the WGSL tests for `Wrap`
+    /// and `Transparent` and treats every other bit pattern as `Clamp`,
+    /// so a caller that would rather degrade than fail gets exactly the
+    /// pixels the GPU would produce. `from_u32` is the right choice at a
+    /// UI boundary; this is the right choice when reproducing a stored
+    /// param block whose producer may be newer.
+    pub fn from_u32_or_clamp(v: u32) -> Self {
+        Self::from_u32(v).unwrap_or(Self::Clamp)
+    }
+}
+
+/// Offset params: the translation in PIXELS (positive `dx` moves the
+/// content right, positive `dy` moves it down — screen convention, y
+/// grows down) and the edge policy.
+///
+/// IDENTITY: `dx == 0.0 && dy == 0.0` returns the input unchanged, for
+/// EVERY edge policy and under EVERY mask. The zero offset makes both
+/// bilinear fractions exactly zero, so the blend collapses to `p00` —
+/// the texel under the output — and the mask epilogue then mixes that
+/// value with itself. No special case in the shader implements this; it
+/// falls out of the arithmetic, which is why it cannot rot.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct OffsetParams {
+    pub dx: f32,
+    pub dy: f32,
+    /// An [`EdgePolicy`] as `u32` (see its docs for the frozen encoding).
+    pub edge: u32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl OffsetParams {
+    /// The typed constructor — an out-of-range policy is unrepresentable
+    /// here by construction. Decode untyped wire values with
+    /// [`EdgePolicy::from_u32`] (rejecting) or
+    /// [`EdgePolicy::from_u32_or_clamp`] (shader-matching).
+    pub fn new(dx: f32, dy: f32, edge: EdgePolicy) -> Self {
+        Self {
+            dx,
+            dy,
+            edge: edge.as_u32(),
+            _abi_pad: 0,
+        }
+    }
+
+    /// The identity offset under `edge` — a zero translation.
+    pub fn identity(edge: EdgePolicy) -> Self {
+        Self::new(0.0, 0.0, edge)
+    }
+
+    /// True when this param block is the identity (see the type docs).
+    pub fn is_identity(&self) -> bool {
+        self.dx == 0.0 && self.dy == 0.0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const OFFSET_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "dx",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "dy",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "edge",
+        wgsl_ty: "u32",
+    },
+];
+
+/// Translate the layer content by `(dx, dy)` pixels with a selectable
+/// edge policy — the Move tool's kernel, and Photoshop's Offset filter
+/// at `edge == Wrap`. Backward-mapped and bilinear, so sub-pixel
+/// offsets are smooth; integer offsets are bit-exact.
+///
+/// IDENTITY: `dx == 0.0 && dy == 0.0` returns the input unchanged under
+/// every edge policy and every mask.
+pub static GEOM_OFFSET: KernelDef = KernelDef {
+    id: "geom.offset",
+    class: KernelClass::Resample { support: 1.0 },
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<OffsetParams>(),
+        fields: OFFSET_FIELDS,
+    },
+    wgsl: GEOM_OFFSET_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const GEOM_OFFSET_WGSL: &str = "\
+// paged.image kernel `geom.offset` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    dx: f32,
+    dy: f32,
+    edge: u32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+// One tap under the selected edge policy. The FALLBACK IS CLAMP: any
+// unrecognised policy value degrades to the family's existing rule
+// rather than reading garbage or branching into undefined behaviour.
+// `EdgePolicy::from_u32_or_clamp` mirrors this on the Rust side.
+fn tap(p: vec2<i32>, dims: vec2<i32>) -> vec4<f32> {
+    if (params.edge == 2u) {
+        // WRAP. Two mods, because WGSL's `%` takes the sign of the
+        // dividend, so a negative coordinate needs the bias to land in
+        // [0, dim). max(1) keeps a degenerate 0-dim binding from
+        // dividing by zero.
+        let d = max(dims, vec2<i32>(1, 1));
+        return textureLoad(in0, ((p % d) + d) % d, 0);
+    }
+    if (params.edge == 0u) {
+        // TRANSPARENT. vec4(0) is transparent black in the
+        // PREMULTIPLIED working space, so interpolating toward it is
+        // the correct alpha-weighted edge — no dark fringe.
+        if (p.x < 0 || p.y < 0 || p.x >= dims.x || p.y >= dims.y) {
+            return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        }
+        return textureLoad(in0, p, 0);
+    }
+    // CLAMP (edge extend) — and the fallback for any other value.
+    return textureLoad(in0, clamp(p, vec2<i32>(0, 0), dims - vec2<i32>(1, 1)), 0);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(outp);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let wdims = vec2<i32>(textureDimensions(in0));
+
+    // Backward map: the output texel asks where it CAME FROM. The
+    // output texel centre is (x + 0.5, y + 0.5) and the source point is
+    // that minus the translation; converting back to texel-index space
+    // subtracts 0.5 again, so the halves cancel exactly. That exact
+    // cancellation is what makes an integer offset land on fx == fy ==
+    // 0.0 and stay bit-exact.
+    let sx = f32(xy.x) - params.dx;
+    let sy = f32(xy.y) - params.dy;
+
+    let x0 = floor(sx);
+    let y0 = floor(sy);
+    let fx = sx - x0;
+    let fy = sy - y0;
+    let i0 = vec2<i32>(i32(x0), i32(y0));
+
+    let p00 = tap(i0, wdims);
+    let p10 = tap(i0 + vec2<i32>(1, 0), wdims);
+    let p01 = tap(i0 + vec2<i32>(0, 1), wdims);
+    let p11 = tap(i0 + vec2<i32>(1, 1), wdims);
+
+    // Fixed blend order — x first, then y — mirrored term-for-term by
+    // any scalar reference, exactly as rotate_bilinear/warp_backward do.
+    let top = mix(p00, p10, fx);
+    let bot = mix(p01, p11, fx);
+    let result = mix(top, bot, fy);
+
+    let m = textureLoad(mask, xy, 0).r;
+    let a = textureLoad(in0, clamp(xy, vec2<i32>(0, 0), wdims - vec2<i32>(1, 1)), 0);
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
     &GEOM_FLIP_H,
     &GEOM_FLIP_V,
@@ -904,6 +1180,7 @@ pub static FAMILY: &[&KernelDef] = &[
     &GEOM_ROTATE_BILINEAR,
     &GEOM_WARP_BACKWARD,
     &GEOM_MOSAIC,
+    &GEOM_OFFSET,
 ];
 
 #[cfg(test)]

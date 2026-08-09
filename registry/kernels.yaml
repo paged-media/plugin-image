@@ -1495,6 +1495,59 @@
   tests:
     rust: ["image-conformance/tests/family_conv.rs"]
 
+- id: geom.offset
+  rust_path: families::geom::GEOM_OFFSET
+  state_row: image.kernel.family-t2
+  class: resample
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "the Move tool moves PIXELS, which is a different operation from the host Selection tool moving the FRAME; Photoshop's Offset filter is the same kernel at edge=wrap"
+    - "not subsumed by geom.warp_backward: its four kinds are centre-fixed scale/rotation/sinusoid, its param block has no dx/dy, and its tap is clamp-only — wrap is a different function of the coordinate, not a variation on a clamp"
+    - "sub-pixel offsets are bilinear rather than rounded so a drag tracks the pointer instead of stuttering; an integer offset gives fx==0 exactly, so whole-pixel moves stay bit-exact and lossless however many are made"
+    - "identity dx=dy=0 is structural, not special-cased: the two half-pixel conversions cancel, so mix(p00, p10, 0.0) is bit-exactly p00 for every edge policy and every mask value"
+  tests:
+    rust: ["image-kernels/tests/geom_offset.rs"]
+- id: conv.lens
+  rust_path: families::conv::CONV_LENS
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "the one blur that cannot be composed from the others: a Gaussian spreads a bright speck into a dim smudge, a lens spreads it into a bright DISC"
+    - "needs a flat-topped support (so the bokeh ball has a rim) and a non-linear weight (so highlights survive the divide by tap count)"
+    - "weight-boost-then-unboost is the standard real-time bokeh approximation; not a port of Adobe's, which additionally reads a depth map we have no equivalent for"
+    - "identity: radius below half a pixel returns the centre pixel rather than dividing a one-tap sum and calling it a blur"
+- id: conv.bilateral
+  rust_path: families::conv::CONV_BILATERAL
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Tomasi & Manduchi, Bilateral Filtering for Gray and Color Images (ICCV 1998) — standard literature"
+    - "weights each tap by colour distance as well as spatial distance, so taps across an edge count for almost nothing and the edge survives a blur strong enough to flatten the noise beside it"
+    - "sigma_range is the whole control: large degrades to a Gaussian, small degrades to the identity"
+    - "the centre tap always has weight 1, so the weight sum is never zero and the final blend is always defined"
+- id: conv.smart_sharpen
+  rust_path: families::conv::CONV_SMART_SHARPEN
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "unsharp masking with two gates plain unsharp has not got: a threshold below which local contrast is treated as noise and left alone, and a clamp on the correction"
+    - "the clamp is what suppresses halos — an unclamped high-contrast edge overshoots into the bright fringe that makes oversharpening recognisable at a glance"
+    - "identity: amount 0, and separately any region whose local contrast falls below the threshold"
 - id: conv.radial
   rust_path: families::conv::CONV_RADIAL
   state_row: image.kernel.family-t2
