@@ -2026,6 +2026,27 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (gid.x >= d.x || gid.y >= d.y) { return; }
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
     let a = textureLoad(in0, xy, 0);
+    // DELIBERATELY no unpremultiply. Do not change this to match the
+    // sibling adjust kernels, which is wrong in a way that is easy to
+    // miss. See RFI E-5.
+    //
+    // The 16 macro-generated adjust kernels bracket with
+    // `unpremul_rgb(a)` … `vec4(c * a.a, a.a)`, which is right ONLY if
+    // `in0` carries premultiplied data. It does not: `ingest.rs` and
+    // `apply_point_kernel` upload the decode bridge's bytes verbatim
+    // (`/255`, no alpha association), and `fill.rs` documents that the
+    // engine's working buffers are STRAIGHT — which is precisely why
+    // IT brackets with `cast.premultiply` and the adjust chain does
+    // not. Given straight input, the sibling bracket computes
+    // `f(rgb/a)·a` rather than `f(rgb)`: it preserves the FORMAT (the
+    // two scalings cancel) but applies the adjustment to a colour the
+    // pixel never had. Identical at `a = 1`, which is why nobody has
+    // noticed.
+    //
+    // Reading `a.rgb` straight is therefore correct here and the
+    // siblings are the ones to change. A GPU lane written against
+    // premultiplied stimulus reported this kernel as the broken one; I
+    // changed it to match, then reverted on the evidence above.
     let rgb = clamp(a.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 
     let w = weight_for(rgb, params.range);
