@@ -1136,6 +1136,18 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
   applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /** NOISE — despeckle; `amount` 0 is the identity. */
+  applyDespeckle(
+    handle: number,
+    edgeThreshold: number,
+    amount: number,
+  ): Promise<DecodedInfo>;
+  /** NOISE — dust & scratches; `radius` is capped at the kernel ROI. */
+  applyDustScratches(
+    handle: number,
+    radius: number,
+    threshold: number,
+  ): Promise<DecodedInfo>;
   /**
    * MOVE pixels by (dx, dy). `edge` 0 transparent / 1 clamp / 2 wrap.
    * dx=dy=0 is the identity for every policy.
@@ -1538,6 +1550,16 @@ export interface ImageWasmModule {
     spin: boolean,
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
+  apply_despeckle(
+    handle: number,
+    edge_threshold: number,
+    amount: number,
+  ): Promise<DecodedHandleWasm>;
+  apply_dust_scratches(
+    handle: number,
+    radius: number,
+    threshold: number,
+  ): Promise<DecodedHandleWasm>;
   apply_offset(
     handle: number,
     dx: number,
@@ -2055,6 +2077,16 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyMosaic(handle, cellPx) {
       return decodedInfoOf(await wasm.apply_mosaic(handle, cellPx));
+    },
+    async applyDespeckle(handle, edgeThreshold, amount) {
+      return decodedInfoOf(
+        await wasm.apply_despeckle(handle, edgeThreshold, amount),
+      );
+    },
+    async applyDustScratches(handle, radius, threshold) {
+      return decodedInfoOf(
+        await wasm.apply_dust_scratches(handle, radius, threshold),
+      );
     },
     async applyOffset(handle, dx, dy, edge) {
       return decodedInfoOf(await wasm.apply_offset(handle, dx, dy, edge));

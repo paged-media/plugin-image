@@ -1708,6 +1708,49 @@ mod wasm {
         apply_point_kernel(handle, &ADJUST_SELECTIVE_COLOR, params.as_bytes()).await
     }
 
+    /// NOISE — despeckle. `amount` 0 is the identity. The edge gate
+    /// means this smooths speckle WITHOUT softening an edge, which a
+    /// plain median cannot do.
+    #[wasm_bindgen]
+    pub async fn apply_despeckle(
+        handle: u32,
+        edge_threshold: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::morph::{RankDespeckleParams, RANK_DESPECKLE};
+        let params = RankDespeckleParams::new(edge_threshold, amount);
+        apply_point_kernel(handle, &RANK_DESPECKLE, params.as_bytes()).await
+    }
+
+    /// NOISE — dust & scratches. `threshold` 1.0 is the identity for
+    /// display-referred data, and `radius` 0 is the unconditional one.
+    /// The radius is CLAMPED to the kernel's declared ROI rather than
+    /// silently reading outside it.
+    #[wasm_bindgen]
+    pub async fn apply_dust_scratches(
+        handle: u32,
+        radius: u32,
+        threshold: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::morph::{
+            RankDustScratchesParams, DUST_SCRATCHES_MAX_RADIUS, RANK_DUST_SCRATCHES,
+        };
+        // Reject rather than clamp at the JS boundary: a caller asking
+        // for radius 12 wants a different filter than radius 4, and
+        // quietly giving them 4 is the kind of answer that gets
+        // mistaken for the kernel being weak.
+        if radius > u32::from(DUST_SCRATCHES_MAX_RADIUS) {
+            return Err(JsValue::from_str(&format!(
+                "dust & scratches radius {radius} exceeds the kernel maximum {} \
+                 (count-below median is O(n^2) in taps; a larger radius needs a \
+                 histogram method, which is a different kernel)",
+                DUST_SCRATCHES_MAX_RADIUS
+            )));
+        }
+        let params = RankDustScratchesParams::new(radius, threshold);
+        apply_point_kernel(handle, &RANK_DUST_SCRATCHES, params.as_bytes()).await
+    }
+
     /// MOVE the pixels of the active layer by (dx, dy). `edge` is
     /// 0 transparent / 1 clamp / 2 wrap; dx=dy=0 is the identity for
     /// every policy. At edge=2 this is Photoshop's Filter > Other >

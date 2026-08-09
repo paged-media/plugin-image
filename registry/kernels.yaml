@@ -1495,6 +1495,38 @@
   tests:
     rust: ["image-conformance/tests/family_conv.rs"]
 
+- id: rank.despeckle
+  rust_path: families::morph::RANK_DESPECKLE
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 2 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "gated on the INNER range s[7]-s[1] rather than max-min: a speckle is by construction an extreme, so it inflates max-min but not the inner range, while an edge puts two or more samples on each side and shows up in both"
+    - "that is what lets it smooth noise without softening an edge, which a plain median cannot do"
+    - "honest limit, documented at the kernel: two outliers on the SAME side shut the gate — the conservative failure, which leaves the pixel alone rather than damaging it"
+    - "full 9-tap sorting network (36 compare-exchanges, not the optimal 25) because ranks 1, 4 AND 7 are needed, not just the median"
+    - "identity: amount 0 — mix(centre, .., 0) is the centre bit-for-bit under either lerp formulation, for any mask value"
+  tests:
+    rust: ["image-kernels/tests/rank_noise.rs"]
+- id: rank.dust_scratches
+  rust_path: families::morph::RANK_DUST_SCRATCHES
+  state_row: image.kernel.family-t3
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: exact, value: 0 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "count-below (rank-bracket) median selection: EXACT, no histogram and no approximation, and unlike a comparator network its loop bounds can depend on a runtime radius"
+    - "radius bounded at 4 (9x9) because count-below is O(n^2) in taps — 81 iterations at r=1, 6561 at r=4, 390625 at r=12; past 4 the honest answer is a histogram method, which is a different kernel rather than a bigger loop bound"
+    - "the shader CLAMPS the radius rather than reading outside its declared ROI"
+    - "identity: threshold 1.0 with a strict > comparison, since values live in 0..1 — with the caveat recorded that scene-referred data above 1 makes 1.0 a real threshold, so radius 0 is the unconditional second identity"
+    - "tolerance is Exact because both branches write an existing f16 sample; the only arithmetic is the decision"
+  tests:
+    rust: ["image-kernels/tests/rank_noise.rs"]
 - id: geom.offset
   rust_path: families::geom::GEOM_OFFSET
   state_row: image.kernel.family-t2

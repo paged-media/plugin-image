@@ -2526,6 +2526,33 @@ export function makeImagePanel(session: ImageSession) {
           </button>
           <button
             type="button"
+            data-image-despeckle
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Smooths speckle without softening edges: it gates on the INNER range, which a speckle inflates and an edge does not."
+            onClick={() => void session.applyDespeckle(0.12, 1)}
+          >
+            Despeckle
+          </button>
+          <button
+            type="button"
+            data-image-dust-scratches
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Replaces a pixel with the neighbourhood median only where it differs by more than the threshold. Threshold 1 is the identity; 0 is a plain median."
+            onClick={() => void session.applyDustScratches(2, 0.15)}
+          >
+            Dust &amp; scratches
+          </button>
+          <button
+            type="button"
+            data-image-offset
+            disabled={s.busy || !s.gpu || !s.source}
+            title="Filter &gt; Other &gt; Offset — moves the pixels and wraps at the edge, which is what makes a texture tile seamlessly."
+            onClick={() => void session.offsetFilter(32, 32)}
+          >
+            Offset (wrap)
+          </button>
+          <button
+            type="button"
             data-image-lens-blur
             disabled={s.busy || !s.gpu || !s.source}
             title="Bokeh: a flat-topped disc, with highlights weighted up before the average and pulled back after — so a bright speck spreads as a bright ball, not a dim smudge."

@@ -385,6 +385,15 @@ export interface ImageSession {
   ): Promise<boolean>;
   /** PIXELATE — mosaic. `cellPx` <= 1 is the identity. */
   applyMosaic(cellPx: number): Promise<boolean>;
+  /** NOISE — despeckle; `amount` 0 is the identity. */
+  applyDespeckle(edgeThreshold: number, amount: number): Promise<boolean>;
+  /**
+   * NOISE — dust & scratches. `radius` above the kernel maximum is
+   * REJECTED rather than clamped: asking for a wider radius is asking
+   * for a different filter, and quietly narrowing it reads as the
+   * kernel being weak.
+   */
+  applyDustScratches(radius: number, threshold: number): Promise<boolean>;
   /**
    * MOVE the active layer's pixels. The host Selection tool moves the
    * FRAME on the page; this moves what is inside it.
@@ -1757,6 +1766,16 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     async applyMosaic(cellPx) {
       return this.applyEffect("Mosaic", (h) => engine!.applyMosaic(h, cellPx));
+    },
+    async applyDespeckle(edgeThreshold, amount) {
+      return this.applyEffect("Despeckle", (h) =>
+        engine!.applyDespeckle(h, edgeThreshold, amount),
+      );
+    },
+    async applyDustScratches(radius, threshold) {
+      return this.applyEffect("Dust & scratches", (h) =>
+        engine!.applyDustScratches(h, radius, threshold),
+      );
     },
     async offsetLayer(dx, dy, edge = EdgePolicy.Transparent) {
       return this.applyEffect("Move", (h) => engine!.applyOffset(h, dx, dy, edge));
