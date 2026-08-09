@@ -730,10 +730,12 @@ export function TypeSection({
         replaced with a box.
       </div>
       <div style={note}>
-        This paints PIXELS, not a text object — one run on one line, no
-        wrapping and no styles. For live, editable, wrapping text use the
-        host&apos;s text frame, which is a real text engine; a second one
-        living in here would drift from it.
+        This paints PIXELS, not a text object. Newlines break lines and
+        leading, tracking and size are live on the Character panel — but
+        there is no WRAPPING (a line ends where you end it), no
+        paragraph layout and no styles. For live, editable, wrapping
+        text use the host&apos;s text frame, which is a real text
+        engine; a second one living in here would drift from it.
       </div>
     </>
   );

@@ -1811,16 +1811,18 @@ export function straighten_crop_image(handle, x, y, w, h, degrees) {
  * @param {number} x
  * @param {number} y
  * @param {Float32Array} color
+ * @param {number} tracking_per_mille
+ * @param {number} leading_px
  * @returns {Promise<number>}
  */
-export function text_paint(handle, font_bytes, text, size_px, x, y, color) {
+export function text_paint(handle, font_bytes, text, size_px, x, y, color, tracking_per_mille, leading_px) {
     const ptr0 = passArray8ToWasm0(font_bytes, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passArrayF32ToWasm0(color, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.text_paint(handle, ptr0, len0, ptr1, len1, size_px, x, y, ptr2, len2);
+    const ret = wasm.text_paint(handle, ptr0, len0, ptr1, len1, size_px, x, y, ptr2, len2, tracking_per_mille, leading_px);
     return ret;
 }
 function __wbg_get_imports() {
@@ -2518,12 +2520,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 486, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 485, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 521, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 520, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

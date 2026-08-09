@@ -196,7 +196,19 @@ export interface ImageSessionState {
   /** RASTER TYPE settings. Session state rather than tool state: the
    *  string and face survive between clicks, which is what makes setting
    *  several runs of the same type usable. */
-  type: { text: string; family: string; sizePx: number };
+  type: {
+    text: string;
+    family: string;
+    sizePx: number;
+    /** Letter spacing in 1/1000 em — IDML's unit, and UNITLESS, so it
+     *  crosses the px/pt boundary unchanged (unlike size and leading). */
+    trackingPerMille: number;
+    /** Baseline-to-baseline distance in IMAGE PX, or null for AUTO —
+     *  the face's own line height. Auto is not `1.2 × size`: a face
+     *  carries its own ascent/descent/gap, and honouring them is what
+     *  makes two faces at one size lead correctly. */
+    leadingPx: number | null;
+  };
   /** POINTS PER IMAGE PIXEL for the frame this session last composited
    *  into, or null before the first composite.
    *
@@ -360,7 +372,15 @@ export interface ImageSession {
    *  the host, flatten its curves, and make it the selection. */
   selectionFromPath(): Promise<boolean>;
   /** Update the type settings the tool reads on its next click. */
-  setType(p: Partial<{ text: string; family: string; sizePx: number }>): void;
+  setType(
+    p: Partial<{
+      text: string;
+      family: string;
+      sizePx: number;
+      trackingPerMille: number;
+      leadingPx: number | null;
+    }>,
+  ): void;
   /** RASTER TYPE: paint shaped, rasterized text into the active layer at
    *  the BASELINE origin `point` (image px).
    *
@@ -583,7 +603,13 @@ export function createImageSession(host: BundleHost): ImageSession {
     layers: EMPTY_LAYER_STACK,
     history: null,
     layersNote: null,
-    type: { text: "", family: "Helvetica", sizePx: 48 },
+    type: {
+      text: "",
+      family: "Helvetica",
+      sizePx: 48,
+      trackingPerMille: 0,
+      leadingPx: null,
+    },
     ptPerPx: null,
     cloneSource: null,
     channels: null,
@@ -2060,6 +2086,10 @@ export function createImageSession(host: BundleHost): ImageSession {
           x,
           y,
           state.brush.color,
+          state.type.trackingPerMille,
+          // The wasm reads non-positive as AUTO, so null passes through
+          // as 0 rather than needing a second parameter to mean "unset".
+          state.type.leadingPx ?? 0,
         );
       } catch (err) {
         setStatus(`Type failed: ${err instanceof Error ? err.message : err}`);

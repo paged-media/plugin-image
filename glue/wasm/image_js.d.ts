@@ -822,7 +822,7 @@ export function straighten_crop_image(handle: number, x: number, y: number, w: n
  * (`.notdef`), so a caller can say "3 characters are missing from
  * this font" instead of silently dropping them.
  */
-export function text_paint(handle: number, font_bytes: Uint8Array, text: string, size_px: number, x: number, y: number, color: Float32Array): Promise<number>;
+export function text_paint(handle: number, font_bytes: Uint8Array, text: string, size_px: number, x: number, y: number, color: Float32Array, tracking_per_mille: number, leading_px: number): Promise<number>;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -934,7 +934,7 @@ export interface InitOutput {
     readonly selection_to_paths: (a: number, b: number) => [number, number, number, number];
     readonly selection_transfer: (a: number) => [number, number, number];
     readonly straighten_crop_image: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
-    readonly text_paint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => any;
+    readonly text_paint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => any;
     readonly qcms_enable_iccv4: () => void;
     readonly qcms_profile_precache_output_transform: (a: number) => void;
     readonly qcms_transform_data_bgra_out_lut: (a: number, b: number, c: number, d: number) => void;

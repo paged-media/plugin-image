@@ -901,6 +901,14 @@ export interface ImageEngine {
     x: number,
     y: number,
     color: Rgba01,
+    /** Letter spacing in 1/1000 em. Unitless by construction, so it
+     *  crosses the px/pt boundary unchanged. */
+    trackingPerMille: number,
+    /** Baseline-to-baseline distance in image px; non-positive means
+     *  AUTO — the face's own line height. `text` may contain newlines,
+     *  and each line is shaped INDEPENDENTLY so ligatures and kerning
+     *  never reach across a break. */
+    leadingPx: number,
   ): Promise<number>;
   /** C-6 — copy a LEVEL-0 tile window `(x, y, w, h)` out of a decoded
    *  image as tightly packed RGBA8. Edge tiles are clamped to the image
@@ -1219,6 +1227,8 @@ export interface ImageWasmModule {
     x: number,
     y: number,
     color: Float32Array,
+    trackingPerMille: number,
+    leadingPx: number,
   ): Promise<number>;
   encode_image(
     rgba: Uint8Array,
@@ -1541,7 +1551,17 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       h.free();
       return info;
     },
-    textPaint: (handle, fontBytes, text, sizePx, x, y, color) =>
+    textPaint: (
+      handle,
+      fontBytes,
+      text,
+      sizePx,
+      x,
+      y,
+      color,
+      trackingPerMille,
+      leadingPx,
+    ) =>
       wasm.text_paint(
         handle,
         fontBytes,
@@ -1550,6 +1570,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         x,
         y,
         Float32Array.from(color),
+        trackingPerMille,
+        leadingPx,
       ),
     async fillContentAware(handle) {
       const h = await wasm.fill_content_aware(handle);

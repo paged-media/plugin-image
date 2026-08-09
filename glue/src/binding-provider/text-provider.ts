@@ -92,6 +92,20 @@ export const VALUED_PATHS: readonly PropertyPath[] = [
   // fact about placed rasters — Photoshop models exactly it — not an
   // artifact of the conversion.
   "characterFontSize",
+  // TRACKING (2026-08-09, with multi-line). The one setting on this
+  // panel that needs NO unit bridge: `characterTracking` binds to a
+  // bare numeric scrub and IDML measures it in 1/1000 em, which is
+  // relative to the size — so the number means the same thing whether
+  // the caller thinks in image pixels or points. It crosses unchanged.
+  "characterTracking",
+  // LEADING (2026-08-09). Converts exactly like the size, through
+  // `ptPerPx`, because it binds to the same length widget.
+  //
+  // It is only meaningful now that the type lane lays out MORE THAN ONE
+  // LINE — before that it would have been a control with nothing to
+  // act on, which is the kind of live-looking dead surface the brand
+  // honesty rule forbids.
+  "characterLeading",
 ];
 
 /**
@@ -121,8 +135,6 @@ export const ABSENT_PATHS: readonly PropertyPath[] = [
   // one line — they are absent because the FEATURE is absent, not
   // because of any unit or binding problem.
   "characterFontStyle",
-  "characterLeading",
-  "characterTracking",
   "characterKerningMethod",
   "characterBaselineShift",
   "characterHorizontalScale",
@@ -210,6 +222,36 @@ export function makeTextBindingProvider(
             value: (t.sizePx * ptPerPx) as unknown as Value,
           };
         }
+        case "characterTracking":
+          // No conversion, and that is the point — 1/1000 em is
+          // size-relative, so it is already the panel's number.
+          return {
+            kind: "value",
+            value: t.trackingPerMille as unknown as Value,
+          };
+        case "characterLeading": {
+          if (t.leadingPx === null) {
+            // AUTO. The face decides, and the plugin does not know the
+            // resolved number without shaping — so `absent` (a blank
+            // control) rather than a computed value the user did not
+            // set and cannot round-trip.
+            return {
+              kind: "absent",
+              reason: "leading is AUTO — the face's own line height",
+            };
+          }
+          const ptPerPx = st.ptPerPx;
+          if (ptPerPx === null || !(ptPerPx > 0)) {
+            return {
+              kind: "absent",
+              reason: "no composite yet — points per pixel is unknown",
+            };
+          }
+          return {
+            kind: "value",
+            value: (t.leadingPx * ptPerPx) as unknown as Value,
+          };
+        }
         default:
           if (ABSENT_PATHS.includes(request.path)) {
             return {
@@ -271,6 +313,35 @@ export function makeTextBindingProvider(
           // anyway; rounding here keeps the value the panel reads back
           // equal to the one it committed, within a pixel.
           session.setType({ sizePx: Math.max(1, Math.round(pt / ptPerPx)) });
+          return ok();
+        }
+        case "characterTracking": {
+          const per = Number(request.value);
+          if (!Number.isFinite(per)) {
+            return { kind: "decline", reason: "tracking must be a number" };
+          }
+          // NEGATIVE IS LEGAL and deliberately not clamped — tightening
+          // is half of what tracking is for.
+          session.setType({ trackingPerMille: per });
+          return ok();
+        }
+        case "characterLeading": {
+          const pt = Number(request.value);
+          const ptPerPx = session.state().ptPerPx;
+          if (ptPerPx === null || !(ptPerPx > 0)) {
+            return {
+              kind: "decline",
+              reason: "no composite yet — points per pixel is unknown",
+            };
+          }
+          if (!Number.isFinite(pt) || pt <= 0) {
+            // A cleared field means AUTO rather than an error: it is the
+            // only way back to the face's own line height once a number
+            // has been typed.
+            session.setType({ leadingPx: null });
+            return ok();
+          }
+          session.setType({ leadingPx: Math.max(1, Math.round(pt / ptPerPx)) });
           return ok();
         }
         default:

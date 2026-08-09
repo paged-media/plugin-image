@@ -114,6 +114,13 @@ describe("the raster type lane", () => {
       text: "",
       family: "Helvetica",
       sizePx: 48,
+      // Tracking defaults to ZERO — the face's own advances, untouched.
+      trackingPerMille: 0,
+      // Leading defaults to AUTO (null), not to a multiple of the size:
+      // the FACE knows its line height and two faces at one size lead
+      // differently. `toEqual` is exact, so this also pins that no
+      // fourth setting appeared without a decision.
+      leadingPx: null,
     });
     session.setType({ text: "Hello", sizePx: 64 });
     expect(session.state().type).toMatchObject({

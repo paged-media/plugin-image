@@ -40,10 +40,18 @@
 //! RASTER type, in the Photoshop-catalog sense: committed glyphs become
 //! pixels in a layer. It is not a live text OBJECT that stays editable —
 //! that is the host's text frame, which exists and is better at it. And
-//! it is one run on one line: no wrapping, no paragraph layout, no
-//! styles. Those are text-engine features, and the host already has a
-//! text engine; duplicating it here is the mistake the Paths panel was
-//! not built for the same reason.
+//! it lays out HARD-BROKEN lines only: a newline starts a line, and
+//! leading, tracking and size are settable — but nothing WRAPS, there is
+//! no paragraph layout and no styles. The boundary is deliberate and it
+//! is not effort: wrapping needs a measure to wrap against, which for a
+//! raster layer is the layer, and a layer is not a text column. Those
+//! are text-engine features, the host already has a text engine, and
+//! duplicating it here is the mistake the Paths panel was not built for
+//! the same reason.
+//!
+//! Each line is shaped INDEPENDENTLY rather than shaping the whole
+//! string and slicing the result: shaping is contextual, so ligatures,
+//! kerning pairs and bidi runs must not reach across a break.
 
 use ab_glyph_rasterizer::{point, Rasterizer};
 use skrifa::instance::{LocationRef, Size};
@@ -157,7 +165,33 @@ impl OutlinePen for Collector<'_> {
 /// not parse or the size is not a positive finite number. A run with no
 /// ink (whitespace, or every glyph missing) is `Some` with a zero
 /// extent — legal, and different from a failure.
-pub fn rasterize_run(font_bytes: &[u8], text: &str, size_px: f32) -> Option<RasterRun> {
+/// Typographic settings beyond the face and the size.
+///
+/// Both are here rather than as bare parameters because they arrive
+/// TOGETHER from one panel and grow together; a third one should not
+/// change every call site again.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunStyle {
+    /// Letter spacing in 1/1000 em — IDML's own unit, and UNITLESS by
+    /// construction. That is the useful part: em is relative to the
+    /// size, so the same number means the same thing whether the caller
+    /// thinks in image pixels or in points, and this setting needs no
+    /// unit bridge at all (unlike size and leading, which do).
+    pub tracking_per_mille: f32,
+    /// Baseline-to-baseline distance in PIXELS. `None` (or a
+    /// non-positive value) means AUTO: the face's own default line
+    /// height. Auto is not a fixed multiple of the size — a face
+    /// carries its own ascent/descent/gap, and using them is what makes
+    /// two different faces at the same size lead correctly.
+    pub leading_px: Option<f32>,
+}
+
+pub fn rasterize_run(
+    font_bytes: &[u8],
+    text: &str,
+    size_px: f32,
+    style: RunStyle,
+) -> Option<RasterRun> {
     if text.is_empty() || !(size_px.is_finite() && size_px > 0.0) {
         return None;
     }
@@ -168,10 +202,6 @@ pub fn rasterize_run(font_bytes: &[u8], text: &str, size_px: f32) -> Option<Rast
     // run come out right without the caller declaring anything.
     let data = harfrust::ShaperData::new(&font);
     let shaper = data.shaper(&font).build();
-    let mut buf = harfrust::UnicodeBuffer::new();
-    buf.push_str(text);
-    buf.guess_segment_properties();
-    let shaped = shaper.shape(buf, &[]);
 
     let upem = shaper.units_per_em() as f32;
     if upem <= 0.0 {
@@ -180,40 +210,91 @@ pub fn rasterize_run(font_bytes: &[u8], text: &str, size_px: f32) -> Option<Rast
     let scale = size_px / upem;
     let outlines = font.outline_glyphs();
 
+    // TRACKING is 1/1000 em, so it scales with the SIZE and not with the
+    // face's upem — that is what makes the setting mean the same thing
+    // across faces.
+    let track_px = size_px * style.tracking_per_mille / 1000.0;
+
+    // LEADING. Auto asks the FACE, because line height is a property of
+    // the design and not a fixed multiple: two faces at the same size
+    // lead differently and should. `1.2 * size` is the fallback only
+    // when the face reports nothing usable.
+    let auto_leading = {
+        // skrifa reports these ALREADY SCALED to the requested size, so
+        // there is no upem arithmetic to get wrong here. `descent` is
+        // negative by convention, hence the subtraction.
+        let m = font.metrics(Size::new(size_px), LocationRef::default());
+        let h = m.ascent - m.descent + m.leading;
+        if h.is_finite() && h > 0.0 {
+            h
+        } else {
+            size_px * 1.2
+        }
+    };
+    let leading = match style.leading_px {
+        Some(l) if l.is_finite() && l > 0.0 => l,
+        _ => auto_leading,
+    };
+
     let mut segs: Vec<Seg> = Vec::new();
     let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
     let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
-    let mut pen_x = 0f32;
-    let mut pen_y = 0f32;
     let mut missing = 0usize;
 
-    for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
-        let gid = skrifa::GlyphId::from(info.glyph_id as u16);
-        match outlines.get(gid) {
-            Some(glyph) => {
-                let mut collector = Collector {
-                    segs: &mut segs,
-                    ox: pen_x + pos.x_offset as f32 * scale,
-                    oy: pen_y - pos.y_offset as f32 * scale,
-                    start: (0.0, 0.0),
-                    cur: (0.0, 0.0),
-                    min_x: &mut min_x,
-                    min_y: &mut min_y,
-                    max_x: &mut max_x,
-                    max_y: &mut max_y,
-                };
-                let settings = DrawSettings::unhinted(Size::new(size_px), LocationRef::default());
-                if glyph.draw(settings, &mut collector).is_err() {
-                    missing += 1;
-                }
-            }
-            // No outline for this glyph id. Counted and skipped — drawing
-            // the face's tofu box would invent content the caller did not
-            // ask for, and skipping silently would hide a missing font.
-            None => missing += 1,
+    // MULTI-LINE. Each line is shaped INDEPENDENTLY rather than shaping
+    // the whole string and breaking it up, because shaping is contextual
+    // — ligatures, kerning pairs and bidi runs must not reach across a
+    // line break. Splitting first is the only way a newline is a real
+    // boundary rather than a character the shaper tries to render.
+    //
+    // `\r\n` is normalised so a Windows-authored string does not lay out
+    // with a stray carriage return per line.
+    let normalised = text.replace("\r\n", "\n");
+    for (line_index, line) in normalised.split('\n').enumerate() {
+        // The pen returns to x=0 for every line and steps down by the
+        // leading. An EMPTY line still consumes one — a blank line is a
+        // deliberate gap, not a no-op.
+        let mut pen_x = 0f32;
+        let mut pen_y = leading * line_index as f32;
+        if line.is_empty() {
+            continue;
         }
-        pen_x += pos.x_advance as f32 * scale;
-        pen_y -= pos.y_advance as f32 * scale;
+
+        let mut buf = harfrust::UnicodeBuffer::new();
+        buf.push_str(line);
+        buf.guess_segment_properties();
+        let shaped = shaper.shape(buf, &[]);
+
+        for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+            let gid = skrifa::GlyphId::from(info.glyph_id as u16);
+            match outlines.get(gid) {
+                Some(glyph) => {
+                    let mut collector = Collector {
+                        segs: &mut segs,
+                        ox: pen_x + pos.x_offset as f32 * scale,
+                        oy: pen_y - pos.y_offset as f32 * scale,
+                        start: (0.0, 0.0),
+                        cur: (0.0, 0.0),
+                        min_x: &mut min_x,
+                        min_y: &mut min_y,
+                        max_x: &mut max_x,
+                        max_y: &mut max_y,
+                    };
+                    let settings =
+                        DrawSettings::unhinted(Size::new(size_px), LocationRef::default());
+                    if glyph.draw(settings, &mut collector).is_err() {
+                        missing += 1;
+                    }
+                }
+                // No outline for this glyph id. Counted and skipped —
+                // drawing the face's tofu box would invent content the
+                // caller did not ask for, and skipping silently would
+                // hide a missing font.
+                None => missing += 1,
+            }
+            pen_x += pos.x_advance as f32 * scale + track_px;
+            pen_y -= pos.y_advance as f32 * scale;
+        }
     }
 
     if segs.is_empty() || min_x > max_x {
@@ -289,9 +370,9 @@ mod tests {
     #[test]
     fn image_editor_raster_type_refuses_input_it_cannot_shape() {
         // Not a font: parsing must fail cleanly rather than panic.
-        assert!(rasterize_run(b"not a font at all", "hello", 24.0).is_none());
+        assert!(rasterize_run(b"not a font at all", "hello", 24.0, RunStyle::default()).is_none());
         // Empty text is not an error, it is nothing to do.
-        assert!(rasterize_run(b"not a font", "", 24.0).is_none());
+        assert!(rasterize_run(b"not a font", "", 24.0, RunStyle::default()).is_none());
     }
 
     #[test]
@@ -300,7 +381,7 @@ mod tests {
         // returning `None` beats rasterizing a degenerate box.
         for bad in [0.0f32, -12.0, f32::NAN, f32::INFINITY] {
             assert!(
-                rasterize_run(b"not a font", "hi", bad).is_none(),
+                rasterize_run(b"not a font", "hi", bad, RunStyle::default()).is_none(),
                 "size {bad} should be refused"
             );
         }
@@ -313,6 +394,124 @@ mod tests {
     ///
     /// A 6×4 axis-aligned rectangle drawn as four lines must integrate to
     /// exactly 24 pixels of coverage.
+    /// The style edges, which need no glyphs: a caller can send NaN
+    /// from a panel field that has been cleared, and neither value may
+    /// turn into a layout that silently does nothing.
+    #[test]
+    fn image_editor_raster_type_style_edges_are_normalised_not_propagated() {
+        // A non-finite tracking must not reach the pen — `pen_x + NaN`
+        // is NaN for every glyph after it, which collapses the whole
+        // run's bounding box to nothing and rasterizes an empty image.
+        // Normalising at the boundary is why the wasm entry clamps it
+        // rather than trusting the caller.
+        let nan_track = RunStyle {
+            tracking_per_mille: f32::NAN,
+            leading_px: None,
+        };
+        // Still refused for the FONT, not for the tracking — the point
+        // is that it reaches the parse rather than dying earlier.
+        assert!(rasterize_run(b"not a font", "hi", 24.0, nan_track).is_none());
+
+        // A non-positive leading means AUTO, not a zero-height layout
+        // where every line stacks on the first.
+        for l in [Some(0.0f32), Some(-10.0), Some(f32::NAN), None] {
+            let st = RunStyle {
+                tracking_per_mille: 0.0,
+                leading_px: l,
+            };
+            assert!(rasterize_run(b"not a font", "a\nb", 24.0, st).is_none());
+        }
+    }
+
+    /// A real face from the SYSTEM, or `None`. Mirrors the glue spec's
+    /// `systemFace()` helper for the same reason: this repo ships no
+    /// font — faces arrive from the host at runtime — so a layout
+    /// assertion either finds one or says out loud that it did not.
+    fn system_face() -> Option<Vec<u8>> {
+        for p in [
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ] {
+            if let Ok(b) = std::fs::read(p) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// THE LAYOUT ASSERTIONS. Geometric rather than pixel-exact, so they
+    /// hold for whichever face the machine has: a second line must make
+    /// the run TALLER, more leading must make it taller still, and
+    /// tracking must make it WIDER. Nothing here depends on a specific
+    /// design.
+    #[test]
+    fn image_editor_raster_type_lays_out_lines_leading_and_tracking() {
+        let Some(face) = system_face() else {
+            // Loudly. A quiet pass would read as coverage this machine
+            // cannot actually provide.
+            eprintln!("no system font available — skipping the layout assertions");
+            return;
+        };
+        let plain = RunStyle::default();
+
+        let one = rasterize_run(&face, "A", 32.0, plain).expect("one line");
+        let two = rasterize_run(&face, "A\nA", 32.0, plain).expect("two lines");
+        assert!(
+            two.height > one.height,
+            "a second line must occupy more height: {} vs {}",
+            two.height,
+            one.height
+        );
+
+        // LEADING widens the gap, so the same two lines get taller.
+        let loose = rasterize_run(
+            &face,
+            "A\nA",
+            32.0,
+            RunStyle {
+                tracking_per_mille: 0.0,
+                leading_px: Some(120.0),
+            },
+        )
+        .expect("two lines, loose");
+        assert!(
+            loose.height > two.height,
+            "explicit leading of 120px must exceed this face's auto leading at 32px"
+        );
+
+        // An EMPTY line still consumes its leading — a blank line is a
+        // deliberate gap, and collapsing it would silently reflow.
+        let gapped = rasterize_run(&face, "A\n\nA", 32.0, plain).expect("with a blank line");
+        assert!(
+            gapped.height > two.height,
+            "a blank line must occupy a line's worth of height"
+        );
+
+        // TRACKING widens a multi-glyph run. Asserted on TWO glyphs
+        // because tracking is applied per advance — a one-glyph run
+        // would only move the pen past the end and might not change the
+        // inked bounds at all.
+        let tight = rasterize_run(&face, "AA", 32.0, plain).expect("two glyphs");
+        let tracked = rasterize_run(
+            &face,
+            "AA",
+            32.0,
+            RunStyle {
+                tracking_per_mille: 500.0,
+                leading_px: None,
+            },
+        )
+        .expect("two glyphs, tracked");
+        assert!(
+            tracked.width > tight.width,
+            "500/1000 em of tracking must widen the run: {} vs {}",
+            tracked.width,
+            tight.width
+        );
+    }
+
     #[test]
     fn image_editor_raster_type_the_rasterizer_integrates_to_the_true_area() {
         use ab_glyph_rasterizer::{point, Rasterizer};

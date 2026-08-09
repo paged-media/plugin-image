@@ -204,15 +204,23 @@ describe("the character provider", () => {
       .map((p) => p.provides)
       .find((p) => p.paths?.includes("characterFontFamily"))!;
 
-    // Leading and paragraph alignment are meaningless on one rasterized
-    // line — but they are DECLARED, so the host asks us and gets a
-    // blank rather than asking core and painting the text caret's
-    // paragraph over an image frame.
-    expect(text.paths).toContain("characterLeading");
+    // Paragraph alignment and a style axis are meaningless on a raster
+    // run — but they are DECLARED, so the host asks us and gets a blank
+    // rather than asking core and painting the text caret's paragraph
+    // over an image frame.
+    //
+    // NOTE the example changed on 2026-08-09: this used to use
+    // `characterLeading`, which became WRITABLE when the type lane
+    // learned to lay out more than one line. A test whose example moves
+    // out from under it is the test doing its job — the claim being
+    // made is about ownership-without-value, so it needs a path that
+    // still HAS no value.
     expect(text.paths).toContain("paragraphJustification");
+    expect(text.paths).toContain("characterFontStyle");
     // …and they are NOT writable, so the control renders read-only
     // instead of offering a commit that lands nowhere.
-    expect(text.writablePaths).not.toContain("characterLeading");
+    expect(text.writablePaths).not.toContain("paragraphJustification");
+    expect(text.writablePaths).not.toContain("characterFontStyle");
 
     bundle.dispose();
     handle.dispose();

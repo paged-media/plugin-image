@@ -1419,18 +1419,35 @@ mod wasm {
         x: f32,
         y: f32,
         color: Vec<f32>,
+        // `tracking_per_mille` — letter spacing in 1/1000 em (IDML's
+        // unit, and unitless, so it needs no px/pt conversion at the
+        // boundary). `leading_px` — baseline-to-baseline distance in
+        // image px; non-positive or NaN means AUTO, the face's own line
+        // height. Both are documented here rather than on the
+        // parameters because rustc allows no doc comment there.
+        tracking_per_mille: f32,
+        leading_px: f32,
     ) -> Result<usize, JsValue> {
         if color.len() != 4 {
             return Err(JsValue::from_str(
                 "text colour must be 4 floats (straight RGBA in [0,1])",
             ));
         }
-        let run = crate::text::rasterize_run(font_bytes, text, size_px).ok_or_else(|| {
-            JsValue::from_str(
-                "could not shape this text: the font did not parse, or the size \
+        let style = crate::text::RunStyle {
+            tracking_per_mille: if tracking_per_mille.is_finite() {
+                tracking_per_mille
+            } else {
+                0.0
+            },
+            leading_px: (leading_px.is_finite() && leading_px > 0.0).then_some(leading_px),
+        };
+        let run =
+            crate::text::rasterize_run(font_bytes, text, size_px, style).ok_or_else(|| {
+                JsValue::from_str(
+                    "could not shape this text: the font did not parse, or the size \
                  is not a positive finite number",
-            )
-        })?;
+                )
+            })?;
         if run.width == 0 || run.height == 0 {
             // Legal and empty — whitespace, or every glyph missing. The
             // caller still gets the missing count, which is the useful
