@@ -114,7 +114,7 @@ fn a_reduced_png_decodes_back_bit_for_bit() {
         let back = image_js::ingest::decode_rgba8(&png)
             .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
         assert_eq!(
-            back.rgba.as_ref(),
+            back.rgba.raw(),
             buf.as_slice(),
             "{name}: the reduction is supposed to be LOSSLESS, and this buffer \
              came back different"

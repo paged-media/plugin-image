@@ -90,7 +90,7 @@ pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
     /// Tightly packed straight RGBA8, row-major.
-    pub rgba: Arc<[u8]>,
+    pub rgba: crate::pixels::Pixels,
     /// What the RGB display transform did at ingest (CMS rung 1). The
     /// panel surfaces this so "sRGB assumed" is a stated state rather
     /// than a silent one.
@@ -459,7 +459,7 @@ impl DecodedImage {
         Ok(DecodedImage {
             width,
             height,
-            rgba: Arc::from(bytes),
+            rgba: crate::pixels::Pixels::from_rgba8(Arc::from(bytes)),
             // Raw bytes handed in by a caller carry no container and so no
             // profile; they are taken as already-working-space.
             display: crate::display::DisplayTreatment::AssumedSrgb,
@@ -491,7 +491,8 @@ impl DecodedImage {
             let src_off = (y0 as usize + row) * stride + x0 as usize * 4;
             let dst_off = row * tw as usize * 4;
             let len = tw as usize * 4;
-            out[dst_off..dst_off + len].copy_from_slice(&self.rgba[src_off..src_off + len]);
+            let src8 = self.rgba.to_rgba8();
+            out[dst_off..dst_off + len].copy_from_slice(&src8[src_off..src_off + len]);
         }
         (out, tw, th)
     }
@@ -837,7 +838,7 @@ pub async fn adjust_f16(
             width,
             height,
             // Unused by `build_adjust_chain` — it reads only the params.
-            rgba: Arc::from(Vec::new().into_boxed_slice()),
+            rgba: crate::pixels::Pixels::from_rgba8(Arc::from(Vec::new().into_boxed_slice())),
             display: crate::display::DisplayTreatment::AssumedSrgb,
             depth_reduced: false,
         };
@@ -1082,14 +1083,14 @@ pub async fn adjust_rgba8(
     selection: Option<Arc<SelectionCoverage>>,
 ) -> Result<Vec<u8>, IngestError> {
     if params.is_identity() {
-        return Ok(image.rgba.to_vec());
+        return Ok(image.rgba.to_rgba8().into_owned());
     }
 
     // The GPU kernel chain (skipped wholesale when only a curve is set).
     let mut pixels = if params.has_gpu_stage() {
         let mut pipe = Pipeline::new();
         pipe.set_selection(selection.clone());
-        let src = RawSource::new(image.width, image.height, RGBA8, image.rgba.clone())
+        let src = RawSource::new(image.width, image.height, RGBA8, image.rgba.raw_arc())
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         let node = pipe.source(Box::new(src));
         let node = build_adjust_chain(&mut pipe, node, params);
@@ -1100,7 +1101,7 @@ pub async fn adjust_rgba8(
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         target.into_pixels()
     } else {
-        image.rgba.to_vec()
+        image.rgba.to_rgba8().into_owned()
     };
 
     // Curves: a 256-entry tone LUT over the RGB channels (alpha untouched).
@@ -1225,7 +1226,7 @@ pub async fn straighten_crop_rgba8(
     // Rotate by −degrees: the FRAME turned by +degrees, so the content
     // must turn back by the same amount to land upright.
     let params = RotateBilinearParams::new(-degrees, center, center);
-    let win = crate::fill::rgba8_to_f16(&image.rgba);
+    let win = crate::fill::rgba8_to_f16(&image.rgba.to_rgba8());
     let out = image_gpu::execute_windowed_once_async(
         ctx,
         &GEOM_ROTATE_BILINEAR,
@@ -1359,8 +1360,14 @@ mod tests {
         let cropped = crop_rgba8(&img, 1, 0, 2, 1).expect("non-empty crop");
         assert_eq!((cropped.width, cropped.height), (2, 1));
         // Pixel 0 of the crop is source (1,0); pixel 1 is source (2,0).
-        assert_eq!((cropped.rgba[0], cropped.rgba[1]), (1, 0));
-        assert_eq!((cropped.rgba[4], cropped.rgba[5]), (2, 0));
+        assert_eq!(
+            (cropped.rgba.to_rgba8()[0], cropped.rgba.to_rgba8()[1]),
+            (1, 0)
+        );
+        assert_eq!(
+            (cropped.rgba.to_rgba8()[4], cropped.rgba.to_rgba8()[5]),
+            (2, 0)
+        );
     }
 
     #[test]
@@ -1450,7 +1457,7 @@ mod tests {
         // through has_gpu_stage()==false: build pixels from the image and
         // apply the LUT directly (mirrors the runner's curve-only branch).
         assert!(!params.has_gpu_stage(), "curve-only has no GPU stage");
-        let mut pixels = img.rgba.to_vec();
+        let mut pixels = img.rgba.to_rgba8().into_owned();
         apply_curve_lut(&mut pixels, params.curve_lut.as_ref().unwrap());
         // Pixel (0,0) was (0,0,0,255) → inverted RGB (255,255,255), alpha kept.
         assert_eq!(&pixels[0..4], &[255, 255, 255, 255]);

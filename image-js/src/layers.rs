@@ -213,9 +213,12 @@ pub struct Layer {
     /// 0–1.
     pub opacity: f32,
     pub blend: &'static KernelDef,
-    /// Canvas-extent, tightly packed straight RGBA8. `Arc` so a layer
-    /// can share the ingest's allocation and a snapshot is a pointer.
-    pub rgba: Arc<[u8]>,
+    /// Canvas-extent, tightly packed straight RGBA — at the depth the
+    /// buffer itself declares. `Pixels` carries that depth so a call
+    /// site cannot assume four bytes per pixel; the `Arc` inside means
+    /// a layer still shares the ingest's allocation and a snapshot is
+    /// still a pointer copy.
+    pub rgba: crate::pixels::Pixels,
     /// The layer MASK — a canvas-extent grayscale coverage field, or
     /// `None` for "fully opaque everywhere" (the overwhelming default,
     /// and cheaper than materializing a constant-one field per layer).
@@ -481,7 +484,7 @@ impl LayerStack {
                 locked: false,
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
-                rgba,
+                rgba: crate::pixels::Pixels::from_rgba8(rgba),
                 kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
@@ -528,7 +531,9 @@ impl LayerStack {
                 locked: false,
                 opacity: plate.opacity as f32 / 255.0,
                 blend: psd_blend_kernel(&plate.blend_key),
-                rgba: Arc::from(plate.rgba.clone().into_boxed_slice()),
+                rgba: crate::pixels::Pixels::from_rgba8(Arc::from(
+                    plate.rgba.clone().into_boxed_slice(),
+                )),
                 kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
@@ -616,7 +621,7 @@ impl LayerStack {
                 locked: false,
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
-                rgba: pixels,
+                rgba: crate::pixels::Pixels::from_rgba8(pixels),
                 mask: None,
                 mask_enabled: true,
                 group: None,
@@ -647,7 +652,7 @@ impl LayerStack {
             return Ok(()); // already smart — idempotent, not an error
         }
         layer.kind = LayerKind::Smart(Box::new(SmartSource {
-            rgba: Arc::clone(&layer.rgba),
+            rgba: layer.rgba.raw_arc(),
             width: w,
             height: h,
             scale: 1.0,
@@ -679,7 +684,7 @@ impl LayerStack {
         match &mut layer.kind {
             LayerKind::Smart(src) => {
                 src.scale = scale;
-                layer.rgba = rendered;
+                layer.rgba = crate::pixels::Pixels::from_rgba8(rendered);
                 Ok(())
             }
             _ => Err(IngestError::Unsupported(format!(
@@ -739,7 +744,7 @@ impl LayerStack {
                 locked: false,
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
-                rgba: pixels,
+                rgba: crate::pixels::Pixels::from_rgba8(pixels),
                 kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
@@ -1171,14 +1176,15 @@ impl LayerStack {
             .intersect(Region::new(0, 0, self.width, self.height))
             .unwrap_or(Region::new(0, 0, 0, 0));
         let outcome = {
-            let view = FlatImage::new(self.width, self.height, 4, &*active.rgba)
+            let active8 = active.rgba.to_rgba8();
+            let view = FlatImage::new(self.width, self.height, 4, &active8)
                 .ok_or_else(|| IngestError::Decode("layer pixels are mis-sized".into()))?;
             // The layer's stable ID is the entry's SCOPE, so undo lands
             // in the layer that was painted and not in whichever one
             // happens to be selected when the user reaches for it.
             self.journal.record(label, active.id as u64, &view, clipped)
         };
-        self.layers[self.active].rgba = pixels;
+        self.layers[self.active].rgba = crate::pixels::Pixels::from_rgba8(pixels);
         Ok(outcome)
     }
 
@@ -1227,7 +1233,7 @@ impl LayerStack {
         // — but if it ever did, doing nothing is the only safe answer.
         let idx = self.layers.iter().position(|l| l.id as u64 == scope)?;
         let (w, h) = (self.width, self.height);
-        let mut buf: Vec<u8> = self.layers[idx].rgba.to_vec();
+        let mut buf: Vec<u8> = self.layers[idx].rgba.to_rgba8().into_owned();
         let label = {
             let mut view = FlatImage::new(w, h, 4, buf.as_mut_slice())?;
             if undo {
@@ -1236,7 +1242,8 @@ impl LayerStack {
                 self.journal.redo(&mut view)
             }
         }?;
-        self.layers[idx].rgba = Arc::from(buf.into_boxed_slice());
+        self.layers[idx].rgba =
+            crate::pixels::Pixels::from_rgba8(Arc::from(buf.into_boxed_slice()));
         self.active = idx;
         Some(label)
     }
@@ -1300,10 +1307,7 @@ impl LayerStack {
     /// the pixels to composite (the active layer's may be overridden by
     /// an in-flight stroke). Hidden, zero-opacity and fully transparent
     /// layers drop out here — each is exactly the identity in the fold.
-    fn plates<'a>(
-        &'a self,
-        override_active: Option<&'a Arc<[u8]>>,
-    ) -> Vec<(&'a Layer, &'a Arc<[u8]>)> {
+    fn plates<'a>(&'a self, override_active: Option<&'a Arc<[u8]>>) -> Vec<(&'a Layer, Arc<[u8]>)> {
         self.layers
             .iter()
             .enumerate()
@@ -1311,15 +1315,18 @@ impl LayerStack {
                 if !l.enabled() {
                     return None;
                 }
+                // An OWNED `Arc` rather than a borrow: `Pixels` hands
+                // out a clone of its handle, not a reference into
+                // itself. The clone is a refcount bump, not a copy.
                 let px = match override_active {
-                    Some(o) if i == self.active => o,
-                    _ => &l.rgba,
+                    Some(o) if i == self.active => Arc::clone(o),
+                    _ => l.rgba.raw_arc(),
                 };
                 // An ADJUSTMENT layer has no pixels of its own — its
                 // `rgba` is a transparent placeholder — so the
                 // transparency skip would drop exactly the layers whose
                 // whole job is to change what is beneath them.
-                if l.is_pixels() && is_fully_transparent(px) {
+                if l.is_pixels() && is_fully_transparent(&px) {
                     return None;
                 }
                 Some((l, px))
@@ -1432,7 +1439,7 @@ impl LayerStack {
                     continue;
                 }
             } else if layer.is_pixels() {
-                clip_base = Some(alpha_of(px));
+                clip_base = Some(alpha_of(&px));
             }
 
             // The clip base multiplies into the layer's own coverage,
@@ -1464,7 +1471,7 @@ impl LayerStack {
                 continue;
             }
 
-            let straight = rgba8_to_f16(px);
+            let straight = rgba8_to_f16(&px);
             // `premultiply` over a fully-opaque window is `rgb·1` — the
             // identity, provably; skip the round-trip there.
             let premul = if window_is_opaque(&straight) {
@@ -1679,7 +1686,7 @@ mod tests {
     #[test]
     fn image_editor_layers_converting_to_smart_preserves_the_pixels_as_source() {
         let mut s = stack(4, 4);
-        let before = s.active().rgba.to_vec();
+        let before = s.active().rgba.to_rgba8().into_owned();
         s.make_smart(0).expect("convert");
         assert!(s.is_smart(0));
         let src = s.layers[0].smart_source().expect("source");
@@ -1727,7 +1734,7 @@ mod tests {
         // render. The stack's job is to never replace the source, and
         // that is what this asserts.
         let mut s = stack(8, 8);
-        let original = s.active().rgba.to_vec();
+        let original = s.active().rgba.to_rgba8().into_owned();
         s.make_smart(0).expect("convert");
 
         // A brutal round trip through the cache.
@@ -2030,7 +2037,7 @@ mod tests {
         // O(1): the background layer must not clone the ingest buffer.
         let pixels = px(64, 64, 3);
         let s = LayerStack::from_image(64, 64, Arc::clone(&pixels)).expect("valid");
-        assert!(Arc::ptr_eq(&s.active().rgba, &pixels));
+        assert!(Arc::ptr_eq(&s.active().rgba.raw_arc(), &pixels));
     }
 
     #[test]
@@ -2047,7 +2054,10 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert_eq!(s.active_index(), 1, "and becomes active");
         assert_eq!(s.active().name, "Paint");
-        assert!(s.active().rgba.iter().all(|&b| b == 0), "transparent");
+        assert!(
+            s.active().rgba.to_rgba8().iter().all(|&b| b == 0),
+            "transparent"
+        );
         // Ids are stable and unique.
         assert_ne!(s.layers()[0].id, s.layers()[1].id);
     }
@@ -2191,7 +2201,7 @@ mod tests {
         let s = stack(8, 8);
         let out = pollster::block_on(s.composite(None, None)).expect("no device needed");
         assert!(
-            Arc::ptr_eq(&out, &s.active().rgba),
+            Arc::ptr_eq(&out, &s.active().rgba.raw_arc()),
             "the identity fold returns the very same buffer"
         );
         assert!(s.composite_is_trivial());
@@ -2217,7 +2227,7 @@ mod tests {
         s.add("Paint");
         assert!(s.composite_is_trivial());
         let out = pollster::block_on(s.composite(None, None)).expect("no device needed");
-        assert!(Arc::ptr_eq(&out, &s.layers()[0].rgba));
+        assert!(Arc::ptr_eq(&out, &s.layers()[0].rgba.raw_arc()));
     }
 
     #[test]
@@ -2236,7 +2246,7 @@ mod tests {
     fn image_editor_layers_a_transparent_layer_on_top_leaves_the_backdrop_alone() {
         let Some(ctx) = device() else { return };
         let mut s = stack(16, 16);
-        let base = s.active().rgba.to_vec();
+        let base = s.active().rgba.to_rgba8().into_owned();
         s.add("Empty");
         let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
         assert_eq!(
@@ -2253,7 +2263,7 @@ mod tests {
         // stack as the test below, one call different, opposite result.
         let Some(ctx) = device() else { return };
         let mut s = stack(16, 16);
-        let base = s.active().rgba.to_vec();
+        let base = s.active().rgba.to_rgba8().into_owned();
         s.add("Cover");
         let white: Arc<[u8]> = px(16, 16, 255);
         s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
@@ -2298,7 +2308,7 @@ mod tests {
         // must be the backdrop.
         let Some(ctx) = device() else { return };
         let mut s = stack(16, 16);
-        let base = s.active().rgba.to_vec();
+        let base = s.active().rgba.to_rgba8().into_owned();
         s.add("Cover");
         let white: Arc<[u8]> = px(16, 16, 255);
         s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
@@ -2398,7 +2408,7 @@ mod tests {
         let out = pollster::block_on(s.composite(Some(ctx), Some(&white))).expect("composite");
         assert!(out.iter().all(|&b| b == 255), "the override composited");
         assert!(
-            s.active().rgba.iter().all(|&b| b == 0),
+            s.active().rgba.to_rgba8().iter().all(|&b| b == 0),
             "…and the layer itself was never touched"
         );
     }
@@ -2434,9 +2444,8 @@ mod tests {
         let mut params = StrokeParams::defaults(StrokeTool::Brush);
         params.color = [1.0, 0.0, 0.0, 1.0];
         params.hardness = 1.0;
-        let mut stroke =
-            StrokeSession::begin_on(1, w, h, Arc::clone(&s.active().rgba), params, None)
-                .expect("begin on the layer");
+        let mut stroke = StrokeSession::begin_on(1, w, h, s.active().rgba.raw_arc(), params, None)
+            .expect("begin on the layer");
         pollster::block_on(stroke.extend(ctx, StrokeSample::new(32.0, 32.0, 1.0))).expect("extend");
         let damage = stroke.stroke_bounds().expect("a dot has bounds");
         let painted: Arc<[u8]> = Arc::from(stroke.commit().into_boxed_slice());
@@ -2446,7 +2455,7 @@ mod tests {
 
         // (1) the photo layer never moved.
         assert!(
-            Arc::ptr_eq(&s.layers()[0].rgba, &photo),
+            Arc::ptr_eq(&s.layers()[0].rgba.raw_arc(), &photo),
             "the layer below is untouched — not merely equal, the same buffer"
         );
         // (2) the composite shows the paint at the dab centre and the
@@ -2482,7 +2491,7 @@ mod tests {
     #[test]
     fn image_editor_undo_a_layer_edit_is_reversible_byte_for_byte() {
         let mut s = stack(300, 200);
-        let before = s.active().rgba.to_vec();
+        let before = s.active().rgba.to_rgba8().into_owned();
         let mut painted = before.clone();
         for p in painted.chunks_exact_mut(4) {
             p[0] = 200;
@@ -2493,12 +2502,16 @@ mod tests {
             Arc::from(painted.clone().into_boxed_slice()),
         )
         .expect("unlocked");
-        assert_eq!(s.active().rgba.to_vec(), painted);
+        assert_eq!(s.active().rgba.to_rgba8().into_owned(), painted);
 
         assert_eq!(s.undo().as_deref(), Some("Paint"));
-        assert_eq!(s.active().rgba.to_vec(), before, "byte-for-byte");
+        assert_eq!(
+            s.active().rgba.to_rgba8().into_owned(),
+            before,
+            "byte-for-byte"
+        );
         assert_eq!(s.redo().as_deref(), Some("Paint"));
-        assert_eq!(s.active().rgba.to_vec(), painted);
+        assert_eq!(s.active().rgba.to_rgba8().into_owned(), painted);
         assert!(s.undo().is_some());
         assert!(s.undo().is_none(), "nothing left to undo");
     }
@@ -2507,7 +2520,7 @@ mod tests {
     fn image_editor_undo_a_small_edit_journals_only_the_tiles_it_covered() {
         // 1024×1024 = 16 tiles; a stroke in one corner journals ONE.
         let mut s = stack(1024, 1024);
-        let painted = s.active().rgba.to_vec();
+        let painted = s.active().rgba.to_rgba8().into_owned();
         s.edit_active(
             "Paint",
             Region::new(10, 10, 40, 40),
@@ -2537,15 +2550,23 @@ mod tests {
         // A, hit Undo — and get B's pre-edit tiles written into A.
         let mut s = stack(64, 64);
         s.add("B");
-        let b_before = s.active().rgba.to_vec();
+        let b_before = s.active().rgba.to_rgba8().into_owned();
         s.edit_active("Paint B", Region::new(0, 0, 64, 64), px(64, 64, 200))
             .expect("unlocked");
-        let a_before = s.layers()[0].rgba.to_vec();
+        let a_before = s.layers()[0].rgba.to_rgba8().into_owned();
 
         s.set_active(0).expect("in range");
         assert_eq!(s.undo().as_deref(), Some("Paint B"));
-        assert_eq!(s.layers()[0].rgba.to_vec(), a_before, "A is untouched");
-        assert_eq!(s.layers()[1].rgba.to_vec(), b_before, "B is restored");
+        assert_eq!(
+            s.layers()[0].rgba.to_rgba8().into_owned(),
+            a_before,
+            "A is untouched"
+        );
+        assert_eq!(
+            s.layers()[1].rgba.to_rgba8().into_owned(),
+            b_before,
+            "B is restored"
+        );
         // …and the layer the undo landed in becomes active, so the
         // change is visibly where it happened.
         assert_eq!(s.active_index(), 1);
@@ -2569,7 +2590,7 @@ mod tests {
     #[test]
     fn image_editor_undo_a_damage_region_outside_the_canvas_records_nothing() {
         let mut s = stack(16, 16);
-        let px16 = s.active().rgba.clone();
+        let px16 = s.active().rgba.raw_arc();
         let out = s
             .edit_active("Paint", Region::new(500, 500, 10, 10), px16)
             .expect("unlocked");
@@ -2629,7 +2650,8 @@ mod tests {
                 rgba.extend_from_slice(&[200, 200, 200, a]);
             }
         }
-        s.layer_mut(base).expect("base").rgba = Arc::from(rgba.into_boxed_slice());
+        s.layer_mut(base).expect("base").rgba =
+            crate::pixels::Pixels::from_rgba8(Arc::from(rgba.into_boxed_slice()));
         (s, base)
     }
 
@@ -2828,8 +2850,9 @@ mod tests {
 
         // A real pixel layer, then an adjustment ON it, both in a group.
         let px = s.add("Inner");
-        s.layer_mut(px).expect("inner").rgba =
-            Arc::from(vec![80u8; 16 * 16 * 4].into_boxed_slice());
+        s.layer_mut(px).expect("inner").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
+            vec![80u8; 16 * 16 * 4].into_boxed_slice(),
+        ));
         let adj = s.add_adjustment("Brighten", bright(0.5));
         let id = s.group_range(px, adj, "Set").expect("grouped");
         // ISOLATED explicitly. Pass-through is the default now, and
@@ -2927,10 +2950,13 @@ mod tests {
         let build = || {
             let mut s = stack(16, 16);
             let a = s.add("A");
-            s.layer_mut(a).expect("a").rgba =
-                Arc::from(vec![255u8; 16 * 16 * 4].into_boxed_slice());
+            s.layer_mut(a).expect("a").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
+                vec![255u8; 16 * 16 * 4].into_boxed_slice(),
+            ));
             let b = s.add("B");
-            s.layer_mut(b).expect("b").rgba = Arc::from(vec![0u8; 16 * 16 * 4].into_boxed_slice());
+            s.layer_mut(b).expect("b").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
+                vec![0u8; 16 * 16 * 4].into_boxed_slice(),
+            ));
             // B is transparent black, so it must not hide A; give it real
             // alpha in its left half only.
             let mut px = vec![0u8; 16 * 16 * 4];
@@ -2940,7 +2966,8 @@ mod tests {
                     px[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
                 }
             }
-            s.layer_mut(b).expect("b").rgba = Arc::from(px.into_boxed_slice());
+            s.layer_mut(b).expect("b").rgba =
+                crate::pixels::Pixels::from_rgba8(Arc::from(px.into_boxed_slice()));
             (s, a, b)
         };
 
@@ -2979,11 +3006,13 @@ mod tests {
         // Outer group: a mid-grey plate. Inner group (above it): a
         // darker plate plus an adjustment, both isolated.
         let outer_px = s.add("OuterPlate");
-        s.layer_mut(outer_px).expect("o").rgba =
-            Arc::from(vec![120u8; 16 * 16 * 4].into_boxed_slice());
+        s.layer_mut(outer_px).expect("o").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
+            vec![120u8; 16 * 16 * 4].into_boxed_slice(),
+        ));
         let inner_px = s.add("InnerPlate");
-        s.layer_mut(inner_px).expect("i").rgba =
-            Arc::from(vec![60u8; 16 * 16 * 4].into_boxed_slice());
+        s.layer_mut(inner_px).expect("i").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
+            vec![60u8; 16 * 16 * 4].into_boxed_slice(),
+        ));
         let adj = s.add_adjustment("Brighten", bright(0.4));
 
         let outer = s.group_range(outer_px, adj, "Outer").expect("outer");
@@ -3019,7 +3048,9 @@ mod tests {
         let mut s = stack(16, 16);
         let base = pollster::block_on(s.composite(Some(ctx), None)).expect("base");
         let px = s.add("Inner");
-        s.layer_mut(px).expect("i").rgba = Arc::from(vec![250u8; 16 * 16 * 4].into_boxed_slice());
+        s.layer_mut(px).expect("i").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
+            vec![250u8; 16 * 16 * 4].into_boxed_slice(),
+        ));
         let outer = s.group_range(px, px, "Outer").expect("outer");
         s.group_range(px, px, "Inner").expect("inner");
         s.set_group_visible(outer, false)

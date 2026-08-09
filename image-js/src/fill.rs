@@ -294,7 +294,8 @@ pub async fn fill_rgba8(
         return Err(IngestError::Unsupported("fill on an empty image".into()));
     }
     let geom = FillGeometry::derive(image, selection.as_deref());
-    let src_f16 = rgba8_to_f16(&image.rgba);
+    // 8-bit view: the fill composite path is RGBA8 end to end.
+    let src_f16 = rgba8_to_f16(&image.rgba.to_rgba8());
 
     // ── pass 1: generate (unmasked, whole image, ox = oy = 0) ────────
     let gen_f16 = match *spec {

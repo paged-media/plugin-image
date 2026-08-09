@@ -379,7 +379,7 @@ impl StrokeSession {
             handle,
             image.width,
             image.height,
-            Arc::clone(&image.rgba),
+            image.rgba.raw_arc(),
             params,
             selection,
         )
@@ -945,7 +945,11 @@ mod tests {
         assert_eq!((s.width(), s.height()), (16, 16));
         assert_eq!(s.dab_count(), 0);
         assert!(s.stroke_bounds().is_none());
-        assert_eq!(s.pixels(), &image.rgba[..], "untouched until a dab lands");
+        assert_eq!(
+            s.pixels(),
+            &image.rgba.to_rgba8()[..],
+            "untouched until a dab lands"
+        );
     }
 
     #[test]
@@ -1000,7 +1004,7 @@ mod tests {
     fn image_editor_paint_commit_of_an_untouched_session_returns_the_base() {
         let image = img(8, 8);
         let s = StrokeSession::begin(1, &image, params(StrokeTool::Brush), None).expect("begin");
-        assert_eq!(s.commit(), image.rgba.to_vec());
+        assert_eq!(s.commit(), image.rgba.to_rgba8().into_owned());
     }
 
     #[test]
@@ -1033,7 +1037,11 @@ mod tests {
         // Splice a window of pure white — none of it may land.
         let white = vec![255u8; (dirty.w * dirty.h * 4) as usize];
         s.splice(dirty, &white);
-        assert_eq!(s.pixels(), &image.rgba[..], "clipped stroke wrote nothing");
+        assert_eq!(
+            s.pixels(),
+            &image.rgba.to_rgba8()[..],
+            "clipped stroke wrote nothing"
+        );
     }
 
     #[test]
@@ -1118,7 +1126,11 @@ mod tests {
         let a = run_stroke(ctx, &image, params(StrokeTool::Brush), None, PATH);
         let b = run_stroke(ctx, &image, params(StrokeTool::Brush), None, PATH);
         assert_eq!(a, b, "a replayed stroke must be byte-identical");
-        assert_ne!(a, image.rgba.to_vec(), "the stroke actually painted");
+        assert_ne!(
+            a,
+            image.rgba.to_rgba8().into_owned(),
+            "the stroke actually painted"
+        );
     }
 
     #[test]
@@ -1172,7 +1184,7 @@ mod tests {
         for y in 0..64u32 {
             for x in 0..64u32 {
                 let i = ((y * 64 + x) * 4) as usize;
-                let same = painted[i..i + 4] == image.rgba[i..i + 4];
+                let same = painted[i..i + 4] == image.rgba.to_rgba8()[i..i + 4];
                 if x >= 32 {
                     assert!(same, "({x},{y}) is outside the selection but changed");
                 } else if !same {
@@ -1204,11 +1216,11 @@ mod tests {
         // … and the RGB there must be preserved (straight-space erase).
         assert_eq!(
             at(&erased, hx, hy)[..3],
-            at(&image.rgba, hx, hy)[..3],
+            at(&image.rgba.to_rgba8(), hx, hy)[..3],
             "an erased pixel keeps its colour"
         );
         // A corner the stroke never reached is untouched.
-        assert_eq!(at(&erased, 63, 0), at(&image.rgba, 63, 0));
+        assert_eq!(at(&erased, 63, 0), at(&image.rgba.to_rgba8(), 63, 0));
     }
 
     #[test]
@@ -1223,13 +1235,13 @@ mod tests {
         assert_eq!(s.dab_count(), 1);
         let bounds = s.stroke_bounds().expect("a dot has bounds");
         assert!(bounds.w >= 24 && bounds.h >= 24, "a 24 px tip: {bounds:?}");
-        assert_ne!(s.pixels(), &image.rgba[..], "the dot landed");
+        assert_ne!(s.pixels(), &image.rgba.to_rgba8()[..], "the dot landed");
         // Cancelling is just dropping the session — the engine-held image
         // was never mutated.
         drop(s);
         assert_eq!(
-            image.rgba.to_vec(),
-            ramp(32, 32).rgba.to_vec(),
+            image.rgba.to_rgba8().into_owned(),
+            ramp(32, 32).rgba.to_rgba8().into_owned(),
             "the base pixels are still the base pixels"
         );
     }
@@ -1245,7 +1257,7 @@ mod tests {
                 .expect("extend")
         );
         assert!(s.is_empty());
-        assert_eq!(s.commit(), image.rgba.to_vec());
+        assert_eq!(s.commit(), image.rgba.to_rgba8().into_owned());
     }
 
     /// A MEASUREMENT, not a gate — `#[ignore]`d so it never fails CI on
@@ -1325,7 +1337,7 @@ mod tests {
         let dirty = s.accumulator.take_dirty().expect("dirty");
         let white = vec![255u8; (dirty.w * dirty.h * 4) as usize];
         s.splice(dirty, &white);
-        assert_eq!(s.pixels(), &image.rgba[..]);
+        assert_eq!(s.pixels(), &image.rgba.to_rgba8()[..]);
     }
 
     // ── clone / heal ─────────────────────────────────────────────────
@@ -1448,7 +1460,11 @@ mod tests {
         let image = two_tone(32, 16);
         let mut s = StrokeSession::begin(1, &image, params(StrokeTool::Clone), None).expect("x");
         pollster::block_on(s.extend(ctx, StrokeSample::new(8.0, 8.0, 1.0))).expect("extend");
-        assert_eq!(s.pixels(), &image.rgba[..], "no anchor, no paint");
+        assert_eq!(
+            s.pixels(),
+            &image.rgba.to_rgba8()[..],
+            "no anchor, no paint"
+        );
     }
 
     #[test]

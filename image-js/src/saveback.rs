@@ -664,7 +664,7 @@ mod tests {
         // And it decodes back to the same pixels through the ingest lane.
         let back = crate::ingest::decode_rgba8(&png).expect("decode");
         assert_eq!((back.width, back.height), (2, 1));
-        assert_eq!(&back.rgba[..], &rgba[..]);
+        assert_eq!(&back.rgba.to_rgba8()[..], &rgba[..]);
     }
 
     #[test]

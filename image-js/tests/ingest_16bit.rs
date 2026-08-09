@@ -94,7 +94,7 @@ fn an_8bit_png_does_not_claim_a_reduction_it_did_not_make() {
     let src = [10u8, 20, 30, 255, 40, 50, 60, 128];
     let img = image_js::ingest::decode_rgba8(&png8(2, 1, &src)).unwrap();
     assert!(!img.depth_reduced, "an 8-bit PNG lost nothing");
-    assert_eq!(img.rgba.as_ref(), &src);
+    assert_eq!(img.rgba.raw(), &src);
 }
 
 #[test]
@@ -103,5 +103,5 @@ fn the_high_byte_survives_the_ingest_lane_too() {
     // proves nothing downstream re-orders it on the way to RGBA8.
     let bytes = png16(1, 1, &[0x1234, 0x5678, 0x9ABC, 0xFFFF]);
     let img = image_js::ingest::decode_rgba8(&bytes).unwrap();
-    assert_eq!(img.rgba.as_ref(), &[0x12, 0x56, 0x9A, 0xFF]);
+    assert_eq!(img.rgba.raw(), &[0x12, 0x56, 0x9A, 0xFF]);
 }

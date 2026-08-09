@@ -69,6 +69,7 @@ pub mod inpaint;
 pub mod layers;
 pub mod mip;
 pub mod paths;
+pub mod pixels;
 pub mod saveback;
 pub mod selection;
 pub mod stroke;
@@ -508,7 +509,7 @@ mod wasm {
         params: AdjustParams,
     ) -> Result<js_sys::Uint8Array, JsValue> {
         if params.is_identity() {
-            return Ok(js_sys::Uint8Array::from(&img.rgba[..]));
+            return Ok(js_sys::Uint8Array::from(&img.rgba.to_rgba8()[..]));
         }
         let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
             JsValue::from_str(
@@ -532,7 +533,7 @@ mod wasm {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
-        let hist = image_gpu::histogram_rgba8(&img.rgba);
+        let hist = image_gpu::histogram_rgba8(&img.rgba.to_rgba8());
         Ok(js_sys::Uint32Array::from(&hist.to_flat()[..]))
     }
 
@@ -554,7 +555,7 @@ mod wasm {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
-        let hist = image_gpu::histogram_rgba8(&img.rgba);
+        let hist = image_gpu::histogram_rgba8(&img.rgba.to_rgba8());
         let auto = image_gpu::auto_enhance(&hist);
         let out = [auto.in_black, auto.in_white, auto.temp, auto.tint];
         Ok(js_sys::Float32Array::from(&out[..]))
@@ -638,7 +639,7 @@ mod wasm {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?
         };
         let (width, height) = (out.width, out.height);
-        register(width, height, out.rgba.to_vec())
+        register(width, height, out.rgba.to_rgba8().into_owned())
     }
 
     // ── crop interaction GEOMETRY (pure view math; the TS crop machine
@@ -813,7 +814,10 @@ mod wasm {
                     .with(|m| m.borrow().get(&handle).cloned())
                     .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
                 let built = Rc::new(MipPyramid::build(
-                    img.width, img.height, &img.rgba, level_u8,
+                    img.width,
+                    img.height,
+                    &img.rgba.to_rgba8(),
+                    level_u8,
                 ));
                 PYRAMIDS.with(|p| p.borrow_mut().insert(handle, Rc::clone(&built)));
                 built
@@ -979,7 +983,13 @@ mod wasm {
             )));
         }
         let shape = SelectionCoverage::magic_wand(
-            img.width, img.height, &img.rgba, x, y, tolerance, contiguous,
+            img.width,
+            img.height,
+            &img.rgba.to_rgba8(),
+            x,
+            y,
+            tolerance,
+            contiguous,
         );
         with_selection(|s| s.apply_shape(shape, mode))
     }
@@ -1036,7 +1046,7 @@ mod wasm {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
-        Ok(crate::channels::stats_json(&img.rgba))
+        Ok(crate::channels::stats_json(&img.rgba.to_rgba8()))
     }
 
     /// LOAD A CHANNEL AS THE SELECTION — the operation a channels list
@@ -1058,7 +1068,7 @@ mod wasm {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
-        let bytes = crate::channels::channel_bytes(&img.rgba, ch);
+        let bytes = crate::channels::channel_bytes(&img.rgba.to_rgba8(), ch);
         with_selection(|s| {
             let b = s.bound().ok_or("no image bound (selection_bind first)")?;
             let shape =
@@ -1183,7 +1193,7 @@ mod wasm {
         // RGBA8 → rgba16float window (straight /255 — the I-02 working
         // values, same as the decode bridge).
         let mut win = Vec::with_capacity(img.rgba.len() * 2);
-        for &b in img.rgba.iter() {
+        for &b in img.rgba.to_rgba8().iter() {
             win.extend_from_slice(&f16::from_f32(b as f32 / 255.0).to_le_bytes());
         }
         let out = image_gpu::execute_windowed_once_async(
@@ -1297,7 +1307,7 @@ mod wasm {
                     Ok(Some(DecodedImage {
                         width: d.stack.width(),
                         height: d.stack.height(),
-                        rgba: Arc::clone(&d.stack.active().rgba),
+                        rgba: d.stack.active().rgba.clone(),
                         // A layer view of an already-ingested image; the
                         // transform ran at decode, not per layer.
                         display: crate::display::DisplayTreatment::AssumedSrgb,
@@ -1566,7 +1576,7 @@ mod wasm {
                  selected region from the rest of the image",
             )
         })?;
-        let out = crate::inpaint::fill(&img.rgba, img.width, img.height, &coverage, 128)
+        let out = crate::inpaint::fill(&img.rgba.to_rgba8(), img.width, img.height, &coverage, 128)
             .ok_or_else(|| {
                 JsValue::from_str(
                     "nothing to fill, or nothing to fill FROM (an empty \
@@ -2159,8 +2169,10 @@ mod wasm {
         // the same reason: `gen.pattern` composites source-over, which
         // is a premultiplied operation, and BOTH inputs have to be in
         // that space or a semi-transparent tile composites wrong.
-        let associate = img.rgba.chunks_exact(4).any(|px| px[3] != 255)
-            || tile.rgba.chunks_exact(4).any(|px| px[3] != 255);
+        let img8 = img.rgba.to_rgba8();
+        let tile8 = tile.rgba.to_rgba8();
+        let associate = img8.chunks_exact(4).any(|px| px[3] != 255)
+            || tile8.chunks_exact(4).any(|px| px[3] != 255);
         let assoc = |buf: &[u8], i: usize, c: usize| -> [u8; 2] {
             let v = buf[i + c] as f32 / 255.0;
             let a = buf[i + 3] as f32 / 255.0;
@@ -2169,7 +2181,7 @@ mod wasm {
         let mut win = Vec::with_capacity(img.rgba.len() * 2);
         for i in (0..img.rgba.len()).step_by(4) {
             for c in 0..4 {
-                win.extend_from_slice(&assoc(&img.rgba, i, c));
+                win.extend_from_slice(&assoc(&img8, i, c));
             }
         }
         // in1: the tile, zero-padded into a destination-sized buffer.
@@ -2181,7 +2193,7 @@ mod wasm {
                 let src = (y * tile.width as usize + x) * 4;
                 let dst = (y * img.width as usize + x) * 4 * 2;
                 for c in 0..4 {
-                    let v = assoc(&tile.rgba, src, c);
+                    let v = assoc(&tile8, src, c);
                     tile_win[dst + c * 2] = v[0];
                     tile_win[dst + c * 2 + 1] = v[1];
                 }
@@ -2244,10 +2256,11 @@ mod wasm {
         // over a fully opaque backdrop `rgb·1 = rgb` and the round trip
         // is PROVABLY the identity, so the common case (a JPEG, a PSD
         // composite, most placed photographs) pays nothing.
-        let associate = img.rgba.chunks_exact(4).any(|px| px[3] != 255);
+        let img8 = img.rgba.to_rgba8();
+        let associate = img8.chunks_exact(4).any(|px| px[3] != 255);
         let px_f16 = |i: usize, c: usize| -> [u8; 2] {
-            let v = img.rgba[i + c] as f32 / 255.0;
-            let a = img.rgba[i + 3] as f32 / 255.0;
+            let v = img.rgba.to_rgba8()[i + c] as f32 / 255.0;
+            let a = img.rgba.to_rgba8()[i + 3] as f32 / 255.0;
             let v = if associate && c < 3 { v * a } else { v };
             f16::from_f32(v).to_le_bytes()
         };
@@ -2382,7 +2395,7 @@ mod wasm {
                     "internal: composite extent does not match the bound image",
                 ));
             }
-            img.rgba = rgba;
+            img.rgba = crate::pixels::Pixels::from_rgba8(rgba);
             Ok(())
         })?;
         PYRAMIDS.with(|p| {
@@ -2434,7 +2447,7 @@ mod wasm {
         let img = IMAGES
             .with(|m| m.borrow().get(&handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
-        let stack = LayerStack::from_image(img.width, img.height, Arc::clone(&img.rgba))
+        let stack = LayerStack::from_image(img.width, img.height, img.rgba.raw_arc())
             .map_err(ingest_err)?;
         LAYERS.with(|l| *l.borrow_mut() = Some(LayerDoc { handle, stack }));
         Ok(())
@@ -3033,7 +3046,7 @@ mod wasm {
         let src = DecodedImage {
             width: w,
             height: h,
-            rgba: Arc::clone(&doc.stack.active().rgba),
+            rgba: doc.stack.active().rgba.clone(),
             // Same: the active layer's pixels are post-ingest.
             display: crate::display::DisplayTreatment::AssumedSrgb,
             depth_reduced: false,
@@ -3206,7 +3219,7 @@ mod wasm {
             match b.as_ref() {
                 Some(d) if d.handle == handle => {
                     d.stack.active_is_editable()?;
-                    Ok(Some(Arc::clone(&d.stack.active().rgba)))
+                    Ok(Some(d.stack.active().rgba.raw_arc()))
                 }
                 _ => Ok(None),
             }

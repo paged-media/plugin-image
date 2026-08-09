@@ -195,7 +195,7 @@ fn image_editor_ingest_decode_png_roundtrip() {
     let pixels = test_pixels(w, h);
     let img = decode_rgba8(&png_bytes(w, h, &pixels)).expect("decode png");
     assert_eq!((img.width, img.height), (w, h));
-    assert_eq!(&img.rgba[..], &pixels[..], "PNG is lossless");
+    assert_eq!(&img.rgba.to_rgba8()[..], &pixels[..], "PNG is lossless");
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn image_editor_resource_tile_window_cuts_and_clamps() {
     let img = image_js::ingest::DecodedImage {
         width: w,
         height: h,
-        rgba: Arc::from(pixels.clone().into_boxed_slice()),
+        rgba: image_js::pixels::Pixels::from_rgba8(Arc::from(pixels.clone().into_boxed_slice())),
         display: image_js::display::DisplayTreatment::AssumedSrgb,
         depth_reduced: false,
     };
@@ -281,7 +281,10 @@ fn image_editor_ingest_decode_psd_composite() {
     let img =
         decode_rgba8(&psd_bytes(2, 1, &[&[10, 20], &[30, 40], &[50, 60]])).expect("decode psd");
     assert_eq!((img.width, img.height), (2, 1));
-    assert_eq!(&img.rgba[..], &[10, 30, 50, 255, 20, 40, 60, 255]);
+    assert_eq!(
+        &img.rgba.to_rgba8()[..],
+        &[10, 30, 50, 255, 20, 40, 60, 255]
+    );
 }
 
 #[test]
@@ -307,7 +310,7 @@ fn image_editor_ingest_adjust_identity_needs_no_gpu() {
         return;
     };
     let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("identity adjust");
-    assert_eq!(&out[..], &img.rgba[..]);
+    assert_eq!(&out[..], &img.rgba.to_rgba8()[..]);
 }
 
 #[test]
@@ -324,7 +327,7 @@ fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
     };
     let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("adjust");
     assert_eq!(out.len(), img.rgba.len());
-    for (i, (&got, &src)) in out.iter().zip(img.rgba.iter()).enumerate() {
+    for (i, (&got, &src)) in out.iter().zip(img.rgba.to_rgba8().iter()).enumerate() {
         let expect = if i % 4 == 3 {
             src as i32 // alpha untouched
         } else {
@@ -375,8 +378,8 @@ fn image_editor_ingest_cmyk_jpeg_decodes_instead_of_rejecting() {
     // No ICC → the device formula. JPEG is lossy, so allow tolerance, but
     // the structure must hold: paper white near white, full K near black,
     // alpha synthesised opaque.
-    let white = &img.rgba[0..4];
-    let black = &img.rgba[4..8];
+    let white = &img.rgba.to_rgba8()[0..4];
+    let black = &img.rgba.to_rgba8()[4..8];
     assert!(
         white[0] > 230 && white[1] > 230 && white[2] > 230,
         "paper white should be near RGB white, got {white:?}"
@@ -507,7 +510,11 @@ fn image_selection_extended_stage_is_masked_like_the_others() {
     };
     let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, Some(cov))).expect("masked");
     assert_eq!(&out[0..3], &[255, 255, 255], "selected pixel thresholded");
-    for (i, (&got, &src)) in out[4..8].iter().zip(img.rgba[4..8].iter()).enumerate() {
+    for (i, (&got, &src)) in out[4..8]
+        .iter()
+        .zip(img.rgba.to_rgba8()[4..8].iter())
+        .enumerate()
+    {
         assert!(
             (got as i32 - src as i32).abs() <= 2,
             "byte {i} outside the selection must survive: got {got}, was {src}"
@@ -538,7 +545,11 @@ fn image_editor_generate_gradient_fills_through_the_selection() {
         "the selected pixel took the fill, got {:?}",
         &out[0..4]
     );
-    for (i, (&got, &src)) in out[4..8].iter().zip(img.rgba[4..8].iter()).enumerate() {
+    for (i, (&got, &src)) in out[4..8]
+        .iter()
+        .zip(img.rgba.to_rgba8()[4..8].iter())
+        .enumerate()
+    {
         assert!(
             (got as i32 - src as i32).abs() <= 2,
             "byte {i} outside the selection must survive: got {got}, was {src}"
@@ -669,7 +680,11 @@ fn image_editor_crop_straighten_at_zero_degrees_needs_no_gpu_and_never_resamples
         &ctx, &img, 1, 0, 2, 2, 0.0,
     ))
     .expect("0° straighten");
-    assert_eq!(&straight.rgba[..], &cut.rgba[..], "0° is the exact cut");
+    assert_eq!(
+        &straight.rgba.to_rgba8()[..],
+        &cut.rgba.to_rgba8()[..],
+        "0° is the exact cut"
+    );
 }
 
 #[test]
@@ -696,7 +711,7 @@ fn image_editor_crop_straighten_180_degrees_reverses_the_full_frame() {
     assert_eq!((out.width, out.height), (4, 2));
     for i in 0..8 {
         let want = px[(7 - i) * 4];
-        let got = out.rgba[i * 4];
+        let got = out.rgba.to_rgba8()[i * 4];
         assert!(
             (got as i32 - want as i32).abs() <= 3,
             "pixel {i}: got {got}, expected ~{want} (180° reverses the frame)"
@@ -720,7 +735,7 @@ fn image_editor_crop_straighten_small_angle_keeps_a_flat_field_flat() {
     ))
     .expect("7.5° straighten");
     assert_eq!((out.width, out.height), (12, 12));
-    for (i, &b) in out.rgba.iter().enumerate() {
+    for (i, &b) in out.rgba.to_rgba8().iter().enumerate() {
         assert!(
             (b as i32 - 77).abs() <= 2,
             "byte {i}: got {b}, a flat field must survive rotation"
