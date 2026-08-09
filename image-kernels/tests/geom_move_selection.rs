@@ -55,7 +55,10 @@ fn identity_at_zero_offset_for_every_mask_value_and_mode() {
 fn a_fully_selected_pixel_that_moves_away_is_vacated() {
     // Destination selected (it is leaving), nothing arriving.
     let out = compose(0.8, 0.3, 0.0, 1.0, false);
-    assert_eq!(out, 0.0, "the source region must be emptied, not left behind");
+    assert_eq!(
+        out, 0.0,
+        "the source region must be emptied, not left behind"
+    );
 }
 
 #[test]
@@ -155,7 +158,10 @@ fn the_module_reads_the_mask_at_both_positions() {
         "must use the ADDITIVE composite — a sequential clear-then-land \
          double-counts at fractional mask values"
     );
-    assert!(w.contains("m_dst"), "must sample the mask at the DESTINATION");
+    assert!(
+        w.contains("m_dst"),
+        "must sample the mask at the DESTINATION"
+    );
     assert!(
         w.contains("fn maskAt"),
         "must have the out-of-bounds-is-unselected mask reader"

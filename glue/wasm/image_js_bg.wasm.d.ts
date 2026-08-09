@@ -62,6 +62,7 @@ export const encode_image: (a: number, b: number, c: number, d: number, e: numbe
 export const fill_content_aware: (a: number) => any;
 export const fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const fill_noise: (a: number, b: number, c: number) => any;
+export const fill_pattern: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const free_image: (a: number) => void;
 export const gpu_ready: () => number;
 export const image_auto_enhance_params: (a: number) => [number, number, number];

@@ -1016,6 +1016,34 @@ export function fill_noise(handle, amount, seed) {
 }
 
 /**
+ * FILL with a PATTERN — Edit > Fill > Pattern, and the pattern
+ * half of the paint bucket.
+ *
+ * `tile_handle` is an ordinary decoded-image handle, so any image
+ * the plugin can open is a pattern; there is no separate pattern
+ * asset type and deliberately no SWATCH. The vector pattern-paint
+ * this is often confused with is RFI C-31 — core model + both
+ * renderers + an IDML round-trip decision — and none of it is
+ * needed to tile pixels into a raster layer.
+ *
+ * Selection-scoped like every other fill, so "fill the selection
+ * with a pattern" comes free from the ABI mask.
+ * `opacity == 0` is the identity.
+ * @param {number} handle
+ * @param {number} tile_handle
+ * @param {number} scale
+ * @param {number} angle_deg
+ * @param {number} offset_x
+ * @param {number} offset_y
+ * @param {number} opacity
+ * @returns {Promise<DecodedHandle>}
+ */
+export function fill_pattern(handle, tile_handle, scale, angle_deg, offset_x, offset_y, opacity) {
+    const ret = wasm.fill_pattern(handle, tile_handle, scale, angle_deg, offset_x, offset_y, opacity);
+    return ret;
+}
+
+/**
  * Release an engine-held decoded image (its mip pyramid cache, and
  * the layer stack bound to it — a stack whose composite target is
  * gone has nowhere to land).
@@ -2902,12 +2930,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 586, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 591, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 621, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 626, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

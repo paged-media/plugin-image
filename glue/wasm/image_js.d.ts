@@ -444,6 +444,23 @@ export function fill_gradient(handle: number, kind: string, c0: Float32Array, c1
 export function fill_noise(handle: number, amount: number, seed: number): Promise<DecodedHandle>;
 
 /**
+ * FILL with a PATTERN — Edit > Fill > Pattern, and the pattern
+ * half of the paint bucket.
+ *
+ * `tile_handle` is an ordinary decoded-image handle, so any image
+ * the plugin can open is a pattern; there is no separate pattern
+ * asset type and deliberately no SWATCH. The vector pattern-paint
+ * this is often confused with is RFI C-31 — core model + both
+ * renderers + an IDML round-trip decision — and none of it is
+ * needed to tile pixels into a raster layer.
+ *
+ * Selection-scoped like every other fill, so "fill the selection
+ * with a pattern" comes free from the ABI mask.
+ * `opacity == 0` is the identity.
+ */
+export function fill_pattern(handle: number, tile_handle: number, scale: number, angle_deg: number, offset_x: number, offset_y: number, opacity: number): Promise<DecodedHandle>;
+
+/**
  * Release an engine-held decoded image (its mip pyramid cache, and
  * the layer stack bound to it — a stack whose composite target is
  * gone has nowhere to land).
@@ -1054,6 +1071,7 @@ export interface InitOutput {
     readonly fill_content_aware: (a: number) => any;
     readonly fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly fill_noise: (a: number, b: number, c: number) => any;
+    readonly fill_pattern: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly free_image: (a: number) => void;
     readonly gpu_ready: () => number;
     readonly image_auto_enhance_params: (a: number) => [number, number, number];

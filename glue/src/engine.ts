@@ -1136,6 +1136,19 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
   applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /**
+   * FILL with a PATTERN. `tileHandle` is an ordinary decoded-image
+   * handle — any image the plugin can open is a pattern.
+   */
+  fillPattern(
+    handle: number,
+    tileHandle: number,
+    scale: number,
+    angleDeg: number,
+    offsetX: number,
+    offsetY: number,
+    opacity: number,
+  ): Promise<DecodedInfo>;
   /** MOVE the SELECTED pixels; `vacate` 0 transparent / 1 copy. */
   applyMoveSelection(
     handle: number,
@@ -1571,6 +1584,15 @@ export interface ImageWasmModule {
     spin: boolean,
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
+  fill_pattern(
+    handle: number,
+    tile_handle: number,
+    scale: number,
+    angle_deg: number,
+    offset_x: number,
+    offset_y: number,
+    opacity: number,
+  ): Promise<DecodedHandleWasm>;
   apply_move_selection(
     handle: number,
     dx: number,
@@ -2117,6 +2139,19 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyMosaic(handle, cellPx) {
       return decodedInfoOf(await wasm.apply_mosaic(handle, cellPx));
+    },
+    async fillPattern(handle, tileHandle, scale, angleDeg, offsetX, offsetY, opacity) {
+      return decodedInfoOf(
+        await wasm.fill_pattern(
+          handle,
+          tileHandle,
+          scale,
+          angleDeg,
+          offsetX,
+          offsetY,
+          opacity,
+        ),
+      );
     },
     async applyMoveSelection(handle, dx, dy, vacate) {
       return decodedInfoOf(

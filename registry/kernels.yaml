@@ -1529,6 +1529,24 @@
     - "identity: amount 0 — asserted mechanically, every module ends with the same mix(a, styled, amount) line and styled is clamped finite first, because 0.0 * NaN is NaN and would smuggle garbage through the identity"
   tests:
     rust: ["image-kernels/src/families/gallery.rs"]
+- id: gen.pattern
+  rust_path: families::gen::GEN_PATTERN
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Edit > Fill > Pattern and the pattern half of the paint bucket: a RASTER fill that tiles a source bitmap into pixels - no swatch, no paint type, no core change (deliberately NOT the vector pattern-paint of RFI C-31, which is walled)"
+    - "the lattice coordinate is the same construction gen.checker uses (global texel position folded into a cell); only the cell content comes from a texture instead of two literal colours"
+    - "the seam is exact because the two bilinear tap indices are Euclidean-modulo'd INDEPENDENTLY after the floor and never clamped, so every tile boundary blends the last column with the first instead of baking a hairline of edge colour into every lattice line"
+    - "bilinear rather than rounded: a rounded sample quantizes the map and the lattice edges come out stair-stepped; at scale 1 / angle 0 / integer phase the fractions are exactly 0 so the tile is still copied bit-exactly"
+    - "composite is premultiplied source-over rather than a lerp, so a tile with holes lets the destination through instead of fading it; for an opaque tile it reduces bit-exactly to mix(dst, pat, opacity)"
+    - "tile_w/tile_h travel in the PARAMS because execute_tile_once_async sizes every input texture at the OUTPUT dims - the tile is uploaded zero-padded and names its real extent, and the shader clamps that extent to the bound texture so it can never read outside"
+    - "identity: opacity 0, and the degenerate scale <= 0 guard, both written as negated positive tests so NaN lands on identity deterministically rather than implementation-defined - a clamp(opacity, 0, 1) draft was caught by the predicate-agreement test"
+  tests:
+    rust: ["image-kernels/tests/gen_pattern.rs"]
 - id: gen.angular_gradient
   rust_path: families::gen::GEN_ANGULAR_GRADIENT
   state_row: image.kernel.family-t2

@@ -400,6 +400,25 @@ export interface ImageSession {
   /** PIXELATE — mosaic. `cellPx` <= 1 is the identity. */
   applyMosaic(cellPx: number): Promise<boolean>;
   /**
+   * FILL with a PATTERN — Edit ▸ Fill ▸ Pattern.
+   *
+   * The tile is an ordinary decoded image, so any file the plugin can
+   * open is a pattern. There is deliberately no pattern SWATCH: that
+   * is the vector paint type walled by RFI C-31, and tiling pixels
+   * into a raster layer needs none of it.
+   *
+   * Selection-scoped like every fill, so "fill the selection with a
+   * pattern" comes free. `opacity` 0 is the identity.
+   */
+  fillPattern(
+    tileHandle: number,
+    scale?: number,
+    angleDeg?: number,
+    offsetX?: number,
+    offsetY?: number,
+    opacity?: number,
+  ): Promise<boolean>;
+  /**
    * MOVE the SELECTED pixels. This is what the Move tool does when a
    * selection is live, and it is NOT `offsetLayer` — that moves the
    * whole layer. With a selection, the selected pixels relocate and
@@ -1814,6 +1833,26 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     async applyMosaic(cellPx) {
       return this.applyEffect("Mosaic", (h) => engine!.applyMosaic(h, cellPx));
+    },
+    async fillPattern(
+      tileHandle,
+      scale = 1,
+      angleDeg = 0,
+      offsetX = 0,
+      offsetY = 0,
+      opacity = 1,
+    ) {
+      return this.applyEffect("Pattern fill", (h) =>
+        engine!.fillPattern(
+          h,
+          tileHandle,
+          scale,
+          angleDeg,
+          offsetX,
+          offsetY,
+          opacity,
+        ),
+      );
     },
     async moveSelection(dx, dy, vacate = VacateMode.Transparent) {
       return this.applyEffect("Move selection", (h) =>

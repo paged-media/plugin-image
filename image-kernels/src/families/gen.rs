@@ -74,6 +74,23 @@
 //! mirrored term-for-term by the reference, so both lanes agree to
 //! ordinary f32 rounding noise.
 //!
+//! RASTER PATTERN FILL (`gen.pattern`, 2026-08). The one member of this
+//! family that is NOT purely procedural: it tiles a SOURCE BITMAP
+//! (`in1`) over a destination layer (`in0`). It lives here because the
+//! thing it computes is the same thing `gen.checker` computes — a
+//! lattice coordinate derived from the GLOBAL texel position — only the
+//! cell content comes from a texture instead of two literal colors. It
+//! is `inputs: 2`, so it is the only kernel in the family that reads
+//! `in0` (as the fill destination) and honours the ABI mask epilogue,
+//! which is exactly what makes "fill the SELECTION with a pattern" work.
+//!
+//! NO SWATCH IS INVOLVED. This is a raster operation: it writes pixels
+//! into a raster layer. It is deliberately NOT the vector "pattern
+//! paint" of RFI C-31 (a new paint kind in the engine model + tiling in
+//! both renderer backends + an IDML round-trip decision), which is core
+//! work this repo's constitution forbids. Nothing here needs a swatch,
+//! a paint type, or a core change.
+//!
 //! Provenance: procedural generation — standard analytic-geometry
 //! parameterizations (projection / distance / angle / L1-distance
 //! contours); PCG hash per Jarzynski & Olano, "Hash Functions for GPU
@@ -1516,6 +1533,389 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+// ────────────────────────────── pattern ────────────────────────────
+//
+// Photoshop's Edit ▸ Fill ▸ Pattern, and the pattern half of the paint
+// bucket: TILE a source bitmap (`in1`) over the destination (`in0`),
+// with magnification, lattice rotation and phase, composited at
+// `opacity` and scoped by the ABI selection mask.
+//
+// THE COORDINATE CHAIN, in order (each step is inverted, because we map
+// a DESTINATION texel back into the tile, not the other way round):
+//
+//   p = (ox + x + 0.5, oy + y + 0.5)      texel CENTRE, GLOBAL pixels
+//   q = p − (offset_x, offset_y)          phase, DESTINATION pixels
+//   r = rot(q, −angle_deg)                into the lattice frame
+//   u = r / scale                         into TILE pixels
+//   w = u mod (tile_w, tile_h)            the lattice fold
+//
+// GLOBAL, not tile-local: `(ox, oy)` is the engine tile's origin, so the
+// lattice is continuous across engine tiles exactly as `gen.checker`'s
+// is. Without it every 256² tile would restart the pattern.
+//
+// PHASE IS IN DESTINATION PIXELS AND IS APPLIED BEFORE THE ROTATION, so
+// dragging a pattern right moves it right regardless of the angle —
+// applying it after would make the drag direction rotate with the
+// lattice, which reads as broken under the pointer. Rotation is
+// INVERSE (`rx = qx·ca + qy·sa`, `ry = qy·ca − qx·sa`, the sign
+// convention `gen.diamond_gradient`/`gen.angular_gradient` already use),
+// so the pattern APPEARS rotated by +`angle_deg`.
+//
+// WHY BILINEAR AND NOT A ROUNDED TAP. At `scale != 1` or
+// `angle_deg != 0` the lattice coordinate lands between source texels.
+// A rounded sample quantizes the map, so the same source column repeats
+// for a run of destination columns and then jumps — the tile's straight
+// edges come out as visible stair-steps along the lattice, and the whole
+// pattern crawls in integer jumps as the scale slider moves instead of
+// growing smoothly. Bilinear makes the map continuous. The cost is
+// nothing in the case that matters most: at `scale == 1`,
+// `angle_deg == 0` and INTEGER offsets the half-pixel centre convention
+// cancels, `tx == ty == 0.0` exactly, and `mix(p00, p10, 0.0)` is
+// bit-exactly `p00` — an unrotated pattern fill copies the tile verbatim
+// and never softens it.
+//
+// ── THE SEAM ───────────────────────────────────────────────────────
+// The wrap has to be EXACT at the tile boundary or every tile edge draws
+// a hairline. The rule is: fold the float coordinate only to BOUND it,
+// then wrap the two integer tap INDICES independently after the floor —
+// never clamp them.
+//
+// Source texel `i` covers `[i, i+1)` and its centre is `i + 0.5`, so the
+// continuous coordinate is shifted by −0.5 before flooring. That puts
+// the two taps at `x0 = floor(w − 0.5)` and `x0 + 1`, and BOTH are run
+// through the Euclidean modulo:
+//
+//   w ∈ [0, 0.5)      → x0 = −1  → taps (tile_w − 1, 0)
+//   w ∈ [tile_w−0.5,) → x0 = tile_w−1 → taps (tile_w − 1, 0)
+//
+// so at either side of the boundary the blend is the tile's LAST column
+// against its FIRST — which is what "seamless" means. A clamped tap
+// would blend the last column with ITSELF on one side and the first with
+// itself on the other, freezing a one-pixel band of the edge colour into
+// every lattice line. The two cases also agree in the limit (`w → 0⁺`
+// and `w → tile_w⁻` both give the same pair at `tx ≈ 0.5`), so the
+// function is continuous THROUGH the seam, not merely defined there.
+//
+// The float fold `w = u − floor(u / t)·t` exists ONLY to bound |u|
+// before the `i32` conversion (an unbounded `u` from a far-away tile
+// origin would convert out of range). It is allowed to round to exactly
+// `t`; the integer wrap absorbs that with no discontinuity.
+//
+// ── IDENTITY AND GUARDS ────────────────────────────────────────────
+// `opacity == 0` returns the DESTINATION UNCHANGED, bit-exactly, for
+// every mask value: the premultiplied source becomes `vec4(0)`, so
+// `result = 0 + a·(1 − 0) = a`, and `mix(a, a, m)` is `a`.
+//
+// `scale <= 0` (and NaN, caught by the negated comparison) is
+// DEGENERATE — dividing by it would send the lattice coordinate to
+// ±inf, where the `i32` conversion is undefined. It is neutralised into
+// the identity: scale is forced to 1 and opacity to 0, so a zero scale
+// is a NO-OP fill rather than a garbage one. Opacity is range-guarded
+// by a POSITIVE TEST (`if (opacity > 0)`) rather than by `clamp`,
+// because `clamp`/`min` of a NaN is implementation-defined in WGSL
+// while an IEEE comparison against NaN is false on every lane — so a
+// NaN opacity is deterministically the identity instead of a NaN fill.
+// `tile_w`/`tile_h` of 0 mean
+// "the whole `in1` texture"; anything larger than the texture is clamped
+// to it, so no tap can ever leave the bound texture.
+//
+// COMPOSITE IS SOURCE-OVER, NOT A LERP. In the premultiplied working
+// space `pat · opacity` scales the pattern's alpha along with its color,
+// then `src + a·(1 − src.a)` puts it over the destination. For an opaque
+// tile this is exactly `mix(a, pat, opacity)`; for a tile with HOLES it
+// is the difference between the destination showing through the holes
+// (correct) and the destination being faded by them (wrong).
+
+/// `gen.pattern` params: engine-tile origin `(ox, oy)`; `scale` (tile
+/// magnification, 1 = source size, `<= 0` = no-op); `angle_deg`
+/// (lattice rotation in DEGREES, positive turns the pattern);
+/// `offset_x`/`offset_y` (phase in DESTINATION PIXELS, not tile
+/// fractions); `opacity` (0…1, source-over strength, 0 = identity);
+/// `tile_w`/`tile_h` (the pattern extent inside `in1`, in texels;
+/// 0 = the whole texture). 48-byte (16-aligned) uniform block.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct GenPatternParams {
+    pub ox: i32,
+    pub oy: i32,
+    pub scale: f32,
+    pub angle_deg: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub opacity: f32,
+    pub tile_w: u32,
+    pub tile_h: u32,
+    /// Explicit pads → 48-byte (16-aligned) uniform block.
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+#[allow(clippy::too_many_arguments)]
+impl GenPatternParams {
+    pub fn new(
+        ox: i32,
+        oy: i32,
+        scale: f32,
+        angle_deg: f32,
+        offset_x: f32,
+        offset_y: f32,
+        opacity: f32,
+        tile_w: u32,
+        tile_h: u32,
+    ) -> Self {
+        Self {
+            ox,
+            oy,
+            scale,
+            angle_deg,
+            offset_x,
+            offset_y,
+            opacity,
+            tile_w,
+            tile_h,
+            _pad0: 0,
+            _pad1: 0,
+            _abi_pad: 0,
+        }
+    }
+
+    /// A param block the shader is guaranteed to resolve to the
+    /// destination, unchanged. Lets a caller express "no fill" without
+    /// inventing a sentinel.
+    pub fn identity(tile_w: u32, tile_h: u32) -> Self {
+        Self::new(0, 0, 1.0, 0.0, 0.0, 0.0, 0.0, tile_w, tile_h)
+    }
+
+    /// True when this block cannot change a single texel — the two
+    /// no-op conditions the shader's guards produce. Both are written
+    /// as NEGATED positive tests so NaN lands on "identity" here
+    /// exactly as it does in the shader; an engine may skip the
+    /// dispatch entirely when this holds.
+    // The negated comparisons are DELIBERATE and clippy's suggested
+    // rewrite (`<= 0.0`) would be a behaviour change: `NaN <= 0.0` is
+    // false, so a NaN would stop reading as a no-op here while the
+    // shader still treats it as one. Negating the positive test is
+    // exactly how the WGSL guard is written, and NaN must land on the
+    // same side of both.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    pub fn is_identity(&self) -> bool {
+        !(self.opacity > 0.0) || !(self.scale > 0.0)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// out = over(tile(in1, lattice(p))·opacity, in0) — a source bitmap
+/// tiled with scale/angle/phase and composited over the destination,
+/// scoped by the ABI mask. Binary (`in0` destination, `in1` tile).
+/// `opacity = 0` (or `scale <= 0`) is the identity. ChannelEpsF16(4):
+/// the bilinear blend and the trig/divide are f32 on both lanes, the
+/// f16 output quantization absorbs the last-ulp divergence.
+pub static GEN_PATTERN: KernelDef = KernelDef {
+    id: "gen.pattern",
+    // POINT, not Generator or Resample, and the choice is load-bearing:
+    // the ROI relation for `in0` is 1:1 (a Point kernel's contract), so
+    // an engine must not inflate the destination window. `in1` is a
+    // whole-texture RESOURCE read at a computed coordinate rather than a
+    // co-located tile — the ABI has no separate class for that, and
+    // declaring `Resample` would make the engines do resample-ROI math
+    // on the destination, which would be wrong. `mip_exact: false`
+    // because the lattice is coordinate-absolute (§8.3), like the rest
+    // of this family.
+    class: KernelClass::Point,
+    inputs: 2,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<GenPatternParams>(),
+        fields: &[
+            ParamField {
+                name: "ox",
+                wgsl_ty: "i32",
+            },
+            ParamField {
+                name: "oy",
+                wgsl_ty: "i32",
+            },
+            ParamField {
+                name: "scale",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "angle_deg",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "offset_x",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "offset_y",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "opacity",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "tile_w",
+                wgsl_ty: "u32",
+            },
+            ParamField {
+                name: "tile_h",
+                wgsl_ty: "u32",
+            },
+            ParamField {
+                name: "_pad0",
+                wgsl_ty: "u32",
+            },
+            ParamField {
+                name: "_pad1",
+                wgsl_ty: "u32",
+            },
+        ],
+    },
+    wgsl: GEN_PATTERN_WGSL,
+    module: true,
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const GEN_PATTERN_WGSL: &str = "\
+// paged.image kernel `gen.pattern` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    ox: i32,
+    oy: i32,
+    scale: f32,
+    angle_deg: f32,
+    offset_x: f32,
+    offset_y: f32,
+    opacity: f32,
+    tile_w: u32,
+    tile_h: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(0) @binding(1) var in1 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+// Euclidean modulo. WGSL `%` on i32 is the TRUNCATED remainder (the
+// sign follows the dividend), so a bare `v % n` sends a negative index
+// to a negative index; `((v % n) + n) % n` lands in [0, n) for every v.
+// This is the whole seam fix: the tap one step LEFT of column 0 reads
+// the LAST column instead of clamping back onto the first.
+fn wrapi(v: i32, n: i32) -> i32 {
+    return ((v % n) + n) % n;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(outp);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+
+    // Tile extent: params win, 0 means 'the whole in1 texture', and the
+    // result is clamped to the texture so no tap can leave it. The
+    // final max(_, 1) keeps the modulo's divisor non-zero.
+    let td = textureDimensions(in1);
+    var tw = i32(params.tile_w);
+    var th = i32(params.tile_h);
+    if (tw <= 0 || tw > i32(td.x)) { tw = i32(td.x); }
+    if (th <= 0 || th > i32(td.y)) { th = i32(td.y); }
+    tw = max(tw, 1);
+    th = max(th, 1);
+
+    // Degenerate guard: a non-positive scale would divide the lattice
+    // coordinate to +/-inf, where the i32 conversion below is
+    // undefined. Neutralise it into the identity instead of producing
+    // garbage. NaN is caught by the same NEGATED comparison — IEEE
+    // comparisons with NaN are false on every lane, so both the shader
+    // and the reference take this branch deterministically.
+    var s = params.scale;
+    if (!(s > 0.0)) { s = 1.0; }
+
+    // Opacity is range-guarded the same POSITIVE-TEST way rather than
+    // with clamp(): clamp/min of a NaN is implementation-defined in
+    // WGSL, and 'the fill silently became NaN' is the one failure mode
+    // an opacity slider must not have. min() is only ever reached with
+    // a value already known to be > 0.
+    var op = 0.0;
+    if (params.opacity > 0.0) { op = min(params.opacity, 1.0); }
+    if (!(params.scale > 0.0)) { op = 0.0; }
+
+    // Texel CENTRE in GLOBAL pixels — global so the lattice is
+    // continuous across engine tiles (same reason gen.checker does it).
+    let px = f32(params.ox + i32(gid.x)) + 0.5;
+    let py = f32(params.oy + i32(gid.y)) + 0.5;
+    // Phase in DESTINATION pixels, before the rotation, so a drag moves
+    // the pattern the way the pointer went whatever the angle is.
+    let qx = px - params.offset_x;
+    let qy = py - params.offset_y;
+    // Inverse rotation into the lattice frame, then inverse scale into
+    // tile pixels. The pattern therefore APPEARS rotated by +angle_deg.
+    let ang = params.angle_deg * 0.017453292519943295;
+    let ca = cos(ang);
+    let sa = sin(ang);
+    let ux = (qx * ca + qy * sa) / s;
+    let uy = (qy * ca - qx * sa) / s;
+
+    // Fold into [0, tile). This exists ONLY to bound the magnitude
+    // before the i32 conversion; it may round to exactly the extent and
+    // that is harmless — the integer wrap below absorbs it.
+    let twf = f32(tw);
+    let thf = f32(th);
+    let wx = ux - floor(ux / twf) * twf;
+    let wy = uy - floor(uy / thf) * thf;
+
+    // Bilinear footprint on the texel-centre convention: source texel i
+    // covers [i, i+1) with its centre at i + 0.5, hence the -0.5 shift.
+    // THE SEAM: both tap indices are wrapped INDEPENDENTLY after the
+    // floor and never clamped, so wx < 0.5 gives taps (tw-1, 0) and
+    // wx > tw-0.5 gives taps (tw-1, 0) as well — either side of the
+    // boundary blends the tile's LAST column with its FIRST. A clamp
+    // would blend the edge column with itself and bake a hairline of
+    // edge colour into every lattice line.
+    let fx = wx - 0.5;
+    let fy = wy - 0.5;
+    let x0 = floor(fx);
+    let y0 = floor(fy);
+    let tx = fx - x0;
+    let ty = fy - y0;
+    let ix0 = wrapi(i32(x0), tw);
+    let iy0 = wrapi(i32(y0), th);
+    let ix1 = wrapi(i32(x0) + 1, tw);
+    let iy1 = wrapi(i32(y0) + 1, th);
+
+    let p00 = textureLoad(in1, vec2<i32>(ix0, iy0), 0);
+    let p10 = textureLoad(in1, vec2<i32>(ix1, iy0), 0);
+    let p01 = textureLoad(in1, vec2<i32>(ix0, iy1), 0);
+    let p11 = textureLoad(in1, vec2<i32>(ix1, iy1), 0);
+    let top = mix(p00, p10, vec4<f32>(tx));
+    let bot = mix(p01, p11, vec4<f32>(tx));
+    let pat = mix(top, bot, vec4<f32>(ty));
+
+    // Source-over in the PREMULTIPLIED working space: scaling a
+    // premultiplied colour by op scales its alpha too, so a tile with
+    // holes lets the destination through instead of fading it. op = 0
+    // gives src = 0 and result = a, bit-exactly — the identity.
+    let src = pat * op;
+    let result = src + a * (1.0 - src.a);
+
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
     &GEN_SOLID,
     &GEN_CHECKER,
@@ -1525,4 +1925,5 @@ pub static FAMILY: &[&KernelDef] = &[
     &GEN_REFLECTED_GRADIENT,
     &GEN_DIAMOND_GRADIENT,
     &GEN_NOISE,
+    &GEN_PATTERN,
 ];

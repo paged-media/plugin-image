@@ -1722,9 +1722,7 @@ mod wasm {
         dy: f32,
         vacate: u32,
     ) -> Result<DecodedHandle, JsValue> {
-        use image_kernels::families::geom::{
-            MoveSelectionParams, VacateMode, GEOM_MOVE_SELECTION,
-        };
+        use image_kernels::families::geom::{MoveSelectionParams, VacateMode, GEOM_MOVE_SELECTION};
         let mode = VacateMode::from_u32(vacate).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "unknown vacate mode {vacate} (0 transparent | 1 copy)"
@@ -1732,6 +1730,49 @@ mod wasm {
         })?;
         let params = MoveSelectionParams::new(dx, dy, mode);
         apply_point_kernel(handle, &GEOM_MOVE_SELECTION, params.as_bytes()).await
+    }
+
+    /// FILL with a PATTERN — Edit > Fill > Pattern, and the pattern
+    /// half of the paint bucket.
+    ///
+    /// `tile_handle` is an ordinary decoded-image handle, so any image
+    /// the plugin can open is a pattern; there is no separate pattern
+    /// asset type and deliberately no SWATCH. The vector pattern-paint
+    /// this is often confused with is RFI C-31 — core model + both
+    /// renderers + an IDML round-trip decision — and none of it is
+    /// needed to tile pixels into a raster layer.
+    ///
+    /// Selection-scoped like every other fill, so "fill the selection
+    /// with a pattern" comes free from the ABI mask.
+    /// `opacity == 0` is the identity.
+    #[wasm_bindgen]
+    pub async fn fill_pattern(
+        handle: u32,
+        tile_handle: u32,
+        scale: f32,
+        angle_deg: f32,
+        offset_x: f32,
+        offset_y: f32,
+        opacity: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::gen::{GenPatternParams, GEN_PATTERN};
+        let tile = IMAGES
+            .with(|m| m.borrow().get(&tile_handle).cloned())
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("unknown pattern-tile handle {tile_handle}"))
+            })?;
+        let params = GenPatternParams::new(
+            0,
+            0,
+            scale,
+            angle_deg,
+            offset_x,
+            offset_y,
+            opacity,
+            tile.width,
+            tile.height,
+        );
+        apply_binary_kernel(handle, tile_handle, &GEN_PATTERN, params.as_bytes()).await
     }
 
     // ───────────────── FILTER GALLERY (§18) ─────────────────
@@ -1773,7 +1814,9 @@ mod wasm {
         edge_threshold: f32,
         amount: f32,
     ) -> Result<DecodedHandle, JsValue> {
-        use image_kernels::families::gallery::{GalleryPosterizeEdgesParams, GALLERY_POSTERIZE_EDGES};
+        use image_kernels::families::gallery::{
+            GalleryPosterizeEdgesParams, GALLERY_POSTERIZE_EDGES,
+        };
         let params = GalleryPosterizeEdgesParams::new(levels, edge_amount, edge_threshold, amount);
         apply_point_kernel(handle, &GALLERY_POSTERIZE_EDGES, params.as_bytes()).await
     }
@@ -1834,7 +1877,8 @@ mod wasm {
         amount: f32,
     ) -> Result<DecodedHandle, JsValue> {
         use image_kernels::families::gallery::{GalleryDiffuseParams, GALLERY_DIFFUSE};
-        let params = GalleryDiffuseParams::new(0, 0, seed, radius_px, angle_deg, anisotropy, amount);
+        let params =
+            GalleryDiffuseParams::new(0, 0, seed, radius_px, angle_deg, anisotropy, amount);
         apply_point_kernel(handle, &GALLERY_DIFFUSE, params.as_bytes()).await
     }
 
@@ -1851,7 +1895,8 @@ mod wasm {
         amount: f32,
     ) -> Result<DecodedHandle, JsValue> {
         use image_kernels::families::gallery::{GalleryCrosshatchParams, GALLERY_CROSSHATCH};
-        let params = GalleryCrosshatchParams::new(0, 0, angle_deg, spacing_px, strength, sets, amount);
+        let params =
+            GalleryCrosshatchParams::new(0, 0, angle_deg, spacing_px, strength, sets, amount);
         apply_point_kernel(handle, &GALLERY_CROSSHATCH, params.as_bytes()).await
     }
 
@@ -1926,7 +1971,8 @@ mod wasm {
         amount: f32,
     ) -> Result<DecodedHandle, JsValue> {
         use image_kernels::families::gallery::{GalleryTexturizerParams, GALLERY_TEXTURIZER};
-        let params = GalleryTexturizerParams::new(0, 0, seed, kind, scale_px, relief, angle_deg, amount);
+        let params =
+            GalleryTexturizerParams::new(0, 0, seed, kind, scale_px, relief, angle_deg, amount);
         apply_point_kernel(handle, &GALLERY_TEXTURIZER, params.as_bytes()).await
     }
 
@@ -2048,6 +2094,81 @@ mod wasm {
     /// result like a fill" — the same prelude, mask, journal and
     /// layered-vs-flat landing every fill already goes through, so a new
     /// effect cannot accidentally acquire different semantics.
+    /// The two-input sibling of [`apply_point_kernel`], for kernels that
+    /// read a SECOND image (today: `gen.pattern`'s tile).
+    ///
+    /// The padding is not an implementation detail to skim past.
+    /// `execute_tile_once_async` sizes EVERY input texture at the output
+    /// dims, so a tile smaller than the destination cannot be uploaded
+    /// at its own size — it goes in zero-padded at the top-left and
+    /// tells the kernel its real extent through the params. That is why
+    /// `gen.pattern` carries `tile_w`/`tile_h` instead of asking
+    /// `textureDimensions(in1)`, which would report the padded size and
+    /// tile the padding along with the pattern.
+    async fn apply_binary_kernel(
+        handle: u32,
+        tile_handle: u32,
+        def: &'static image_kernels::KernelDef,
+        params: &[u8],
+    ) -> Result<DecodedHandle, JsValue> {
+        use half::f16;
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        let tile = IMAGES
+            .with(|m| m.borrow().get(&tile_handle).cloned())
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("unknown pattern-tile handle {tile_handle}"))
+            })?;
+        let mask = sel.as_ref().map(|cov| {
+            image_gpu::selection::SelectionMask::from_fn(img.width, img.height, |x, y| {
+                f32::from(cov.coverage_at(x, y)) / 255.0
+            })
+            .bytes()
+            .to_vec()
+        });
+        let mut win = Vec::with_capacity(img.rgba.len() * 2);
+        for &b in img.rgba.iter() {
+            win.extend_from_slice(&f16::from_f32(b as f32 / 255.0).to_le_bytes());
+        }
+        // in1: the tile, zero-padded into a destination-sized buffer.
+        let mut tile_win = vec![0u8; (img.width as usize) * (img.height as usize) * 4 * 2];
+        let copy_w = tile.width.min(img.width) as usize;
+        let copy_h = tile.height.min(img.height) as usize;
+        for y in 0..copy_h {
+            for x in 0..copy_w {
+                let src = (y * tile.width as usize + x) * 4;
+                let dst = (y * img.width as usize + x) * 4 * 2;
+                for c in 0..4 {
+                    let v = f16::from_f32(tile.rgba[src + c] as f32 / 255.0).to_le_bytes();
+                    tile_win[dst + c * 2] = v[0];
+                    tile_win[dst + c * 2 + 1] = v[1];
+                }
+            }
+        }
+        let out = image_gpu::execute_tile_once_async(
+            &ctx,
+            def,
+            &[
+                image_gpu::TileInput { f16_bytes: &win },
+                image_gpu::TileInput {
+                    f16_bytes: &tile_win,
+                },
+            ],
+            params,
+            mask.as_deref(),
+            img.width,
+            img.height,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        land_fill(
+            img.width,
+            img.height,
+            crate::fill::f16_to_rgba8(&out),
+            layered,
+        )
+        .await
+    }
+
     async fn apply_point_kernel(
         handle: u32,
         def: &'static image_kernels::KernelDef,
@@ -2103,9 +2224,11 @@ mod wasm {
     // HONEST SCOPE, in the code as well as in the panel:
     //   * Layers are canvas-extent layers. Per-layer MASKS, ADJUSTMENT
     //     layers, SMART objects, CLIPPING and GROUPS all ship
-    //     (2026-08-06), and smart filters fell out of clipping. What is
-    //     still absent: NESTED groups and Photoshop's pass-through group
-    //     mode, both of which need this list to be a tree.
+    //     (2026-08-06), and smart filters fell out of clipping. NESTED
+    //     groups and the pass-through mode this once listed as absent
+    //     shipped the same wave — nesting needed a stack of parked
+    //     accumulators keyed on the ancestor chain, not the tree this
+    //     comment predicted.
     //   * The journal is a PIXEL log: add / remove / reorder / rename /
     //     opacity / blend / visibility are NOT undoable.
     //   * A crop, resize or straighten changes the EXTENT, so it
