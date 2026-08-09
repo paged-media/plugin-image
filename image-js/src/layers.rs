@@ -465,6 +465,29 @@ impl LayerStack {
     /// Open a stack over `rgba` — one full-canvas [`BACKGROUND_LAYER_NAME`]
     /// layer. The pixels are SHARED (an `Arc` clone), so this is O(1) and
     /// costs no extra memory over the image it was opened on.
+    /// [`from_image`](Self::from_image) for a buffer that already knows
+    /// its depth — the door a 16-bit ingest comes through.
+    pub fn from_image_px(
+        width: u32,
+        height: u32,
+        rgba: crate::pixels::Pixels,
+    ) -> Result<LayerStack, IngestError> {
+        let want = (width as usize) * (height as usize) * rgba.bytes_per_pixel();
+        if width == 0 || height == 0 || rgba.len() != want {
+            return Err(IngestError::Decode(format!(
+                "layer stack: {} bytes for {width}x{height} (expected {want})",
+                rgba.len()
+            )));
+        }
+        // Build through the 8-bit door with a correctly-sized dummy so
+        // all the stack's other invariants are established exactly
+        // once, then swap the real buffer in.
+        let dummy = vec![0u8; (width as usize) * (height as usize) * 4];
+        let mut st = Self::from_image(width, height, Arc::from(dummy))?;
+        st.layers[0].rgba = rgba;
+        Ok(st)
+    }
+
     pub fn from_image(width: u32, height: u32, rgba: Arc<[u8]>) -> Result<LayerStack, IngestError> {
         let want = (width as usize) * (height as usize) * 4;
         if width == 0 || height == 0 || rgba.len() != want {
@@ -1154,9 +1177,14 @@ impl LayerStack {
         &mut self,
         label: &str,
         damage: Region,
-        pixels: Arc<[u8]>,
+        pixels: crate::pixels::Pixels,
     ) -> Result<RecordOutcome, IngestError> {
-        let want = (self.width as usize) * (self.height as usize) * 4;
+        // Sized from the INCOMING buffer's own depth. The journal is
+        // depth-agnostic — it stores opaque tile byte handles and
+        // `FlatImage` already took bytes-per-pixel as a parameter — so
+        // a 16-bit edit journals and undoes at 16 bits with no change
+        // to `image-graph` at all (16-bit-stack-plan.md step 4).
+        let want = (self.width as usize) * (self.height as usize) * pixels.bytes_per_pixel();
         if pixels.len() != want {
             return Err(IngestError::Decode(format!(
                 "layer edit: {} bytes for {}×{} (expected {want})",
@@ -1175,16 +1203,27 @@ impl LayerStack {
         let clipped = damage
             .intersect(Region::new(0, 0, self.width, self.height))
             .unwrap_or(Region::new(0, 0, 0, 0));
+        // A layer and the edit landing on it must agree on depth, or
+        // the journal would snapshot tiles in one geometry and restore
+        // them in another. Refuse rather than silently narrow.
+        if active.rgba.depth() != pixels.depth() {
+            return Err(IngestError::Unsupported(format!(
+                "layer edit at {:?} onto a {:?} layer — depths must match",
+                pixels.depth(),
+                active.rgba.depth()
+            )));
+        }
         let outcome = {
-            let active8 = active.rgba.to_rgba8();
-            let view = FlatImage::new(self.width, self.height, 4, &active8)
+            let bpp = active.rgba.bytes_per_pixel();
+            let raw = active.rgba.raw();
+            let view = FlatImage::new(self.width, self.height, bpp, raw)
                 .ok_or_else(|| IngestError::Decode("layer pixels are mis-sized".into()))?;
             // The layer's stable ID is the entry's SCOPE, so undo lands
             // in the layer that was painted and not in whichever one
             // happens to be selected when the user reaches for it.
             self.journal.record(label, active.id as u64, &view, clipped)
         };
-        self.layers[self.active].rgba = crate::pixels::Pixels::from_rgba8(pixels);
+        self.layers[self.active].rgba = pixels;
         Ok(outcome)
     }
 
@@ -1233,9 +1272,13 @@ impl LayerStack {
         // — but if it ever did, doing nothing is the only safe answer.
         let idx = self.layers.iter().position(|l| l.id as u64 == scope)?;
         let (w, h) = (self.width, self.height);
-        let mut buf: Vec<u8> = self.layers[idx].rgba.to_rgba8().into_owned();
+        // The layer's OWN bytes, at its own depth — narrowing here
+        // would make an undo lose precision the edit had kept.
+        let depth = self.layers[idx].rgba.depth();
+        let bpp = self.layers[idx].rgba.bytes_per_pixel();
+        let mut buf: Vec<u8> = self.layers[idx].rgba.raw().to_vec();
         let label = {
-            let mut view = FlatImage::new(w, h, 4, buf.as_mut_slice())?;
+            let mut view = FlatImage::new(w, h, bpp, buf.as_mut_slice())?;
             if undo {
                 self.journal.undo(&mut view)
             } else {
@@ -1243,7 +1286,7 @@ impl LayerStack {
             }
         }?;
         self.layers[idx].rgba =
-            crate::pixels::Pixels::from_rgba8(Arc::from(buf.into_boxed_slice()));
+            crate::pixels::Pixels::from_raw(Arc::from(buf.into_boxed_slice()), depth);
         self.active = idx;
         Some(label)
     }
@@ -2119,7 +2162,7 @@ mod tests {
         s.set_locked(0, true).expect("in range");
         assert!(s.active_is_editable().is_err());
         assert!(s
-            .edit_active("paint", Region::new(0, 0, 4, 4), px(4, 4, 9))
+            .edit_active("paint", Region::new(0, 0, 4, 4), px(4, 4, 9).into())
             .is_err());
         // …properties still move (that is what "lock the PIXELS" means).
         assert!(s.set_opacity(0, 0.5).is_ok());
@@ -2234,7 +2277,7 @@ mod tests {
     fn image_editor_layers_a_second_painted_layer_makes_the_composite_gpu_only() {
         let mut s = stack(4, 4);
         s.add("Paint");
-        s.edit_active("fill", Region::new(0, 0, 4, 4), px(4, 4, 200))
+        s.edit_active("fill", Region::new(0, 0, 4, 4), px(4, 4, 200).into())
             .expect("unlocked");
         assert!(!s.composite_is_trivial());
         // …and says so rather than inventing a CPU blend.
@@ -2266,7 +2309,7 @@ mod tests {
         let base = s.active().rgba.to_rgba8().into_owned();
         s.add("Cover");
         let white: Arc<[u8]> = px(16, 16, 255);
-        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white).into())
             .expect("unlocked");
         s.set_mask(1, Arc::new(SelectionCoverage::empty(16, 16)))
             .expect("attach a zero mask");
@@ -2287,7 +2330,7 @@ mod tests {
         let mut s = stack(16, 16);
         s.add("Cover");
         let white: Arc<[u8]> = px(16, 16, 255);
-        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white).into())
             .expect("unlocked");
         s.set_mask(1, Arc::new(SelectionCoverage::empty(16, 16)))
             .expect("attach");
@@ -2311,7 +2354,7 @@ mod tests {
         let base = s.active().rgba.to_rgba8().into_owned();
         s.add("Cover");
         let white: Arc<[u8]> = px(16, 16, 255);
-        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white).into())
             .expect("unlocked");
         // Left half selected, right half not.
         let half = SelectionCoverage::rasterize_rect(16, 16, 0.0, 0.0, 8.0, 16.0);
@@ -2333,7 +2376,7 @@ mod tests {
         let mut s = stack(16, 16);
         s.add("Cover");
         let white: Arc<[u8]> = px(16, 16, 255);
-        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white))
+        s.edit_active("fill", Region::new(0, 0, 16, 16), Arc::clone(&white).into())
             .expect("unlocked");
         let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
         assert!(out.iter().all(|&b| b == 255));
@@ -2354,11 +2397,11 @@ mod tests {
         s.edit_active(
             "base",
             Region::new(0, 0, 8, 8),
-            Arc::from(opaque_black.into_boxed_slice()),
+            crate::pixels::Pixels::from_rgba8(Arc::from(opaque_black.into_boxed_slice())),
         )
         .expect("unlocked");
         s.add("White");
-        s.edit_active("fill", Region::new(0, 0, 8, 8), px(8, 8, 255))
+        s.edit_active("fill", Region::new(0, 0, 8, 8), px(8, 8, 255).into())
             .expect("unlocked");
         s.set_opacity(1, 0.5).expect("in range");
         let out = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
@@ -2384,7 +2427,7 @@ mod tests {
         s.edit_active(
             "fill",
             Region::new(0, 0, 8, 8),
-            Arc::from(half.into_boxed_slice()),
+            crate::pixels::Pixels::from_rgba8(Arc::from(half.into_boxed_slice())),
         )
         .expect("unlocked");
         s.set_blend(1, "multiply").expect("registered");
@@ -2451,7 +2494,8 @@ mod tests {
         let painted: Arc<[u8]> = Arc::from(stroke.commit().into_boxed_slice());
 
         let composite_before = pollster::block_on(s.composite(Some(ctx), None)).expect("fold");
-        s.edit_active("Paint", damage, painted).expect("unlocked");
+        s.edit_active("Paint", damage, painted.into())
+            .expect("unlocked");
 
         // (1) the photo layer never moved.
         assert!(
@@ -2499,7 +2543,7 @@ mod tests {
         s.edit_active(
             "Paint",
             Region::new(0, 0, 300, 200),
-            Arc::from(painted.clone().into_boxed_slice()),
+            crate::pixels::Pixels::from_rgba8(Arc::from(painted.clone().into_boxed_slice())),
         )
         .expect("unlocked");
         assert_eq!(s.active().rgba.to_rgba8().into_owned(), painted);
@@ -2524,7 +2568,7 @@ mod tests {
         s.edit_active(
             "Paint",
             Region::new(10, 10, 40, 40),
-            Arc::from(painted.into_boxed_slice()),
+            crate::pixels::Pixels::from_rgba8(Arc::from(painted.into_boxed_slice())),
         )
         .expect("unlocked");
         let h = s.history();
@@ -2551,7 +2595,7 @@ mod tests {
         let mut s = stack(64, 64);
         s.add("B");
         let b_before = s.active().rgba.to_rgba8().into_owned();
-        s.edit_active("Paint B", Region::new(0, 0, 64, 64), px(64, 64, 200))
+        s.edit_active("Paint B", Region::new(0, 0, 64, 64), px(64, 64, 200).into())
             .expect("unlocked");
         let a_before = s.layers()[0].rgba.to_rgba8().into_owned();
 
@@ -2579,7 +2623,7 @@ mod tests {
         // stated, not discovered when Undo silently does nothing.
         let mut s = stack(32, 32);
         s.add("B");
-        s.edit_active("Paint", Region::new(0, 0, 32, 32), px(32, 32, 9))
+        s.edit_active("Paint", Region::new(0, 0, 32, 32), px(32, 32, 9).into())
             .expect("unlocked");
         assert!(s.history().can_undo);
         s.remove(1).expect("not the last layer");
@@ -2592,7 +2636,7 @@ mod tests {
         let mut s = stack(16, 16);
         let px16 = s.active().rgba.raw_arc();
         let out = s
-            .edit_active("Paint", Region::new(500, 500, 10, 10), px16)
+            .edit_active("Paint", Region::new(500, 500, 10, 10), px16.into())
             .expect("unlocked");
         assert_eq!(out, RecordOutcome::NoChange);
         assert!(!s.history().can_undo);

@@ -66,6 +66,14 @@ impl Pixels {
         }
     }
 
+    /// Re-wrap bytes that are ALREADY at `depth` — for a caller that
+    /// took `raw()` apart and is putting it back, such as the undo
+    /// journal. Wrong `depth` here is a silent misread, so this is
+    /// deliberately not a `From`.
+    pub fn from_raw(bytes: Arc<[u8]>, depth: SampleDepth) -> Self {
+        Self { bytes, depth }
+    }
+
     pub fn depth(&self) -> SampleDepth {
         self.depth
     }

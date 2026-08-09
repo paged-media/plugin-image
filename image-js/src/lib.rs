@@ -1381,7 +1381,38 @@ mod wasm {
         if !layered {
             return register_px(width, height, pixels);
         }
-        land_fill(width, height, pixels.to_rgba8().into_owned(), layered).await
+        // The LAYERED path keeps its depth too, now that `edit_active`
+        // and the undo journal are depth-aware: the journal stores
+        // opaque tile handles and `FlatImage` always took
+        // bytes-per-pixel as a parameter, so nothing in `image-graph`
+        // had to change (16-bit-stack-plan.md step 4).
+        let ctx = GPU.with(|g| g.borrow().clone());
+        let damage = SELECTION
+            .with(|s| s.borrow().coverage().and_then(|c| c.bounds()))
+            .unwrap_or(image_core::Region::new(0, 0, width, height));
+        with_stack_async(|mut doc| async move {
+            let result = async {
+                doc.stack
+                    .edit_active("Fill", damage, pixels)
+                    .map_err(ingest_err)?;
+                let rgba = doc
+                    .stack
+                    .composite(ctx.as_deref(), None)
+                    .await
+                    .map_err(ingest_err)?;
+                set_image_pixels(doc.handle, rgba)?;
+                Ok(DecodedHandle {
+                    handle: doc.handle,
+                    width,
+                    height,
+                    display: read_display(doc.handle),
+                    depth_reduced: false,
+                })
+            }
+            .await;
+            (doc, result)
+        })
+        .await
     }
 
     async fn land_fill(
@@ -1403,7 +1434,7 @@ mod wasm {
         with_stack_async(|mut doc| async move {
             let result = async {
                 doc.stack
-                    .edit_active("Fill", damage, pixels)
+                    .edit_active("Fill", damage, pixels.into())
                     .map_err(ingest_err)?;
                 let rgba = doc
                     .stack
@@ -3141,7 +3172,7 @@ mod wasm {
             .edit_active(
                 "Bake adjustments",
                 image_core::Region::new(0, 0, w, h),
-                Arc::from(out.into_boxed_slice()),
+                crate::pixels::Pixels::from_rgba8(Arc::from(out.into_boxed_slice())),
             )
             .map_err(ingest_err)?;
         let rgba = doc
@@ -3458,7 +3489,7 @@ mod wasm {
     ) -> Result<DecodedHandle, JsValue> {
         let (w, h) = (doc.stack.width(), doc.stack.height());
         doc.stack
-            .edit_active("Paint", damage, pixels)
+            .edit_active("Paint", damage, pixels.into())
             .map_err(ingest_err)?;
         let rgba = doc.stack.composite(ctx, None).await.map_err(ingest_err)?;
         set_image_pixels(doc.handle, rgba)?;
