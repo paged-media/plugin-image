@@ -47,6 +47,20 @@ fn colourful(w: u32, h: u32) -> Vec<u8> {
         .collect()
 }
 
+/// Colour AND translucent — the only shape with nothing to reduce.
+fn colourful_with_alpha(w: u32, h: u32) -> Vec<u8> {
+    (0..w * h)
+        .flat_map(|i| {
+            [
+                (i % 256) as u8,
+                (i % 97) as u8,
+                (i % 31) as u8,
+                (i % 251) as u8,
+            ]
+        })
+        .collect()
+}
+
 #[test]
 fn the_classifier_names_what_a_buffer_really_is() {
     assert_eq!(lossless_shape(&grey_opaque(16, 16)), LosslessShape::Gray);
@@ -54,7 +68,13 @@ fn the_classifier_names_what_a_buffer_really_is() {
         lossless_shape(&grey_with_alpha(16, 16)),
         LosslessShape::GrayA
     );
-    assert_eq!(lossless_shape(&colourful(16, 16)), LosslessShape::Rgba);
+    // Colour but OPAQUE: the alpha plane is dead weight and goes.
+    assert_eq!(lossless_shape(&colourful(16, 16)), LosslessShape::Rgb);
+    // Colour AND translucent: genuinely nothing to reduce.
+    assert_eq!(
+        lossless_shape(&colourful_with_alpha(16, 16)),
+        LosslessShape::Rgba
+    );
 }
 
 #[test]
@@ -66,7 +86,17 @@ fn one_off_grey_pixel_defeats_the_reduction() {
     let last = buf.len() - 4;
     buf[last] = 200;
     buf[last + 1] = 10;
-    assert_eq!(lossless_shape(&buf), LosslessShape::Rgba);
+    // Still opaque, so it falls back to Rgb rather than all the way to
+    // Rgba — the grey claim is defeated, the opacity claim is not.
+    assert_eq!(lossless_shape(&buf), LosslessShape::Rgb);
+
+    // And with one translucent pixel too, both claims are defeated.
+    let mut both = grey_opaque(32, 32);
+    both[3] = 128;
+    let n = both.len();
+    both[n - 4] = 200;
+    both[n - 3] = 10;
+    assert_eq!(lossless_shape(&both), LosslessShape::Rgba);
 }
 
 #[test]
@@ -74,7 +104,8 @@ fn a_reduced_png_decodes_back_bit_for_bit() {
     for (name, buf) in [
         ("grey opaque", grey_opaque(64, 64)),
         ("grey with alpha", grey_with_alpha(64, 64)),
-        ("colour", colourful(64, 64)),
+        ("colour opaque", colourful(64, 64)),
+        ("colour translucent", colourful_with_alpha(64, 64)),
     ] {
         let png = encode_rgba8_opt(&buf, 64, 64, RasterFormat::Png, 90, true)
             .unwrap_or_else(|e| panic!("{name}: encode failed: {e}"));
@@ -89,6 +120,21 @@ fn a_reduced_png_decodes_back_bit_for_bit() {
              came back different"
         );
     }
+}
+
+#[test]
+fn dropping_a_dead_alpha_plane_actually_saves_bytes() {
+    // The most common export there is: an opaque colour image carrying
+    // a pointless 255 alpha plane. A quarter of the raw bytes.
+    let buf = colourful(128, 128);
+    let plain = encode_rgba8(&buf, 128, 128, RasterFormat::Png).unwrap();
+    let reduced = encode_rgba8_opt(&buf, 128, 128, RasterFormat::Png, 90, true).unwrap();
+    assert!(
+        reduced.len() < plain.len(),
+        "reduced {} bytes vs plain {} — no saving",
+        reduced.len(),
+        plain.len()
+    );
 }
 
 #[test]

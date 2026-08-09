@@ -54,6 +54,9 @@ use super::PNG;
 pub struct PngTarget {
     sink: Vec<u8>,
     state: State,
+    /// Emit `ColorSpace::RGB` when an RGBA frame turns out to be fully
+    /// opaque. Off by default — a caller asking for RGBA gets RGBA.
+    drop_opaque_alpha: bool,
 }
 
 enum State {
@@ -77,7 +80,31 @@ impl PngTarget {
         PngTarget {
             sink: Vec::new(),
             state: State::Idle,
+            drop_opaque_alpha: false,
         }
+    }
+
+    /// Opt in to dropping a CONSTANT-OPAQUE alpha channel at encode
+    /// time: an RGBA frame whose every alpha is 255 is written as
+    /// three-channel RGB instead of four.
+    ///
+    /// This is exactly the mechanism `ChannelLayout`'s doc-comment
+    /// prescribes — "codec-native layouts that don't appear here (e.g.
+    /// interleaved RGB without alpha) are described by the codec's
+    /// `SourceInfo` and converted at the slice boundary". The spec set
+    /// (§5.1) has no three-channel arm ON PURPOSE, and RFI E-6 was
+    /// filed proposing to add one before that comment was read. The
+    /// frozen type stays frozen; the conversion lives here, where the
+    /// doc said it should.
+    ///
+    /// LOSSLESS by construction: it fires only when every alpha is
+    /// already 255, so the dropped plane carries no information. A
+    /// decoder reconstitutes opaque alpha for an RGB PNG by definition.
+    /// Saves a quarter of the raw bytes before deflate on the most
+    /// common export there is — an opaque screenshot or photograph.
+    pub fn drop_opaque_alpha(mut self, yes: bool) -> Self {
+        self.drop_opaque_alpha = yes;
+        self
     }
 
     /// Take the encoded PNG bytes after a successful `finish`.
@@ -193,10 +220,29 @@ impl ImageTarget for PngTarget {
             return Err(CodecError::Sequencing("finish before full coverage"));
         }
 
+        // Slice-boundary conversion (see `drop_opaque_alpha`). The scan
+        // stops at the first non-opaque pixel, so an image with alpha
+        // pays almost nothing to discover it is not a candidate.
+        let mut packed: Option<Vec<u8>> = None;
+        let mut cs = *colorspace;
+        if self.drop_opaque_alpha
+            && *colorspace == ColorSpace::RGBA
+            && buffer.chunks_exact(4).all(|px| px[3] == 255)
+        {
+            packed = Some(
+                buffer
+                    .chunks_exact(4)
+                    .flat_map(|px| [px[0], px[1], px[2]])
+                    .collect(),
+            );
+            cs = ColorSpace::RGB;
+        }
+        let buffer: &[u8] = packed.as_deref().unwrap_or(buffer);
+
         let opts = EncoderOptions::new(
             info.width as usize,
             info.height as usize,
-            *colorspace,
+            cs,
             BitDepth::Eight,
         );
         let mut encoder = PngEncoder::new(buffer, opts);

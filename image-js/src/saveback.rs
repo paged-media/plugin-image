@@ -156,13 +156,19 @@ const RGBA8: PixelFormat = PixelFormat {
 /// One full-frame strip (the targets accumulate and encode at `finish`).
 /// What a buffer can be re-expressed as WITHOUT losing a bit.
 ///
-/// Only the reductions the frozen `ChannelLayout` can actually name.
-/// Notably absent: RGB. Dropping a constant-opaque alpha would save a
-/// quarter of the raw bytes on every screenshot and photograph, and it
-/// is not expressible — `ChannelLayout` is `Gray | GrayA | Rgba | Cmyk
-/// | Cmyka`, with no three-channel arm, and the type is frozen. Filed
-/// as RFI E-6 rather than worked around, because inventing a private
-/// 3-channel path here would be a second notion of what a layout is.
+/// Two of these are `ChannelLayout` arms; the third is not, and that
+/// asymmetry is the point.
+///
+/// `ChannelLayout` has no three-channel RGB and is frozen — so dropping
+/// a constant-opaque alpha looked unbuildable, and RFI E-6 was filed
+/// proposing to amend the enum. Then the type's own doc-comment turned
+/// out to prescribe the answer: the spec set (§5.1) omits RGB **on
+/// purpose**, and "codec-native layouts that don't appear here (e.g.
+/// interleaved RGB without alpha) are described by the codec's
+/// `SourceInfo` and converted at the slice boundary". So `Rgb` here is
+/// an ENCODE-TIME shape, honoured by `PngTarget::drop_opaque_alpha`,
+/// and the frozen type never moves. Reading the comment on the thing I
+/// was about to change would have saved filing the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LosslessShape {
     /// r == g == b everywhere AND every alpha is 255 — one byte per
@@ -170,6 +176,9 @@ pub enum LosslessShape {
     Gray,
     /// r == g == b everywhere, alpha varies — two instead of four.
     GrayA,
+    /// Colour, but every alpha is 255 — three bytes instead of four.
+    /// Not a `ChannelLayout`; the codec converts at the slice boundary.
+    Rgb,
     /// Nothing to reduce.
     Rgba,
 }
@@ -178,19 +187,25 @@ pub enum LosslessShape {
 /// the first pixel that rules both reductions out — the common case
 /// (a colour photograph) exits within a few pixels.
 pub fn lossless_shape(rgba: &[u8]) -> LosslessShape {
+    let mut grey = true;
     let mut opaque = true;
     for px in rgba.chunks_exact(4) {
         if px[0] != px[1] || px[1] != px[2] {
-            return LosslessShape::Rgba;
+            grey = false;
         }
         if px[3] != 255 {
             opaque = false;
         }
+        // Both ruled out: nothing further can change the answer.
+        if !grey && !opaque {
+            return LosslessShape::Rgba;
+        }
     }
-    if opaque {
-        LosslessShape::Gray
-    } else {
-        LosslessShape::GrayA
+    match (grey, opaque) {
+        (true, true) => LosslessShape::Gray,
+        (true, false) => LosslessShape::GrayA,
+        (false, true) => LosslessShape::Rgb,
+        (false, false) => LosslessShape::Rgba,
     }
 }
 
@@ -248,7 +263,9 @@ pub fn encode_rgba8_opt(
         LosslessShape::Rgba
     };
     let (channels, packed) = match shape {
-        LosslessShape::Rgba => (ChannelLayout::Rgba, None),
+        // Rgb is not a ChannelLayout: the buffer stays RGBA here and
+        // the CODEC drops the plane, per the slice-boundary rule.
+        LosslessShape::Rgb | LosslessShape::Rgba => (ChannelLayout::Rgba, None),
         LosslessShape::Gray => (
             ChannelLayout::Gray,
             Some(rgba.chunks_exact(4).map(|p| p[0]).collect::<Vec<u8>>()),
@@ -276,7 +293,7 @@ pub fn encode_rgba8_opt(
         row_stride: width as usize * usize::from(channels.count()),
         bytes,
     };
-    let mut t = PngTarget::new();
+    let mut t = PngTarget::new().drop_opaque_alpha(shape == LosslessShape::Rgb);
     t.begin(info).map_err(err)?;
     t.write_strip(region, &slice).map_err(err)?;
     t.finish().map_err(err)?;
