@@ -37,9 +37,20 @@
 //! are the separable two-pass Gaussian (spec §9.2); `conv.unsharp` is
 //! the binary-point unsharp mask over (original, blurred).
 //!
+//! `conv.shape` (2026-08) is the family's one TWO-INPUT windowed
+//! kernel: the convolution weight for each tap comes from a coverage
+//! bitmap on `in1` instead of from a formula, which is what makes
+//! "pick a shape, set a radius" possible at all. It is the exact
+//! generalisation of `conv.lens` — that kernel's flat-topped disc is
+//! one particular bitmap — and it inherits `conv.lens`'s `R_MAX`, its
+//! derived-halo prologue and its "return the centre pixel rather than
+//! divide a one-tap sum" guard.
+//!
 //! Provenance: separable convolution and box filtering are standard
 //! literature; unsharp masking is standard (W3C `feGaussianBlur`-style
-//! sharpening: out = a + amount·(a − blurred)); no reference reading.
+//! sharpening: out = a + amount·(a − blurred)); convolution with a
+//! user-supplied kernel image is the textbook definition of a discrete
+//! 2D convolution and needs no reference reading.
 
 use crate::{KernelClass, KernelDef, ParamField, ParamsLayout, Tolerance};
 
@@ -1306,6 +1317,335 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+// ─────────────────────────── shape blur ────────────────────────────
+//
+// Filter ▸ Blur ▸ Shape Blur: convolve with an ARBITRARY kernel shape.
+// Photoshop ships a shape library and the user picks one plus a radius;
+// here the shape is whatever coverage bitmap the caller binds to `in1`,
+// so the "library" is a folder of images rather than a hardcoded set.
+//
+// WHY IT IS NOT `conv.lens` WITH A PARAMETER. `conv.lens` decides
+// membership analytically (`dx² + dy² <= r²`). There is no analytic
+// membership test for "a hexagon", "a five-pointed star" or "the user's
+// logo" — the SHAPE IS THE DATA. That is the whole reason this kernel
+// needs a second input, and it is why it is the last blur to be built:
+// everything before it could be written as a formula.
+
+/// `conv.shape` params — the SHAPE itself arrives as a coverage bitmap
+/// on `in1`; these four numbers say how large to scale it, how much of
+/// it to apply, and (because the dispatcher pads that bitmap) how much
+/// of `in1` is actually shape.
+///
+/// - `radius_px` — HALF-EXTENT in DESTINATION pixels. The shape is
+///   scaled to fill the box `[-radius_px, +radius_px]²` centred on the
+///   output pixel, so radius 12 spans 25 px exactly like a `conv.lens`
+///   disc of radius 12 does, and the two sliders mean the same thing.
+///   Clamped to `R_MAX`; `< 0.5` is the identity.
+/// - `amount` — wet/dry blend in `[0, 1]`. 0 is the identity, > 1
+///   saturates at a fully wet result (`conv.bilateral`'s convention).
+/// - `shape_w`, `shape_h` — the REAL extent of the shape inside `in1`,
+///   in TEXELS. 0 means "the whole `in1` texture"; anything larger than
+///   the bound texture clamps to it, so no tap can read outside.
+///   This travels in the params for the reason `gen.pattern`'s
+///   `tile_w`/`tile_h` do: `execute_tile_once_async` sizes EVERY input
+///   texture at the OUTPUT dims, so a shape smaller than the
+///   destination arrives zero-padded at the top-left and
+///   `textureDimensions(in1)` would report the padded size — which
+///   would scale a 64² star down into the corner of a 1024² box and
+///   convolve with a mostly-empty field.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ConvShapeParams {
+    pub radius_px: f32,
+    pub amount: f32,
+    pub shape_w: u32,
+    pub shape_h: u32,
+    pub _abi_pad: u32,
+}
+
+#[allow(clippy::new_without_default)]
+impl ConvShapeParams {
+    pub fn new(radius_px: f32, amount: f32, shape_w: u32, shape_h: u32) -> Self {
+        Self {
+            radius_px,
+            amount,
+            shape_w,
+            shape_h,
+            _abi_pad: 0,
+        }
+    }
+
+    /// The engine's dispatch-skip predicate: true when the kernel is a
+    /// documented no-op and the dispatch can be elided entirely.
+    ///
+    /// Written as NEGATED POSITIVE TESTS, exactly as the WGSL guards
+    /// are. clippy would rewrite `!(x > 0.0)` to `x <= 0.0`, which is a
+    /// different function at NaN — `NaN <= 0.0` is false, so a NaN
+    /// slider would stop reading as a no-op here while the shader still
+    /// treats it as one. A predicate that disagrees with its shader is
+    /// worse than no predicate.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    pub fn is_identity(&self) -> bool {
+        !(self.amount > 0.0) || !(self.radius_px >= 0.5)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+/// SHAPE blur — a normalised convolution whose kernel is a bitmap.
+///
+/// `out = Σ wᵢ·sᵢ / Σ wᵢ` over the taps in the scaled shape box, where
+/// `wᵢ` is the shape's RED channel at the tap's position and `sᵢ` is
+/// the (premultiplied) image sample there, then `mix(a, that, amount)`.
+///
+/// RED, not alpha, is the coverage channel. A shape library is a set of
+/// silhouettes, and the two ways anyone ships those are white-on-black
+/// (alpha ≡ 1 everywhere — reading alpha would turn every shape into a
+/// box) and white-on-transparent. In the premultiplied working space
+/// the second form has `r == a` wherever the shape is white, so red is
+/// correct for BOTH conventions while alpha is correct for only one.
+/// It is also the channel the ABI's own selection mask is read from, so
+/// "a coverage field lives in `.r`" stays one rule.
+///
+/// The divisor is the weight sum ACTUALLY ACCUMULATED, never a
+/// precomputed constant. Two things make a constant wrong: the tap grid
+/// is the destination pixel grid, so the discrete sum over a given
+/// shape depends on `radius_px` and is not `∫shape` scaled; and taps
+/// whose weight is zero, non-positive or NaN are skipped, so the
+/// divisor is only ever the weight of the samples that entered the
+/// numerator. Divide by anything else and the result darkens by exactly
+/// the fraction of the footprint that did not contribute.
+///
+/// `R_MAX = 24` matches `conv.lens`, which is the right ceiling because
+/// it is the same cost: the worst case is a 49×49 = 2401-tap gather,
+/// already the most expensive kernel in the family. 32 would be
+/// 65×65 = 4225 taps — 1.76× the work for a blur only 33% wider, which
+/// is a bad trade to make on a slider a designer drags.
+///
+/// Provenance: discrete 2D convolution with a user-supplied kernel
+/// image; normalised (weighted-mean) form so a non-unit-sum kernel does
+/// not change exposure. Standard literature; no reference reading.
+pub static CONV_SHAPE: KernelDef = KernelDef {
+    id: "conv.shape",
+    // WINDOWED in `in0` (the ROI must inflate by the largest radius the
+    // slider can ask for) but BINARY, because `in1` is a whole-texture
+    // RESOURCE read at a computed coordinate, not a co-located window —
+    // the same asymmetry `gen.pattern` documents. The ABI has no class
+    // that says "windowed in one input, resource in the other"; the
+    // radius is the part an engine must act on, so that is what the
+    // class states.
+    class: KernelClass::Windowed { radius: (24, 24) },
+    inputs: 2,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<ConvShapeParams>(),
+        fields: &[
+            ParamField {
+                name: "radius_px",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "amount",
+                wgsl_ty: "f32",
+            },
+            ParamField {
+                name: "shape_w",
+                wgsl_ty: "u32",
+            },
+            ParamField {
+                name: "shape_h",
+                wgsl_ty: "u32",
+            },
+        ],
+    },
+    wgsl: CONV_SHAPE_WGSL,
+    module: true,
+    // The shape is scaled in PIXELS, so a mip level must re-derive
+    // `radius_px` (§8.3) — the same reason `conv.lens` is not mip-exact.
+    mip_exact: false,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const CONV_SHAPE_WGSL: &str = "\
+// paged.image kernel `conv.shape` — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    radius_px: f32,
+    amount: f32,
+    shape_w: u32,
+    shape_h: u32,
+    _abi_pad: u32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(0) @binding(1) var in1 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+const R_MAX : i32 = 24;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let d = textureDimensions(outp);
+    if (gid.x >= d.x || gid.y >= d.y) { return; }
+    let dims = vec2<i32>(i32(d.x), i32(d.y));
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    // ABI: a Windowed kernel is handed `in0` expanded by the radius, so
+    // output (x,y) is window centre (x+rx, y+ry). DERIVE that offset
+    // rather than hardcoding it — the one-shot dispatcher
+    // (`execute_tile_once_async`) binds `in0` at the OUTPUT dims with no
+    // halo, and a hardcoded +r would read shifted there. Deriving gives
+    // r under the tiled path and 0 under the one-shot path, so the
+    // kernel is correct under both instead of only the one it was
+    // written against. This kernel in particular is reached through the
+    // ONE-SHOT path today (the binary door in image-js), so the derived
+    // form is not defensive here — it is the live case.
+    let wd = textureDimensions(in0);
+    let win = vec2<i32>(i32(wd.x), i32(wd.y));
+    let halo = (win - dims) / 2;
+    let base = xy + halo;
+    let a = textureLoad(in0, base, 0);
+
+    // IDENTITY 1 — a dry mix. The NEGATED positive test also swallows a
+    // NaN amount: IEEE comparisons with NaN are false on every lane, so
+    // a NaN slider takes this branch deterministically on GPU and in any
+    // reference twin. `clamp(amount, 0, 1)` would not — clamp/min of a
+    // NaN is implementation-defined in WGSL, and 'the layer silently
+    // became NaN' is the one failure an amount slider must not have.
+    // The early return writes `a` RAW rather than through the mask
+    // epilogue: `mix(a, a, m)` is `a*(1-m) + a*m`, which is only
+    // bit-exactly `a` for dyadic m, and a no-op must be bit-exact.
+    if (!(params.amount > 0.0)) {
+        textureStore(outp, xy, a);
+        return;
+    }
+    // Safe now: the value is known to be a real number > 0, so min()
+    // has no NaN to be implementation-defined about. +inf saturates to 1.
+    let amt = min(params.amount, 1.0);
+
+    // IDENTITY 2 — a shape scaled to under one pixel across. Below half
+    // a pixel the box [-r, +r] cannot reach a second sample, so the
+    // convolution IS the centre pixel; return it rather than divide a
+    // one-tap sum by its own weight and call that a blur. The threshold
+    // is stated as 0.5 rather than left to `ceil(r) < 1`, which is only
+    // ever true at exactly 0 and would let radius 0.2 pay for a
+    // full-footprint loop to rediscover the input.
+    if (!(params.radius_px >= 0.5)) {
+        textureStore(outp, xy, a);
+        return;
+    }
+    let r = min(params.radius_px, f32(R_MAX));
+    let ri = i32(ceil(r));
+
+    // Shape extent: params win, 0 means 'the whole in1 texture', and the
+    // result is clamped to the bound texture so no tap can leave it. The
+    // final max(_, 1) keeps the tap→texel scale below finite.
+    let sd = textureDimensions(in1);
+    var sw = i32(params.shape_w);
+    var sh = i32(params.shape_h);
+    if (sw <= 0 || sw > i32(sd.x)) { sw = i32(sd.x); }
+    if (sh <= 0 || sh > i32(sd.y)) { sh = i32(sd.y); }
+    sw = max(sw, 1);
+    sh = max(sh, 1);
+
+    // Tap → shape texel. A tap at offset f maps to (f + r)/(2r) of the
+    // way across the shape; hoisting f32(sw)/(2r) out of the loop turns
+    // that into one multiply per tap. r >= 0.5 by the guard above, so
+    // the divisor is >= 1 and cannot blow up.
+    let kx = f32(sw) / (2.0 * r);
+    let ky = f32(sh) / (2.0 * r);
+
+    var acc = vec4<f32>(0.0);
+    var wsum = 0.0;
+    for (var dy : i32 = -R_MAX; dy <= R_MAX; dy = dy + 1) {
+        if (dy < -ri || dy > ri) { continue; }
+        let fy = f32(dy);
+        // SUPPORT is the box [-r, +r], not [-ri, +ri]. ri = ceil(r)
+        // overshoots for a fractional radius, and letting those taps in
+        // would smear the shape's border row outward by a pixel — the
+        // same reason conv.lens tests dx²+dy² against r² rather than
+        // trusting its own loop bound.
+        if (fy < -r || fy > r) { continue; }
+        // NEAREST, not bilinear — see the long note in the dx loop.
+        // min(_, sh-1) catches only the closed right endpoint fy == +r,
+        // which maps to exactly sh under the texel-covers-[i, i+1)
+        // convention; every interior tap truncates inside the shape.
+        let sy = min(i32((fy + r) * ky), sh - 1);
+        for (var dx : i32 = -R_MAX; dx <= R_MAX; dx = dx + 1) {
+            if (dx < -ri || dx > ri) { continue; }
+            let fx = f32(dx);
+            if (fx < -r || fx > r) { continue; }
+            let sx = min(i32((fx + r) * kx), sw - 1);
+            // THE SAMPLING DECISION — nearest, deliberately, and NOT
+            // what gen.pattern does with the same kind of second input.
+            //
+            // gen.pattern's sample is a COLOUR that goes straight to the
+            // screen, so nearest would stair-step a visible edge. This
+            // sample is a WEIGHT inside a normalised sum over up to 2401
+            // taps: smoothing an individual weight moves the quotient by
+            // O(1/taps) and is invisible.
+            //
+            // Where it IS visible is the shape's silhouette, and there
+            // the hard edge is the POINT. A shape blur is chosen for its
+            // recognisable bokeh — a highlight must smear into a
+            // hexagon with a rim, the same flat-topped-support argument
+            // conv.lens makes for its disc. Bilinear rounds that rim off
+            // by a shape texel, softening the one feature that
+            // distinguishes this from a Gaussian.
+            //
+            // And the antialiasing bilinear would supply is already
+            // unavailable: the tap grid IS the destination pixel grid,
+            // at most 49 taps across, while a shape asset is 128-256 px.
+            // Consecutive taps land more than a shape texel apart, so
+            // bilinear degenerates toward nearest anyway — it would cost
+            // 4 textureLoads per tap (9604 instead of 2401 at the worst
+            // case) to compute a number one load already gives.
+            //
+            // The honest failure mode: a shape bitmap SMALLER than the
+            // tap footprint quantises the weight field into plateaus and
+            // the bokeh terraces faintly. That is a shape-asset
+            // resolution problem (ship shapes >= 128 px), the same class
+            // of degradation as conv.motion's fixed tap count banding at
+            // extreme lengths.
+            let w = textureLoad(in1, vec2<i32>(sx, sy), 0).r;
+            // Skip by a POSITIVE TEST, so zero, negative and NaN
+            // coverage all fall out together. A negative weight could
+            // drag wsum through zero and detonate the divide; a NaN
+            // would poison the whole output — and mix(a, NaN, 0.0) is
+            // NaN, so it would survive even a dry blend downstream.
+            if (!(w > 0.0)) { continue; }
+            // Edge-replicate, like every other windowed kernel here. The
+            // clamped tap contributes a REAL sample and keeps its weight
+            // in the divisor, so a shape overhanging the image border
+            // neither darkens (which reading zeros would) nor gets a
+            // smaller divisor than numerator.
+            let c = clamp(base + vec2<i32>(dx, dy),
+                          vec2<i32>(0, 0), win - vec2<i32>(1, 1));
+            acc = acc + textureLoad(in0, c, 0) * w;
+            wsum = wsum + w;
+        }
+    }
+
+    // IDENTITY 3 — a DEGENERATE shape (all zeros, or every tap skipped)
+    // gathered no weight at all. Return the input rather than divide by
+    // zero. An explicit branch rather than select(): select evaluates
+    // both arms, and there is no reason to compute acc/0.0 just to throw
+    // it away. Negated test, so a NaN wsum lands here too.
+    if (!(wsum > 0.0)) {
+        textureStore(outp, xy, a);
+        return;
+    }
+    let blurred = acc / wsum;
+
+    let result = mix(a, blurred, vec4<f32>(amt));
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
 pub static FAMILY: &[&KernelDef] = &[
     &CONV_LENS,
     &CONV_BILATERAL,
@@ -1318,4 +1658,5 @@ pub static FAMILY: &[&KernelDef] = &[
     &CONV_FIND_EDGES,
     &CONV_MOTION,
     &CONV_RADIAL,
+    &CONV_SHAPE,
 ];

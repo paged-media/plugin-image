@@ -400,6 +400,23 @@ export interface ImageSession {
   /** PIXELATE — mosaic. `cellPx` <= 1 is the identity. */
   applyMosaic(cellPx: number): Promise<boolean>;
   /**
+   * BLUR with an arbitrary SHAPE — Filter ▸ Blur ▸ Shape Blur.
+   *
+   * `shapeHandle` is an ordinary decoded image, so any file the plugin
+   * can open is a blur shape. Coverage is read from RED rather than
+   * alpha, which is correct for both ways shape libraries ship
+   * (white-on-black, where alpha is identically 1, and
+   * white-on-transparent, where premultiplied red equals alpha).
+   *
+   * `radiusPx` is the HALF-extent; below 0.5 it is the identity, as is
+   * `amount` 0.
+   */
+  applyShapeBlur(
+    shapeHandle: number,
+    radiusPx?: number,
+    amount?: number,
+  ): Promise<boolean>;
+  /**
    * FILL with a PATTERN — Edit ▸ Fill ▸ Pattern.
    *
    * The tile is an ordinary decoded image, so any file the plugin can
@@ -1833,6 +1850,11 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     async applyMosaic(cellPx) {
       return this.applyEffect("Mosaic", (h) => engine!.applyMosaic(h, cellPx));
+    },
+    async applyShapeBlur(shapeHandle, radiusPx = 8, amount = 1) {
+      return this.applyEffect("Shape blur", (h) =>
+        engine!.applyShapeBlur(h, shapeHandle, radiusPx, amount),
+      );
     },
     async fillPattern(
       tileHandle,

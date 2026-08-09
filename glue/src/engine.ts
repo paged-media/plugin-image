@@ -1136,6 +1136,13 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
   applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /** BLUR — SHAPE. `shapeHandle` supplies the silhouette (read from RED). */
+  applyShapeBlur(
+    handle: number,
+    shapeHandle: number,
+    radiusPx: number,
+    amount: number,
+  ): Promise<DecodedInfo>;
   /**
    * FILL with a PATTERN. `tileHandle` is an ordinary decoded-image
    * handle — any image the plugin can open is a pattern.
@@ -1584,6 +1591,12 @@ export interface ImageWasmModule {
     spin: boolean,
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
+  apply_shape_blur(
+    handle: number,
+    shape_handle: number,
+    radius_px: number,
+    amount: number,
+  ): Promise<DecodedHandleWasm>;
   fill_pattern(
     handle: number,
     tile_handle: number,
@@ -2139,6 +2152,11 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyMosaic(handle, cellPx) {
       return decodedInfoOf(await wasm.apply_mosaic(handle, cellPx));
+    },
+    async applyShapeBlur(handle, shapeHandle, radiusPx, amount) {
+      return decodedInfoOf(
+        await wasm.apply_shape_blur(handle, shapeHandle, radiusPx, amount),
+      );
     },
     async fillPattern(handle, tileHandle, scale, angleDeg, offsetX, offsetY, opacity) {
       return decodedInfoOf(

@@ -618,6 +618,30 @@ export function apply_selective_color(handle, range, cyan, magenta, yellow, blac
 }
 
 /**
+ * BLUR — SHAPE. Filter > Blur > Shape Blur: convolve with an
+ * ARBITRARY shape rather than a formula.
+ *
+ * `shape_handle` is an ordinary decoded-image handle, so any image
+ * the plugin can open is a blur shape. Coverage is read from RED,
+ * not alpha — a shape library ships white-on-black (where alpha is
+ * identically 1, and reading it would make every shape a box) or
+ * white-on-transparent (where premultiplied red equals alpha), and
+ * red is correct for both conventions.
+ *
+ * `radius_px` is the HALF-extent the shape is scaled to; below 0.5
+ * it is the identity, as is `amount == 0`.
+ * @param {number} handle
+ * @param {number} shape_handle
+ * @param {number} radius_px
+ * @param {number} amount
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_shape_blur(handle, shape_handle, radius_px, amount) {
+    const ret = wasm.apply_shape_blur(handle, shape_handle, radius_px, amount);
+    return ret;
+}
+
+/**
  * SHARPEN — smart sharpen. `amount` 0 is the identity; regions
  * whose local contrast is below `threshold` are left untouched
  * whatever the amount, which is the point of the "smart".
@@ -2930,12 +2954,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 591, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 596, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h03919243d83d1356);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 626, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 631, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7);
             return ret;
         },

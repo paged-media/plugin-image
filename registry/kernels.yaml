@@ -1772,6 +1772,25 @@
     - "weights each tap by colour distance as well as spatial distance, so taps across an edge count for almost nothing and the edge survives a blur strong enough to flatten the noise beside it"
     - "sigma_range is the whole control: large degrades to a Gaussian, small degrades to the identity"
     - "the centre tap always has weight 1, so the weight sum is never zero and the final blend is always defined"
+- id: conv.shape
+  rust_path: families::conv::CONV_SHAPE
+  state_row: image.kernel.family-t2
+  class: windowed
+  mip_exact: false
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Filter > Blur > Shape Blur: convolution with an ARBITRARY kernel shape supplied as a coverage bitmap on in1 - the exact generalisation of conv.lens, whose flat-topped disc is one particular bitmap"
+    - "the last blur in the family because it is the first that cannot be a formula: there is no analytic membership test for a hexagon or the user's logo, so the SHAPE IS THE DATA and the kernel needs a second input"
+    - "coverage is the RED channel, not alpha: a shape library ships white-on-black (alpha identically 1 - reading it would make every shape a box) or white-on-transparent (where premultiplied r == a), so red is correct for both conventions and alpha for only one"
+    - "NEAREST, not bilinear, and deliberately unlike gen.pattern: the sampled value is a WEIGHT in a normalised sum over up to 2401 taps, where interpolation is invisible, rather than a colour on screen - and the one place it IS visible is the silhouette rim, the flat-topped support that makes bokeh read as a shape instead of a Gaussian"
+    - "the divisor is the weight sum ACTUALLY gathered, never a precomputed constant: the discrete sum over a shape depends on radius_px (asserted 4.5/12.5/60.5/180.5 at radii 1/2/5/9), so anything else darkens by the fraction of the footprint that did not contribute"
+    - "taps are edge-replicated into the window, so a shape overhanging the image border neither darkens nor gets a divisor larger than its numerator - a constant field survives the convolution bit-exactly, corners included"
+    - "radius 24 because it is exactly what conv.lens already pays (49x49 = 2401 taps); 32 would be 4225 taps, 1.76x the work for a blur 33% wider - a bad trade on a slider a designer drags. A test asserts the declared radius equals the module's R_MAX so they cannot drift"
+    - "identity: amount 0, radius_px < 0.5, and a degenerate all-zero shape (wsum 0 returns the input rather than dividing) - all three as negated positive tests so NaN lands on identity deterministically"
+  tests:
+    rust: ["image-kernels/tests/conv_shape.rs"]
 - id: conv.smart_sharpen
   rust_path: families::conv::CONV_SMART_SHARPEN
   state_row: image.kernel.family-t2

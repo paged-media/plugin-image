@@ -384,6 +384,20 @@ const TABLE: &[Row] = &[
           stress: P::Fields(&[
               ("radius_px", V::F(4.0)), ("threshold", V::F(0.7)), ("boost", V::F(2.0))]),
           note: "radius below half a pixel takes the explicit early return" },
+    Row { id: "conv.shape",
+          identity: Identity::Params(P::Fields(&[
+              ("radius_px", V::F(6.0)), ("amount", V::F(0.0))])),
+          stress: P::Fields(&[
+              ("radius_px", V::F(4.0)), ("amount", V::F(1.0)),
+              ("shape_w", V::U(0)), ("shape_h", V::U(0))]),
+          note: "binary — in1 is the shape COVERAGE bitmap, read from .r. amount 0 \
+                 takes the early return, which writes the input raw, so the identity \
+                 holds for ANY in1 content; that matters because this lane synthesises \
+                 its second input rather than binding a real silhouette. shape_w/h 0 \
+                 mean `the whole in1 texture`, so the stress block convolves with the \
+                 stimulus tile and gathers a positive weight sum. Windowed AND binary, \
+                 so it rides the TILE lane — execute_windowed_once rejects inputs != 1 \
+                 — which is safe only because it derives its halo (RFI E-4)" },
     Row { id: "conv.bilateral",
           identity: Identity::Params(P::Fields(&[
               ("radius_px", V::F(2.0)), ("sigma_range", V::F(0.1)), ("amount", V::F(0.0))])),
@@ -824,9 +838,21 @@ fn mask_left_half(w: u32, h: u32) -> Vec<u8> {
 /// Input tiles at the size this kernel's class requires: a `Windowed`
 /// kernel gets its window EXPANDED by the radius (the production ROI),
 /// everything else gets tiles at the output dims.
+/// A `Windowed` kernel that is ALSO binary rides the TILE lane, not the
+/// windowed one: `execute_windowed_once` hard-rejects `inputs != 1`
+/// ("windowed execution is unary (T1)"). That is not a workaround — it
+/// is the live path, since `image-js::apply_binary_kernel` dispatches
+/// through `execute_tile_once_async` too, and it is only safe because
+/// such kernels DERIVE their halo as `(dims(in0) - dims(outp))/2`,
+/// which evaluates to 0 under the tile lane. A kernel that hardcoded
+/// `xy + (rx, ry)` would read shifted here (see RFI E-4).
+fn rides_the_windowed_lane(def: &KernelDef) -> bool {
+    matches!(def.class, KernelClass::Windowed { .. }) && def.inputs == 1
+}
+
 fn inputs_for(def: &KernelDef) -> Vec<Tile> {
     match def.class {
-        KernelClass::Windowed { radius: (rx, ry) } => {
+        KernelClass::Windowed { radius: (rx, ry) } if def.inputs == 1 => {
             vec![stimulus(
                 OUT + 2 * u32::from(rx),
                 OUT + 2 * u32::from(ry),
@@ -841,7 +867,7 @@ fn inputs_for(def: &KernelDef) -> Vec<Tile> {
 
 fn constant_inputs_for(def: &KernelDef, c: [f32; 4]) -> Vec<Tile> {
     match def.class {
-        KernelClass::Windowed { radius: (rx, ry) } => {
+        KernelClass::Windowed { radius: (rx, ry) } if def.inputs == 1 => {
             vec![constant_tile(
                 OUT + 2 * u32::from(rx),
                 OUT + 2 * u32::from(ry),
@@ -879,8 +905,8 @@ fn dispatch(
     params: &[u8],
     mask: Option<&[u8]>,
 ) -> Vec<u8> {
-    let result = match def.class {
-        KernelClass::Windowed { .. } => execute_windowed_once(
+    let result = if rides_the_windowed_lane(def) {
+        execute_windowed_once(
             ctx,
             def,
             &inputs[0].bytes,
@@ -890,16 +916,15 @@ fn dispatch(
             mask,
             OUT,
             OUT,
-        ),
-        _ => {
-            let ti: Vec<TileInput<'_>> = inputs
-                .iter()
-                .map(|t| TileInput {
-                    f16_bytes: &t.bytes,
-                })
-                .collect();
-            execute_tile_once(ctx, def, &ti, params, mask, OUT, OUT)
-        }
+        )
+    } else {
+        let ti: Vec<TileInput<'_>> = inputs
+            .iter()
+            .map(|t| TileInput {
+                f16_bytes: &t.bytes,
+            })
+            .collect();
+        execute_tile_once(ctx, def, &ti, params, mask, OUT, OUT)
     };
     result.unwrap_or_else(|e| panic!("{}: dispatch failed: {e:?}", def.id))
 }

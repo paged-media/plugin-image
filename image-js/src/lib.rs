@@ -1732,6 +1732,35 @@ mod wasm {
         apply_point_kernel(handle, &GEOM_MOVE_SELECTION, params.as_bytes()).await
     }
 
+    /// BLUR — SHAPE. Filter > Blur > Shape Blur: convolve with an
+    /// ARBITRARY shape rather than a formula.
+    ///
+    /// `shape_handle` is an ordinary decoded-image handle, so any image
+    /// the plugin can open is a blur shape. Coverage is read from RED,
+    /// not alpha — a shape library ships white-on-black (where alpha is
+    /// identically 1, and reading it would make every shape a box) or
+    /// white-on-transparent (where premultiplied red equals alpha), and
+    /// red is correct for both conventions.
+    ///
+    /// `radius_px` is the HALF-extent the shape is scaled to; below 0.5
+    /// it is the identity, as is `amount == 0`.
+    #[wasm_bindgen]
+    pub async fn apply_shape_blur(
+        handle: u32,
+        shape_handle: u32,
+        radius_px: f32,
+        amount: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::conv::{ConvShapeParams, CONV_SHAPE};
+        let shape = IMAGES
+            .with(|m| m.borrow().get(&shape_handle).cloned())
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("unknown blur-shape handle {shape_handle}"))
+            })?;
+        let params = ConvShapeParams::new(radius_px, amount, shape.width, shape.height);
+        apply_binary_kernel(handle, shape_handle, &CONV_SHAPE, params.as_bytes()).await
+    }
+
     /// FILL with a PATTERN — Edit > Fill > Pattern, and the pattern
     /// half of the paint bucket.
     ///
@@ -2095,7 +2124,8 @@ mod wasm {
     /// layered-vs-flat landing every fill already goes through, so a new
     /// effect cannot accidentally acquire different semantics.
     /// The two-input sibling of [`apply_point_kernel`], for kernels that
-    /// read a SECOND image (today: `gen.pattern`'s tile).
+    /// read a SECOND image: `gen.pattern`'s tile and `conv.shape`'s
+    /// blur silhouette.
     ///
     /// The padding is not an implementation detail to skim past.
     /// `execute_tile_once_async` sizes EVERY input texture at the output
@@ -2116,7 +2146,7 @@ mod wasm {
         let tile = IMAGES
             .with(|m| m.borrow().get(&tile_handle).cloned())
             .ok_or_else(|| {
-                JsValue::from_str(&format!("unknown pattern-tile handle {tile_handle}"))
+                JsValue::from_str(&format!("unknown second-input handle {tile_handle}"))
             })?;
         let mask = sel.as_ref().map(|cov| {
             image_gpu::selection::SelectionMask::from_fn(img.width, img.height, |x, y| {

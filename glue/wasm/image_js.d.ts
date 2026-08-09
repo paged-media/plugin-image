@@ -244,6 +244,22 @@ export function apply_reduce_noise(handle: number, radius_px: number, sigma_rang
 export function apply_selective_color(handle: number, range: number, cyan: number, magenta: number, yellow: number, black: number, absolute: boolean): Promise<DecodedHandle>;
 
 /**
+ * BLUR — SHAPE. Filter > Blur > Shape Blur: convolve with an
+ * ARBITRARY shape rather than a formula.
+ *
+ * `shape_handle` is an ordinary decoded-image handle, so any image
+ * the plugin can open is a blur shape. Coverage is read from RED,
+ * not alpha — a shape library ships white-on-black (where alpha is
+ * identically 1, and reading it would make every shape a box) or
+ * white-on-transparent (where premultiplied red equals alpha), and
+ * red is correct for both conventions.
+ *
+ * `radius_px` is the HALF-extent the shape is scaled to; below 0.5
+ * it is the identity, as is `amount == 0`.
+ */
+export function apply_shape_blur(handle: number, shape_handle: number, radius_px: number, amount: number): Promise<DecodedHandle>;
+
+/**
  * SHARPEN — smart sharpen. `amount` 0 is the identity; regions
  * whose local contrast is below `threshold` are left untouched
  * whatever the amount, which is the point of the "smart".
@@ -1051,6 +1067,7 @@ export interface InitOutput {
     readonly apply_radial_blur: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly apply_reduce_noise: (a: number, b: number, c: number, d: number) => any;
     readonly apply_selective_color: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly apply_shape_blur: (a: number, b: number, c: number, d: number) => any;
     readonly apply_smart_sharpen: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly apply_warp: (a: number, b: number, c: number, d: number) => any;
     readonly brush_blend_modes: () => [number, number];

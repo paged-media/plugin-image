@@ -42,6 +42,7 @@ export const apply_offset: (a: number, b: number, c: number, d: number) => any;
 export const apply_radial_blur: (a: number, b: number, c: number, d: number, e: number) => any;
 export const apply_reduce_noise: (a: number, b: number, c: number, d: number) => any;
 export const apply_selective_color: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+export const apply_shape_blur: (a: number, b: number, c: number, d: number) => any;
 export const apply_smart_sharpen: (a: number, b: number, c: number, d: number, e: number) => any;
 export const apply_warp: (a: number, b: number, c: number, d: number) => any;
 export const brush_blend_modes: () => [number, number];
