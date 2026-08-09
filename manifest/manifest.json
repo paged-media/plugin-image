@@ -70,6 +70,7 @@
       "media.paged.image.tool.marqueeRect",
       "media.paged.image.tool.marqueeEllipse",
       "media.paged.image.tool.lasso",
+      "media.paged.image.tool.polygonal-lasso",
       "media.paged.image.tool.magicWand",
       "media.paged.image.tool.brush",
       "media.paged.image.tool.pencil",

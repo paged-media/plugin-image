@@ -86,6 +86,11 @@ describe("imageBundle.activate", () => {
       "media.paged.image.tool.marqueeRect",
       "media.paged.image.tool.marqueeEllipse",
       "media.paged.image.tool.lasso",
+      // The POLYGONAL lasso shares the lasso SLOT (same group): a
+      // designer picks one or the other for a given edge, and neither
+      // wants both on the rail at once. Click-driven where the freehand
+      // one is drag-driven.
+      "media.paged.image.tool.polygonal-lasso",
       "media.paged.image.tool.magicWand",
       "media.paged.image.tool.brush",
       "media.paged.image.tool.pencil",

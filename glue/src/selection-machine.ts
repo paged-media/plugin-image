@@ -35,7 +35,7 @@
 
 import type { ImageEngine, SelectionMode, SelectionStats } from "./engine";
 
-export type SelectionShapeKind = "rect" | "ellipse" | "lasso";
+export type SelectionShapeKind = "rect" | "ellipse" | "lasso" | "polygon";
 
 /** Minimum drag extent (image px) below which a marquee is treated as a
  *  no-op click (avoids committing invisible slivers). */
@@ -65,6 +65,33 @@ export interface SelectionMachine {
   end(): boolean;
   /** One-click magic wand commit at `point` (image px, rounded). */
   wand(point: [number, number], mode: SelectionMode): boolean;
+  /** POLYGONAL LASSO — place a vertex. The first call starts the
+   *  gesture; later ones append. Unlike the freehand lasso this is
+   *  CLICK-driven, so the gesture spans many clicks and only ends when
+   *  the caller commits or cancels. */
+  polygonVertex(
+    point: [number, number],
+    mode: SelectionMode,
+  ): void;
+  /** Remove the last placed vertex (backspace / delete). Returns false
+   *  when there was nothing to remove, so a caller can distinguish
+   *  "undid a vertex" from "the gesture is already empty" — which is
+   *  what lets backspace on an empty polygon fall through to whatever
+   *  else backspace means. */
+  polygonUndoVertex(): boolean;
+  /** Close and commit the polygon (enter / double-click). Returns false
+   *  for fewer than three vertices — two points bound no area, and
+   *  committing an empty selection would silently deselect. */
+  polygonCommit(): boolean;
+  /** Abandon the polygon without committing (Esc). */
+  polygonCancel(): void;
+  /** True while a polygon is being placed, so a tool can route keys it
+   *  would otherwise ignore. */
+  placingPolygon(): boolean;
+  /** The polygon's FIRST vertex, so a tool can offer click-to-close
+   *  without keeping its own copy of the trail — two copies of the same
+   *  list is how they drift. Null when no polygon is in progress. */
+  polygonFirstVertex(): [number, number] | null;
   dragging(): boolean;
   /** The IN-GESTURE outline (image-px polyline, closed): the live
    *  marquee rect / ellipse approximation / lasso trail. Null when idle. */
@@ -145,6 +172,10 @@ export function createSelectionMachine(
 
     end() {
       if (!active) return false;
+      // A POLYGON does not end on pointer-up — it spans clicks and ends
+      // only at `polygonCommit` / `polygonCancel`. Returning early here
+      // is what keeps a click from committing a one-vertex shape.
+      if (active.kind === "polygon") return false;
       const { kind, mode, anchor, current, trail } = active;
       active = null;
       try {
@@ -179,6 +210,66 @@ export function createSelectionMachine(
       return true;
     },
 
+    polygonVertex(point, mode) {
+      if (!active || active.kind !== "polygon") {
+        active = {
+          kind: "polygon",
+          mode,
+          anchor: point,
+          current: point,
+          trail: [point],
+        };
+        return;
+      }
+      // The MODE is taken from the FIRST vertex, not the last: a
+      // designer holding shift to add, then releasing it to place the
+      // remaining vertices, means one additive selection — not a
+      // gesture whose meaning flips halfway through.
+      active.current = point;
+      active.trail.push(point);
+    },
+
+    polygonUndoVertex() {
+      if (!active || active.kind !== "polygon" || active.trail.length === 0) {
+        return false;
+      }
+      active.trail.pop();
+      if (active.trail.length === 0) {
+        active = null;
+        return true;
+      }
+      active.current = active.trail[active.trail.length - 1];
+      return true;
+    },
+
+    polygonCommit() {
+      if (!active || active.kind !== "polygon") return false;
+      const { mode, trail } = active;
+      active = null;
+      // Three is the floor: two points bound no area, and committing
+      // that would REPLACE the selection with nothing — a silent
+      // deselect the user did not ask for.
+      if (trail.length < 3) return false;
+      try {
+        engine.selectionSetPolygon(trail, mode);
+      } catch {
+        return false;
+      }
+      onCommit();
+      return true;
+    },
+
+    polygonCancel() {
+      if (active && active.kind === "polygon") active = null;
+    },
+
+    placingPolygon: () => active !== null && active.kind === "polygon",
+
+    polygonFirstVertex: () =>
+      active && active.kind === "polygon" && active.trail.length > 0
+        ? active.trail[0]
+        : null,
+
     wand(point, mode) {
       try {
         engine.selectionMagicWand(
@@ -199,7 +290,7 @@ export function createSelectionMachine(
 
     gestureOutline() {
       if (!active) return null;
-      if (active.kind === "lasso") {
+      if (active.kind === "lasso" || active.kind === "polygon") {
         return active.trail.length >= 2 ? [...active.trail] : null;
       }
       if (

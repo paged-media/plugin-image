@@ -70,6 +70,11 @@ function dashedPath(
 
 /** One gesture factory for all four selection tools; `kind` picks the
  *  shape ("wand" commits on click instead of drag). */
+/** Screen-space radius (CSS px) within which a click on the polygon's
+ *  FIRST vertex closes it. Converted to image px per gesture through
+ *  the fit scale — a fixed image-px radius is unhittable zoomed out. */
+const CLOSE_TOLERANCE_PX = 8;
+
 export function makeSelectionGesture(
   host: BundleHost,
   session: ImageSession,
@@ -123,20 +128,70 @@ export function makeSelectionGesture(
         // Click tool: commit immediately (tolerance = the documented v0
         // default; see selection-machine.ts).
         if (machine.wand(point, mode)) session.refreshSelection();
+      } else if (kind === "polygon") {
+        // POLYGONAL LASSO is click-driven, not drag-driven: each press
+        // places a vertex and the gesture spans many of them.
+        //
+        // CLOSING is by clicking the FIRST vertex again, not by double-
+        // click. `CanvasPointerEvent` carries no `detail`, so a double
+        // click would have to be reconstructed from timestamps and
+        // proximity — a heuristic with a tuning constant that is wrong
+        // for somebody. Click-the-start is the other standard polygon
+        // close, it is unambiguous, and it needs no timing at all.
+        // Enter closes too (see onKey), which covers the case where the
+        // first vertex is off screen.
+        const first = machine.polygonFirstVertex();
+        if (first && machine.placingPolygon()) {
+          const dx = point[0] - first[0];
+          const dy = point[1] - first[1];
+          // Tolerance in IMAGE px scaled by the view: a fixed px radius
+          // would be unhittable when zoomed out and huge when zoomed in.
+          const tol = CLOSE_TOLERANCE_PX / Math.max(fit.scale, 1e-6);
+          if (dx * dx + dy * dy <= tol * tol) {
+            if (machine.polygonCommit()) session.refreshSelection();
+            renderOverlay();
+            return;
+          }
+        }
+        machine.polygonVertex(point, mode);
       } else {
         machine.begin(kind, point, mode);
       }
       renderOverlay();
     },
+    onKey(e: KeyboardEvent) {
+      const machine = session.selectionMachine();
+      if (!machine || kind !== "polygon" || !machine.placingPolygon()) return;
+      if (e.key === "Enter") {
+        if (machine.polygonCommit()) session.refreshSelection();
+      } else if (e.key === "Backspace" || e.key === "Delete") {
+        // Undo the last vertex. Consuming the key ONLY while a polygon
+        // is in progress (the guard above) is what leaves Backspace
+        // meaning what it usually means the rest of the time.
+        machine.polygonUndoVertex();
+      } else if (e.key === "Escape") {
+        machine.polygonCancel();
+      } else {
+        return;
+      }
+      e.preventDefault();
+      renderOverlay();
+    },
     onPointerMove(e: CanvasPointerEvent) {
       const machine = session.selectionMachine();
       if (!machine || !e.pagePoint || kind === "wand") return;
+      // A polygon does not track the pointer between clicks — its
+      // outline is the vertices placed so far, and rubber-banding to
+      // the cursor would need a preview vertex the machine would then
+      // have to distinguish from a real one.
+      if (kind === "polygon") return;
       if (!machine.dragging()) return;
       machine.update(pageToImage(e.pagePoint));
       renderOverlay();
     },
     onPointerUp() {
       const machine = session.selectionMachine();
+      if (kind === "polygon") return; // ends at commit/cancel, not here
       if (machine && kind !== "wand" && machine.dragging()) {
         if (machine.end()) session.refreshSelection();
       }

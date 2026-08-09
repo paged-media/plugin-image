@@ -116,6 +116,74 @@ describe("the session selection surface (real engine wasm)", () => {
     handle.dispose();
   });
 
+  it("POLYGONAL lasso places, undoes and closes vertices — and refuses a degenerate shape", async () => {
+    // The polygonal lasso is CLICK-driven where the freehand lasso is
+    // drag-driven, so its whole state model is different: the gesture
+    // spans many events and ends only on an explicit commit. These
+    // assertions are about that lifecycle, not about coverage maths —
+    // the polygon door itself was already proven by the lasso.
+    const { handle, session, machine } = await ingest();
+
+    // Idle: nothing in progress, so keys must not be consumed.
+    expect(machine.placingPolygon()).toBe(false);
+    expect(machine.polygonUndoVertex()).toBe(false);
+    expect(machine.polygonFirstVertex()).toBeNull();
+
+    machine.polygonVertex([0, 0], "replace");
+    expect(machine.placingPolygon(), "the first click starts it").toBe(true);
+    expect(machine.polygonFirstVertex()).toEqual([0, 0]);
+
+    // TWO vertices bound no area, so a commit there must REFUSE rather
+    // than replace the selection with nothing — a silent deselect the
+    // user did not ask for.
+    machine.polygonVertex([2, 0], "replace");
+    expect(machine.polygonCommit(), "two vertices is not a polygon").toBe(
+      false,
+    );
+
+    // Backspace removes the LAST vertex, and removing the only one ends
+    // the gesture rather than leaving an empty in-progress polygon.
+    machine.polygonVertex([0, 0], "replace");
+    machine.polygonVertex([2, 0], "replace");
+    expect(machine.polygonUndoVertex()).toBe(true);
+    expect(machine.polygonFirstVertex()).toEqual([0, 0]);
+    expect(machine.polygonUndoVertex()).toBe(true);
+    expect(machine.placingPolygon(), "the last undo ends it").toBe(false);
+
+    // Three vertices commit for real.
+    machine.polygonVertex([0, 0], "replace");
+    machine.polygonVertex([2, 0], "replace");
+    machine.polygonVertex([2, 1], "replace");
+    expect(machine.polygonCommit()).toBe(true);
+    expect(machine.placingPolygon(), "commit ends the gesture").toBe(false);
+    expect(session.state().selection, "a real selection landed").not.toBeNull();
+
+    // Esc abandons without touching the committed selection.
+    const before = session.state().selection;
+    machine.polygonVertex([0, 0], "replace");
+    machine.polygonCancel();
+    expect(machine.placingPolygon()).toBe(false);
+    expect(session.state().selection).toEqual(before);
+
+    session.dispose();
+    handle.dispose();
+  });
+
+  it("a POINTER-UP never commits a polygon — it spans clicks", async () => {
+    // The freehand lasso commits on release; the polygonal one must
+    // not, or the first click would commit a one-vertex shape. This is
+    // the assertion that keeps the two lifecycles apart.
+    const { handle, session, machine } = await ingest();
+    machine.polygonVertex([0, 0], "replace");
+    machine.polygonVertex([2, 0], "replace");
+    machine.polygonVertex([2, 1], "replace");
+    expect(machine.end(), "end() is a no-op for a polygon").toBe(false);
+    expect(machine.placingPolygon(), "still placing after end()").toBe(true);
+    expect(session.state().selection).toBeNull();
+    session.dispose();
+    handle.dispose();
+  });
+
   it("deselect returns to 'no selection'", async () => {
     const { handle, session } = await ingest();
     session.selectAll();

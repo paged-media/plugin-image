@@ -50,6 +50,7 @@ const CROP_TOOL_ID = "media.paged.image.tool.crop";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
+const POLY_LASSO_TOOL_ID = "media.paged.image.tool.polygonal-lasso";
 const MAGIC_WAND_TOOL_ID = "media.paged.image.tool.magicWand";
 const BRUSH_TOOL_ID = "media.paged.image.tool.brush";
 const PENCIL_TOOL_ID = "media.paged.image.tool.pencil";
@@ -197,6 +198,23 @@ export function activate(host: BundleHost): BundleHandle {
     section: "selection",
     shortcut: "shift+l",
     gesture: () => makeSelectionGesture(host, session, "lasso"),
+  });
+  // POLYGONAL lasso — the same lasso SLOT, because a designer picks one
+  // or the other for a given edge and never wants both on the rail at
+  // once. Click places a vertex, Backspace/Delete removes the last,
+  // Enter or a double-click closes, Esc abandons.
+  //
+  // No shortcut of its own: it shares the lasso's `shift+l` slot, and
+  // stealing another global register for a variant of a tool that is
+  // already there would be exactly the land-grab the shortcut note in
+  // paged.draw's CLAUDE.md warns about.
+  contributeTool(host, {
+    id: POLY_LASSO_TOOL_ID,
+    title: "Polygonal lasso",
+    icon: "tool-lasso",
+    group: LASSO_TOOL_ID,
+    section: "selection",
+    gesture: () => makeSelectionGesture(host, session, "polygon"),
   });
   // Magic wand: click-select by color distance (v0 fixed tolerance
   // 32/255 per channel, contiguous flood — documented in
