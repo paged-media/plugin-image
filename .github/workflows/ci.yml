@@ -166,9 +166,15 @@ jobs:
         run: pnpm -r typecheck
         working-directory: plugin-image
 
+      # REQUIRE_REAL_WASM turns wasm-exec.spec.ts's "artifact missing"
+      # skip into a hard failure: the artifact is committed (glue/wasm),
+      # so a checkout that lacks it is a regression, and the only
+      # real-execution lane must never silently drop back to skip.
       - name: test
         run: pnpm -r test
         working-directory: plugin-image
+        env:
+          REQUIRE_REAL_WASM: "1"
 
       # Validate the bundle manifest with the sibling plugin-cli (the same
       # binary the package.json validate:manifest script invokes).

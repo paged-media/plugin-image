@@ -62,6 +62,11 @@ jobs:
             vitest run --reporter=junit --outputFile=junit.xml || true
           cat plugin-image/*/junit.xml > junit-all.xml 2>/dev/null || true
           [ -s junit-all.xml ] # at least one package must have produced results
+        env:
+          # wasm-exec.spec.ts must run against the committed artifact
+          # here too — a missing artifact publishes as a red row, never
+          # as a silent skip.
+          REQUIRE_REAL_WASM: "1"
 
       # Evidence hand-off, INVERTED (2026-07-25). This step used to call
       # paged-media/state/actions/publish-results@main, but that action lives in the
