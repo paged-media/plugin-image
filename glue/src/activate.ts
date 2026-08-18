@@ -320,7 +320,7 @@ export function activate(host: BundleHost): BundleHandle {
   contributeTool(host, {
     id: CLONE_TOOL_ID,
     title: "Clone stamp",
-    icon: "tool-brush",
+    icon: "tool-clone",
     group: CLONE_TOOL_ID,
     section: "drawType",
     shortcut: "shift+t",
@@ -330,7 +330,7 @@ export function activate(host: BundleHost): BundleHandle {
   contributeTool(host, {
     id: HEAL_TOOL_ID,
     title: "Healing brush",
-    icon: "tool-brush",
+    icon: "tool-heal",
     group: HEAL_TOOL_ID,
     section: "drawType",
     shortcut: "j",
