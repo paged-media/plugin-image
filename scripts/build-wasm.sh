@@ -14,7 +14,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT=glue/wasm
-BUDGET=$((8 * 1024 * 1024))
+# The budget is now 100 MB for the WHOLE APP including every plugin
+# (maintainer decision, 2026-08-19), enforced as a SUM by the editor's
+# scripts/wasm-budget.mjs. This per-artifact stop keeps a runaway build
+# from sailing through unnoticed here; the number that governs is the app
+# total. Mirrors plugin-sdk WASM_BUDGETS — change them together.
+BUDGET=$((100 * 1000 * 1000))
 
 cargo build --release --target wasm32-unknown-unknown -p image-js
 
@@ -48,6 +53,6 @@ cp "$OUT"/image_js.js "$OUT"/image_js.d.ts \
 SIZE=$(wc -c < "$OUT/image_js_bg.wasm" | tr -d ' ')
 echo "image_js_bg.wasm: $SIZE bytes (budget $BUDGET)"
 if [ "$SIZE" -gt "$BUDGET" ]; then
-  echo "error: wasm artifact exceeds the 8 MiB plugin budget" >&2
+  echo "error: wasm artifact exceeds the 100 MB app wasm budget" >&2
   exit 1
 fi

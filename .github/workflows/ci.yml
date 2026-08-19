@@ -23,7 +23,7 @@ concurrency:
 jobs:
   # The Rust engine: fmt + clippy + test, the three isolation-contract
   # dependency guards (spec §2.1 / §4 dep rule 3), and the wasm size
-  # report against the 8 MiB budget (BREAKAGE I-07). dtolnay/rust-toolchain
+  # report against the 100 MB app wasm budget (BREAKAGE I-07). dtolnay/rust-toolchain
   # reads the channel straight from rust-toolchain.toml (`channel = 1.93.0`)
   # — same single-source-of-truth posture as core's resolved `toolchain`
   # job, without a separate channel-resolver script in this repo.
@@ -97,7 +97,7 @@ jobs:
 
       # --- wasm artifact size report (BREAKAGE I-07) --------------------
       # The bundle's compute artifact is image-js. The wasm packaging
-      # contract caps each artifact at 8 MiB; report both the raw and the
+      # contract caps the whole app at 100 MB; report both the raw and the
       # brotli-compressed (over-the-wire) size against that budget. This is
       # a REPORT, not yet a hard gate — the real gate flips once the engine
       # has substance to measure (spec §9.3 / I-07 follow-up).
@@ -107,7 +107,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y brotli
-      - name: wasm size report (vs 8 MiB budget)
+      - name: wasm size report (vs 100 MB app wasm budget)
         run: |
           set -euo pipefail
           WASM=target/wasm32-unknown-unknown/release/image_js.wasm
@@ -115,15 +115,15 @@ jobs:
             echo "::warning::$WASM not found — image-js may not yet emit a cdylib; skipping size report"
             exit 0
           fi
-          BUDGET=$((8 * 1024 * 1024))   # 8 MiB per-artifact cap (I-07)
+          BUDGET=$((100 * 1000 * 1000))  # 100 MB app-wide cap (2026-08-19)
           RAW=$(stat -c '%s' "$WASM")
           brotli -q 11 -f -o "$WASM.br" "$WASM"
           BR=$(stat -c '%s' "$WASM.br")
           echo "image_js.wasm        raw: $RAW bytes"
           echo "image_js.wasm.br  brotli: $BR bytes"
-          echo "budget (per artifact): $BUDGET bytes (8 MiB)"
+          echo "budget (app-wide): $BUDGET bytes (100 MB)"
           if [ "$RAW" -gt "$BUDGET" ]; then
-            echo "::warning title=wasm budget::raw image_js.wasm ($RAW bytes) exceeds the 8 MiB budget — see BREAKAGE I-07"
+            echo "::warning title=wasm budget::raw image_js.wasm ($RAW bytes) exceeds the 100 MB app wasm budget — see BREAKAGE I-07"
           fi
 
   # The TS bundle: the contract-import lint (isolation §2.1), typecheck,

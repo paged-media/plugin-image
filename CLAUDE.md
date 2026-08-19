@@ -150,7 +150,7 @@ cargo tree -p image-kernels --edges normal | grep -E 'image-(pipeline|graph|gpu|
 cargo tree -p image-js --target wasm32-unknown-unknown | grep -E 'image-conformance|proptest' && echo LEAK
 cargo deny check
 
-# wasm artifact (size-tracked against the 8 MiB budget — BREAKAGE I-07)
+# wasm artifact (size-tracked against the 100 MB app wasm budget — BREAKAGE I-07)
 cargo build --release --target wasm32-unknown-unknown -p image-js
 
 # Optional PSD ecosystem oracle (psd-tools): create once, then

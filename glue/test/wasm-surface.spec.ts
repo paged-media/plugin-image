@@ -58,7 +58,7 @@ const UNMODELLED_ON_PURPOSE = new Map([
     // needs the HOST to ask for a level, which is C-1 Stage-B territory
     // (deferred by ADR-018 pending a core external-texture path).
     // Waiting on a consumer, not forgotten — but it does cost bytes
-    // against the 8 MiB budget until that consumer exists.
+    // against the 100 MB app-wide budget until that consumer exists.
     "no LOD consumer until C-1 Stage-B (ADR-018)",
   ],
 ]);
@@ -110,7 +110,7 @@ gate("the TS/wasm surface contract", () => {
         !UNMODELLED_ON_PURPOSE.has(n),
     );
     // This direction is a weaker failure — an unreachable export costs
-    // wasm bytes against the 8 MiB budget rather than breaking a call —
+    // wasm bytes against the 100 MB app-wide budget rather than breaking a call —
     // but it is the signal that a kernel was built and never wired,
     // which is its own way of shipping nothing.
     expect(unmodelled).toEqual([]);
