@@ -104,9 +104,20 @@ jobs:
       - name: wasm32 release build of image-js
         run: cargo build --release --target wasm32-unknown-unknown -p image-js
       - name: install brotli
+        # Bounded, and apt only when the tool is absent. 2026-08-19:
+        # GitHub's Ubuntu runners intermittently could not reach the
+        # archive and three unbounded apt calls hung across this
+        # workspace — one of them for a month, unnoticed, because a hung
+        # job and a slow job look identical. Two of the three were
+        # installing something the image already carried.
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y brotli
+          set -euo pipefail
+          if command -v brotli >/dev/null 2>&1; then
+            echo "brotli already present ($(command -v brotli)) — skipping apt"
+          else
+            sudo apt-get update && sudo apt-get install -y brotli
+          fi
       - name: wasm size report (vs 100 MB app wasm budget)
         run: |
           set -euo pipefail
