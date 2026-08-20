@@ -143,6 +143,28 @@ use crate::{PsdError, Result};
 
 pub const RESOURCE_SIGNATURE: [u8; 4] = *b"8BIM";
 
+/// Signatures a real image-resource block may carry.
+///
+/// `8BIM` is Photoshop's, and the only one this parser accepted until
+/// 2026-08-20 — when three Envato PSDs (`Mountain Bike {Facebook Post,
+/// Instagram Post, Instagram Story}.psd`) failed outright with
+/// "bad block signature MeSa". `MeSa` is ImageReady's, and files that
+/// passed through it carry a mix of both. Rejecting the whole document
+/// over an unrecognised RESOURCE signature is wrong twice: the block
+/// layout is identical regardless of signature, and refusing to open a
+/// file Photoshop opens fine is the opposite of the preservation
+/// invariant.
+///
+/// Verbatim re-emit is unaffected — `raw_block` captures the signature
+/// with everything else, so a `MeSa` block goes back out as `MeSa`.
+pub const KNOWN_RESOURCE_SIGNATURES: [[u8; 4]; 5] = [
+    *b"8BIM", // Photoshop
+    *b"MeSa", // ImageReady
+    *b"PHUT", // PhotoDeluxe
+    *b"AgHg", // Adobe
+    *b"DCSR", // Quark DCS
+];
+
 impl ResolutionInfo {
     fn parse(data: &[u8]) -> Option<ResolutionInfo> {
         // Fixed 16-byte record; anything else stays Opaque (raw_block
@@ -203,10 +225,13 @@ impl ImageResourceBlock {
         // (signature through trailing pad), so verbatim re-emit is exact.
         let mut probe = r.clone();
         let sig = probe.fourcc()?;
-        if sig != RESOURCE_SIGNATURE {
+        if !KNOWN_RESOURCE_SIGNATURES.contains(&sig) {
             return Err(PsdError::Malformed {
                 section: "image resource",
-                detail: format!("bad block signature {}", String::from_utf8_lossy(&sig)),
+                detail: format!(
+                    "unknown block signature {} (known: 8BIM, MeSa, PHUT, AgHg, DCSR)",
+                    String::from_utf8_lossy(&sig)
+                ),
             });
         }
         let id = probe.u16()?;

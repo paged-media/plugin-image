@@ -63,34 +63,43 @@ fn corpus_jpegs() -> Option<Vec<PathBuf>> {
     } else {
         PathBuf::from(switch)
     };
-    let packs = root.join("idml/packs");
-    if !packs.is_dir() {
-        eprintln!(
-            "SKIP jpeg corpus lane: {} is not a directory",
-            packs.display()
-        );
-        return None;
-    }
+    // Every group's packs. The html packs alone carry hundreds of real
+    // JPEGs from live web templates.
     let mut out = Vec::new();
-    for pack in std::fs::read_dir(&packs).ok()?.flatten() {
-        let Ok(files) = std::fs::read_dir(pack.path().join("assets/image")) else {
+    let mut any_group = false;
+    for group in ["idml", "docx", "psd", "html", "vector", "pptx"] {
+        let Ok(entries) = std::fs::read_dir(root.join(group).join("packs")) else {
             continue;
         };
-        for f in files.flatten() {
-            let p = f.path();
-            let is_jpeg = p
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
-            if p.is_file() && is_jpeg {
-                out.push(p);
+        any_group = true;
+        for pack in entries.flatten() {
+            let Ok(files) = std::fs::read_dir(pack.path().join("assets").join("image")) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let is_jpeg = p.extension().is_some_and(|e| {
+                    let e = e.to_string_lossy().to_lowercase();
+                    e == "jpg" || e == "jpeg"
+                });
+                if p.is_file() && is_jpeg {
+                    out.push(p);
+                }
             }
         }
+    }
+    if !any_group {
+        eprintln!(
+            "SKIP jpeg corpus lane: no <group>/packs under {}",
+            root.display()
+        );
+        return None;
     }
     out.sort();
     if out.is_empty() {
         eprintln!(
-            "SKIP jpeg corpus lane: no assets/image/*.jpg under {} — run corpus/harness/unpack.sh",
-            packs.display()
+            "SKIP jpeg corpus lane: no JPEGs under {} — run corpus/harness/unpack.sh",
+            root.display()
         );
         return None;
     }
@@ -195,6 +204,8 @@ fn the_corpus_covers_cmyk_jpeg_which_the_adapter_cannot_synthesise() {
     };
 
     let mut cmyk = Vec::new();
+    let mut with_icc = 0usize;
+    let mut without_icc = 0usize;
     for path in &files {
         let Some((info, pixels)) = decode_full(path) else {
             continue;
@@ -223,19 +234,33 @@ fn the_corpus_covers_cmyk_jpeg_which_the_adapter_cannot_synthesise() {
             info.format.channels
         );
 
-        // These carry a 557 KB embedded profile — the first real CMYK ICC
-        // this crate has ever been handed. Everything downstream of
-        // `image-cms` depends on it surviving the probe, and a CMYK file
-        // WITHOUT one would be untransformable, so its absence is a
-        // finding rather than a shrug.
+        // COUNTED, not asserted per file. This started life as
+        // `assert!(icc > 0)` back when the corpus held exactly five CMYK
+        // JPEGs, all from one pack, all carrying the same 557 KB
+        // profile — and generalising "these five have an ICC" into "all
+        // CMYK JPEGs must" was overreach. The 2026-08-20 packs brought
+        // `Resume Page 1-01.jpg`: CMYK, Adobe APP14, and NO embedded
+        // profile. That is legitimate and common — the consumer has to
+        // fall back to a default, which is precisely the
+        // FOGRA39-vs-SWOP trap that costs ~4 dE on every solid fill.
+        //
+        // So an un-profiled CMYK file is COVERAGE, not a failure. What
+        // must hold is that the corpus contains at least one of each, so
+        // both paths stay exercised.
         let icc = info.icc.as_ref().map_or(0, |v| v.len());
-        assert!(
-            icc > 0,
-            "{name}: a CMYK JPEG with no embedded ICC cannot be colour-managed \
-             — the corpus file used to carry one, so either it changed or the \
-             probe stopped extracting it"
+        if icc > 0 {
+            with_icc += 1;
+        } else {
+            without_icc += 1;
+        }
+        println!(
+            "       embedded icc: {}",
+            if icc > 0 {
+                format!("{icc} bytes")
+            } else {
+                "NONE (defaults apply)".into()
+            }
         );
-        println!("       embedded icc: {icc} bytes");
 
         // The APP14 inversion is a whole-image polarity flip: get it
         // backwards and a light page decodes as a dark one. Measured here
@@ -258,6 +283,24 @@ fn the_corpus_covers_cmyk_jpeg_which_the_adapter_cannot_synthesise() {
              inversion has almost certainly run the wrong way"
         );
     }
+
+    println!(
+        "cmyk: {} file(s) — {with_icc} with an embedded ICC, {without_icc} without",
+        cmyk.len()
+    );
+    // Both paths must stay covered: a profiled CMYK JPEG exercises the
+    // ICC extraction, an un-profiled one exercises the default-profile
+    // fallback. Losing either is a coverage regression, and until
+    // 2026-08-20 the corpus had only the first.
+    assert!(
+        with_icc > 0,
+        "no CMYK JPEG carries an embedded ICC — the profile-extraction path is untested"
+    );
+    assert!(
+        without_icc > 0,
+        "no CMYK JPEG lacks an ICC — the default-profile fallback is untested, and that \
+         fallback is where the FOGRA39-vs-SWOP mismatch bites"
+    );
 }
 
 #[test]

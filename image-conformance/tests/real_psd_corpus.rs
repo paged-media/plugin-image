@@ -57,31 +57,51 @@ fn corpus_psds() -> Option<Vec<PathBuf>> {
     } else {
         PathBuf::from(switch)
     };
-    let packs = root.join("idml/packs");
-    if !packs.is_dir() {
-        eprintln!(
-            "SKIP psd corpus lane: {} is not a directory",
-            packs.display()
-        );
-        return None;
-    }
+    // Every group's packs, not just idml's. Since 2026-08-20 packs are
+    // filed by PRIMARY format, so the 16 Photoshop packs live at
+    // `psd/packs/<pack>/primary.psd` — nine of them 105-285 MB mockups
+    // with layer trees psd_builder cannot synthesise.
     let mut out = Vec::new();
-    for pack in std::fs::read_dir(&packs).ok()?.flatten() {
-        let Ok(files) = std::fs::read_dir(pack.path().join("assets/psd")) else {
+    let mut any_group = false;
+    for group in ["psd", "idml", "docx", "vector", "html", "pptx"] {
+        let Ok(entries) = std::fs::read_dir(root.join(group).join("packs")) else {
             continue;
         };
-        for f in files.flatten() {
-            let p = f.path();
-            if p.is_file() {
-                out.push(p);
+        any_group = true;
+        for pack in entries.flatten() {
+            let dir = pack.path();
+            for cand in ["primary.psd", "primary.psb"] {
+                let p = dir.join(cand);
+                if p.is_file() {
+                    out.push(p);
+                }
+            }
+            let Ok(files) = std::fs::read_dir(dir.join("assets").join("psd")) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let is_psd = p.extension().is_some_and(|e| {
+                    matches!(e.to_string_lossy().to_lowercase().as_str(), "psd" | "psb")
+                });
+                if p.is_file() && is_psd {
+                    out.push(p);
+                }
             }
         }
+    }
+    if !any_group {
+        eprintln!(
+            "SKIP psd corpus lane: no <group>/packs under {}",
+            root.display()
+        );
+        return None;
     }
     out.sort();
     if out.is_empty() {
         eprintln!(
-            "SKIP psd corpus lane: no assets/psd/* under {} — run corpus/harness/unpack.sh",
-            packs.display()
+            "SKIP psd corpus lane: no PSDs under {} — run corpus/harness/unpack.sh",
+            root.display()
         );
         return None;
     }
