@@ -19,17 +19,33 @@
 //! ~2,200 lines of emitter). That is the right default: they are precise,
 //! diffable, and carry no binary blobs. But they are also all OUR shape,
 //! and a synthesised file cannot surprise the parser the way a designer's
-//! can — the corpus PSDs run to 5,033 × 3,580 px with real layer trees.
+//! can — the corpus PSDs carry real layer trees and run to 5,032 × 33,321
+//! px (a 168-megapixel annual-report spread), against fixtures that fit
+//! in a diff.
 //!
 //! Until the 2026-08 corpus campaign, plugin-image had ZERO real rasters
-//! of any kind. The campaign extracted 21 fixture-sized PSDs from the
-//! Envato pack zips (a per-file 25 MB cap and a per-pack count cap kept
-//! out a 202 MB `.psb` and a 436 MB spread set).
+//! of any kind. The first pass extracted 21 fixture-sized PSDs under a
+//! per-file 25 MB cap and a per-pack count cap. Both caps were lifted on
+//! 2026-08-21 when the source archive was extracted in full and deleted,
+//! so this lane now walks **157 files, 9.0 GB** — every group's
+//! `assets/psd` plus each pack's own `primary.psd`/`.psb`, including the
+//! 213 MB `.psb` and the 105-285 MB mockup primaries the caps had held
+//! out. The single largest is a 639 MB poster source.
 //!
-//! One of them matters more than the rest: `CV.psd` is **CMYK, 4×8-bit**.
-//! The crate's own JPEG test says outright that "we cannot synthesize a
-//! CMYK JPEG through the adapter", so CMYK raster input had never been
-//! exercised at all.
+//! SIZE POSTURE, measured rather than assumed: the whole population runs
+//! in **3.3 s warm, ~10 s cold**. Both tests below walk the whole list,
+//! so a run reads ~18 GB; each file is read WHOLE and handed to
+//! `PsdFile::parse`, which walks the header and section table and does
+//! not decode pixel data. Peak memory is therefore one file per test
+//! thread — bounded by twice the largest, ~1.3 GB — which is why no size
+//! threshold is applied here. If this lane ever grows a pixel-decoding
+//! assertion, or a third whole-population test, it needs one.
+//!
+//! `CV.psd` was the file that first mattered here: **CMYK, 4×8-bit**, when
+//! the crate's own JPEG test says outright that "we cannot synthesize a
+//! CMYK JPEG through the adapter" — so CMYK raster input had never been
+//! exercised at all. It is no longer alone: **77 of the 157 are CMYK**,
+//! 80 RGB, every one of them 8-bit.
 //!
 //! OPT-IN — the assets live in the private corpus checkout:
 //!
