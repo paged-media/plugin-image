@@ -55,6 +55,19 @@ impl<'a> ByteReader<'a> {
         self.buf.len() - self.pos
     }
 
+    /// How many bytes at the END of the remainder are zero.
+    ///
+    /// Diagnostic: distinguishes "we walked into the writer's zero-fill"
+    /// from "this block really is corrupt", which the signature alone
+    /// cannot.
+    pub fn trailing_zero_run(&self) -> usize {
+        self.buf[self.pos..]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == 0)
+            .count()
+    }
+
     pub fn is_at_end(&self) -> bool {
         self.pos == self.buf.len()
     }

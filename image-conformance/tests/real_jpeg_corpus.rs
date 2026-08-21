@@ -48,11 +48,44 @@ use std::path::PathBuf;
 use image_codecs::{ImageSource, JpegSource, MemoryByteSource, SourceInfo};
 use image_core::{ChannelLayout, Region, TileSliceMut};
 
-/// Every extracted `assets/image/*.jpg`, or `None` with a printed reason.
-fn corpus_jpegs() -> Option<Vec<PathBuf>> {
-    let Some(switch) = std::env::var_os("PAGED_JPEG_CORPUS") else {
+const ENV_SWITCH: &str = "PAGED_JPEG_CORPUS";
+const LANE: &str = "jpeg";
+
+/// PNG magic, JPEG SOI, and the RIFF/WEBP container — enough to tell
+/// what a file ACTUALLY is.
+///
+/// Selecting corpus files by extension is not safe here. The full 2026-08
+/// extraction brought 1,288 pack images out of the archive and **267 of
+/// them are misnamed**: 266 files called `.jpg` are PNG, and one called
+/// `.png` is WebP. These are real vendor web templates, and an export
+/// pipeline renaming a file without re-encoding it is evidently routine.
+/// A lane that trusted the extension would report our decoder as broken
+/// on 267 files that it reads exactly correctly.
+fn sniff(path: &std::path::Path) -> &'static str {
+    let mut buf = [0u8; 12];
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return "unreadable";
+    };
+    let n = f.read(&mut buf).unwrap_or(0);
+    let b = &buf[..n];
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png"
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpeg"
+    } else if b.starts_with(b"RIFF") && b.len() >= 12 && &b[8..12] == b"WEBP" {
+        "webp"
+    } else {
+        "other"
+    }
+}
+
+/// Every `assets/image/*` file across every group, with what it really
+/// is. Returns `None` (printing why) when the corpus is not mounted.
+fn corpus_images() -> Option<Vec<(std::path::PathBuf, &'static str)>> {
+    let Some(switch) = std::env::var_os(ENV_SWITCH) else {
         eprintln!(
-            "SKIP jpeg corpus lane: PAGED_JPEG_CORPUS unset \
+            "SKIP {LANE} corpus lane: {ENV_SWITCH} unset \
              (set it to 1, or to a corpus root, and run with --ignored)"
         );
         return None;
@@ -63,8 +96,6 @@ fn corpus_jpegs() -> Option<Vec<PathBuf>> {
     } else {
         PathBuf::from(switch)
     };
-    // Every group's packs. The html packs alone carry hundreds of real
-    // JPEGs from live web templates.
     let mut out = Vec::new();
     let mut any_group = false;
     for group in ["idml", "docx", "psd", "html", "vector", "pptx"] {
@@ -78,32 +109,128 @@ fn corpus_jpegs() -> Option<Vec<PathBuf>> {
             };
             for f in files.flatten() {
                 let p = f.path();
-                let is_jpeg = p.extension().is_some_and(|e| {
-                    let e = e.to_string_lossy().to_lowercase();
-                    e == "jpg" || e == "jpeg"
-                });
-                if p.is_file() && is_jpeg {
-                    out.push(p);
+                if p.is_file() {
+                    let kind = sniff(&p);
+                    out.push((p, kind));
                 }
             }
         }
     }
+    // ALSO the standalone raster tier. `raster/image-rs` is the image-rs
+    // decoder suite (MIT, pinned) — 31 PNGs and 6 JPEGs of deliberate
+    // format-edge coverage, plus 157 files in eleven formats this
+    // workspace has no codec for. The pack tier is real-world output;
+    // this tier is adversarial by construction, and neither substitutes
+    // for the other.
+    fn walk_raster(dir: &std::path::Path, out: &mut Vec<(PathBuf, &'static str)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_symlink() {
+                continue;
+            }
+            if p.is_dir() {
+                if !p
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                {
+                    walk_raster(&p, out);
+                }
+            } else if p.is_file() {
+                let kind = sniff(&p);
+                out.push((p, kind));
+            }
+        }
+    }
+    let raster = root.join("raster");
+    if raster.is_dir() {
+        any_group = true;
+        walk_raster(&raster, &mut out);
+    }
+
     if !any_group {
         eprintln!(
-            "SKIP jpeg corpus lane: no <group>/packs under {}",
+            "SKIP {LANE} corpus lane: no <group>/packs or raster/ under {}",
             root.display()
         );
         return None;
     }
     out.sort();
+    Some(out)
+}
+
+/// Files whose CONTENT is this lane's format, whatever they are called.
+fn corpus_of_kind(kind: &str) -> Option<Vec<PathBuf>> {
+    let all = corpus_images()?;
+    let out: Vec<PathBuf> = all
+        .iter()
+        .filter(|(_, k)| *k == kind)
+        .map(|(p, _)| p.clone())
+        .collect();
     if out.is_empty() {
-        eprintln!(
-            "SKIP jpeg corpus lane: no JPEGs under {} — run corpus/harness/unpack.sh",
-            root.display()
-        );
+        eprintln!("SKIP {LANE} corpus lane: no {kind} content — run corpus/harness/unpack.sh");
         return None;
     }
     Some(out)
+}
+
+/// Files CALLED this lane's extension whose content is something else.
+fn corpus_misnamed(exts: &[&str], kind: &str) -> Vec<(PathBuf, &'static str)> {
+    let Some(all) = corpus_images() else {
+        return Vec::new();
+    };
+    all.into_iter()
+        .filter(|(p, k)| {
+            *k != kind
+                && p.extension().is_some_and(|e| {
+                    let e = e.to_string_lossy().to_lowercase();
+                    exts.contains(&e.as_str())
+                })
+        })
+        .collect()
+}
+
+/// Every file whose CONTENT is JPEG, whatever it is called.
+fn corpus_jpegs() -> Option<Vec<PathBuf>> {
+    corpus_of_kind("jpeg")
+}
+
+/// Does this file carry an SOF2 (progressive) frame header?
+///
+/// Walks the marker chain rather than scanning for the byte pair, so an
+/// 0xFFC2 occurring inside entropy-coded data or a thumbnail cannot be
+/// mistaken for a frame header.
+fn is_progressive(path: &std::path::Path) -> bool {
+    let Ok(d) = std::fs::read(path) else {
+        return false;
+    };
+    if d.len() < 4 || d[0] != 0xFF || d[1] != 0xD8 {
+        return false;
+    }
+    let mut i = 2usize;
+    while i + 3 < d.len() {
+        if d[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let m = d[i + 1];
+        match m {
+            0xC2 => return true,                       // SOF2 — progressive
+            0xC0 | 0xC1 | 0xC3 | 0xDA => return false, // a non-progressive frame, or the scan
+            0xD8 | 0xD9 => i += 2,
+            0xD0..=0xD7 | 0x01 | 0xFF => i += 2,
+            _ => {
+                let len = u16::from_be_bytes([d[i + 2], d[i + 3]]) as usize;
+                if len < 2 {
+                    return false;
+                }
+                i += 2 + len;
+            }
+        }
+    }
+    false
 }
 
 fn name_of(p: &std::path::Path) -> String {
@@ -150,6 +277,7 @@ fn every_real_jpeg_decodes_to_a_full_plausible_image() {
     println!("jpeg corpus: {} file(s)", files.len());
 
     let mut failures: Vec<String> = Vec::new();
+    let mut flat: Vec<String> = Vec::new();
     for path in &files {
         let name = name_of(path);
         let Some((info, pixels)) = decode_full(path) else {
@@ -164,15 +292,27 @@ fn every_real_jpeg_decodes_to_a_full_plausible_image() {
         );
 
         // A decoder that mis-reads the scan can still fill the buffer —
-        // with a single constant. These are photographs and gradients,
-        // so a real decode is never one flat value. This is the cheapest
-        // assertion that separates "returned Ok" from "produced pixels".
+        // with a single constant, so a flat result is what "returned Ok"
+        // looks like when nothing was actually decoded.
+        //
+        // This was a per-file assertion while the corpus was eleven
+        // photographs. It cannot stay one: `raster/image-rs` is a
+        // decoder TEST SUITE, and some of its fixtures are legitimately
+        // flat — `exif-xmp-metadata.jpg` is 5x5 pixels in 4,263 bytes — 99%
+        // metadata — and decodes flat
+        // because its job is to carry EXIF and XMP, not pixels. Failing
+        // on it would be asserting that purpose-built fixtures must look
+        // like photographs.
+        //
+        // So flat files are COLLECTED, and the guard becomes a ratio
+        // below. That keeps what the assertion was actually worth — a
+        // regression that flattens the decoder shows up as a flood, not
+        // as one file — without punishing a fixture for being deliberate.
         let first = pixels[0];
-        assert!(
-            pixels.iter().any(|&b| b != first),
-            "{name}: every sample decoded to {first} — a uniform buffer is what a \
-             failed scan looks like when the decoder still reports success"
-        );
+        if !pixels.iter().any(|&b| b != first) {
+            flat.push(name.clone());
+            continue;
+        }
 
         println!(
             "  ok  {name:<28} {}x{} {:?} {} bpp  native={}  icc={}  exif={}",
@@ -188,11 +328,35 @@ fn every_real_jpeg_decodes_to_a_full_plausible_image() {
         );
     }
 
+    if !flat.is_empty() {
+        println!(
+            "  note: {} uniform-value JPEG(s) — legitimate for metadata-only \
+             fixtures: {:?}",
+            flat.len(),
+            &flat[..flat.len().min(5)]
+        );
+    }
+
     assert!(
         failures.is_empty(),
         "{} of {} real JPEGs failed to decode: {failures:?}",
         failures.len(),
         files.len()
+    );
+
+    // The ratio guard the per-file assertion turned into. A handful of
+    // deliberately flat fixtures is expected; a tenth of the corpus
+    // decoding flat is a decoder that has stopped decoding.
+    let flat_share = flat.len() * 100 / files.len().max(1);
+    assert!(
+        flat_share < 10,
+        "{}% of {} real JPEGs decoded to a single uniform value ({} files) — a \
+         few purpose-built fixtures are legitimately flat, but this many means \
+         the scan is not being read: {:?}",
+        flat_share,
+        files.len(),
+        flat.len(),
+        &flat[..flat.len().min(10)]
     );
 }
 
@@ -312,22 +476,38 @@ fn a_progressive_jpeg_decodes_and_windows_like_a_baseline_one() {
 
     // Progressive JPEGs arrive as successive approximation scans rather
     // than one pass, and every JPEG this crate encodes is baseline — so
-    // without the corpus this path is unreachable. Find it by size: the
-    // 4000x4000 photography-portfolio placeholder is the only one.
-    let mut widest: Option<(String, SourceInfo, Vec<u8>)> = None;
-    for path in &files {
-        let Some((info, pixels)) = decode_full(path) else {
-            continue;
-        };
-        if widest.as_ref().is_none_or(|(_, i, _)| info.width > i.width) {
-            widest = Some((name_of(path), info, pixels));
-        }
+    // without the corpus this path is unreachable.
+    //
+    // This used to find one BY SIZE, on the reasoning that "the 4000x4000
+    // photography-portfolio placeholder is the only one". True of eleven
+    // files; false of 546. The widest file in the corpus is now a
+    // baseline 6476x3643, so the test was no longer testing progressive
+    // decoding at all — it just happened to still pass. Select on the
+    // property the test is actually about.
+    let progressive: Vec<&PathBuf> = files.iter().filter(|p| is_progressive(p)).collect();
+    if progressive.is_empty() {
+        eprintln!("SKIP: no progressive JPEG in the corpus");
+        return;
     }
-    let Some((name, info, full)) = widest else {
-        eprintln!("SKIP: nothing decoded");
+    println!("progressive JPEGs in the corpus: {}", progressive.len());
+
+    // Keep the PATH, never re-find by file name. Two different packs
+    // ship a `p1.jpg` (370x460 and 6476x3643), so a basename lookup
+    // silently returned the wrong file: the ROI was computed from one
+    // image and read from the other, which surfaced as a bogus
+    // "roi out of bounds" against the decoder. Same bare-name-collision
+    // class as the three bugs this corpus extraction found in the
+    // harness.
+    let path = progressive
+        .iter()
+        .max_by_key(|p| decode_full(p).map(|(i, _)| i.width).unwrap_or(0))
+        .expect("non-empty");
+    let Some((info, full)) = decode_full(path) else {
+        eprintln!("SKIP: the progressive file did not decode");
         return;
     };
-    println!("  largest: {name} {}x{}", info.width, info.height);
+    let name = name_of(path);
+    println!("  progressive: {name} {}x{}", info.width, info.height);
 
     // The M0 whole-decode-then-window invariant, on a real file: a
     // sub-region read must equal the same rectangle of the full decode.
@@ -341,13 +521,7 @@ fn a_progressive_jpeg_decodes_and_windows_like_a_baseline_one() {
         (info.width / 8).max(1),
         (info.height / 8).max(1),
     );
-    let bytes = std::fs::read(
-        files
-            .iter()
-            .find(|p| name_of(p) == name)
-            .expect("the file we just decoded"),
-    )
-    .expect("re-read");
+    let bytes = std::fs::read(path).expect("re-read");
     let mut src = JpegSource::new(MemoryByteSource::new(bytes.into_boxed_slice()));
     src.probe().expect("probe");
     let mut buf = vec![0u8; roi.w as usize * roi.h as usize * bpp];
@@ -373,4 +547,43 @@ fn a_progressive_jpeg_decodes_and_windows_like_a_baseline_one() {
         let c: ChannelLayout = info.format.channels;
         c.count()
     });
+}
+
+#[test]
+#[ignore = "jpeg corpus lane: opt-in (PAGED_JPEG_CORPUS=1 + the private corpus mount)"]
+fn a_file_called_jpg_that_is_not_one_is_refused_by_name() {
+    let misnamed = corpus_misnamed(&["jpg", "jpeg"], "jpeg");
+    if misnamed.is_empty() {
+        eprintln!("SKIP: no misnamed .jpg in the corpus");
+        return;
+    }
+
+    // 266 of the corpus's `.jpg` files are PNG. That is not an oddity to
+    // route around, it is the single largest misnaming population we
+    // have, and it makes this the best-exercised refusal path in the
+    // crate: the decoder must reject them by signature rather than start
+    // parsing a JPEG scan out of PNG chunks.
+    let mut wrongly_accepted = Vec::new();
+    let mut by_actual: std::collections::BTreeMap<&str, usize> = Default::default();
+    for (path, actual) in &misnamed {
+        *by_actual.entry(actual).or_default() += 1;
+        let bytes = std::fs::read(path).expect("read misnamed fixture");
+        let mut src = JpegSource::new(MemoryByteSource::new(bytes.into_boxed_slice()));
+        if src.probe().is_ok() {
+            wrongly_accepted.push(format!("{} (really {actual})", name_of(path)));
+        }
+    }
+
+    println!("misnamed .jpg files: {}", misnamed.len());
+    for (actual, n) in &by_actual {
+        println!("    really {actual:<6} {n:>4}");
+    }
+
+    assert!(
+        wrongly_accepted.is_empty(),
+        "{} file(s) named .jpg but holding another format were ACCEPTED by the \
+         JPEG decoder: {:?} — a half-read image is worse than a refused one",
+        wrongly_accepted.len(),
+        wrongly_accepted
+    );
 }
