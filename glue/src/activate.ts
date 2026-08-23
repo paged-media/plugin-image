@@ -33,6 +33,7 @@ import type {
   Disposable,
 } from "@paged-media/plugin-api";
 import { contributePanel, contributeTool } from "@paged-media/plugin-sdk";
+import { contributeMenu } from "./menu";
 
 import manifest from "../manifest.json";
 
@@ -768,6 +769,10 @@ export function activate(host: BundleHost): BundleHandle {
 
   host.log.info(`activated (apiVersion ${manifest.apiVersion})`);
 
+  // F1 — the menu bar. 23 commands and, before plugin-api 0.2.33, no
+  // route to one: a raster editor's whole vocabulary lived in Cmd+K.
+  const menuSub = contributeMenu(host);
+
   return {
     dispose() {
       // Providers first, then the subscription that feeds them, then
@@ -775,6 +780,7 @@ export function activate(host: BundleHost): BundleHandle {
       // disposed after its session would be a live provider over a
       // closed engine for however long the host takes to notice.
       providerInvalidate?.dispose();
+      menuSub.dispose();
       providerInvalidate = null;
       for (const h of providerHandles.splice(0)) h.dispose();
       session.dispose();
