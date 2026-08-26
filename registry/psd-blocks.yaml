@@ -135,7 +135,7 @@
     - "Adobe Photoshop File Format specification — Image Data Section"
     - "Adobe Photoshop File Format specification — Layer Info (negative layer count = first alpha is merged transparency)"
   tests:
-    rust: ["image-psd/tests/roundtrip.rs", "image-psd/tests/composite.rs", "image-js/tests/ingest.rs"]
+    rust: ["image-psd/tests/roundtrip.rs", "image-psd/tests/composite.rs", "image-js/tests/ingest.rs", "image-psd/tests/annual_fixture.rs"]
 
 - id: image.psd.container.psb
   state_row: image.psd.roundtrip
@@ -179,7 +179,7 @@
   # (lsct), clipping layers, layer masks (-2/-3), non-8-bit-RGB, and an
   # over-budget canvas (MAX_IMPORT_BYTES — plates are canvas-extent).
   tests:
-    rust: ["image-conformance/tests/psd_layer_import.rs", "image-psd/src/layer_pixels.rs"]
+    rust: ["image-conformance/tests/psd_layer_import.rs", "image-psd/src/layer_pixels.rs", "image-psd/tests/annual_fixture.rs"]
 
 # ── PSD descriptor-family primitives ─────────────────────────────────
 # Neither of these is a top-level PSD *block*; they are the two
