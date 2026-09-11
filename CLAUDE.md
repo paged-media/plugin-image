@@ -19,36 +19,30 @@ Spec (the authority): `thoughts/docs/paged/plugin-image/base-idea.md`.
 A-0 audit + D-11 ruling: `thoughts/docs/paged/plugin-image/a0-audit.md`.
 SDK gap tracker: the cross-repo RFI `thoughts/docs/paged/plugin-platform/rfi-core-sdk-gaps.md` (I-NN ids in §6; per-plugin BREAKAGE_LOG retired 2026-06-12).
 
-## Project State & Feature Matrix (paged-media/state)
+## Project State & Feature Matrix (cockpit)
 
-The canonical feature inventory, test linkage, and live status for ALL
-Paged repos live in `paged-media/state` — dashboard:
-https://state.paged.media, summary: `state/STATUS.md`. There is NO
-feature matrix in this repo; do not create one.
+The feature inventory, test linkage and live status for ALL Paged repos are derived by
+[Cockpit](https://github.com/drietsch/cockpit) from `~/paged/cockpit/` (`cockpit.toml` with
+`root = ".."`; features in `cockpit/docs/features/<chapter>/<id>.md`). There is NO feature
+matrix in this repo; do not create one.
 
 Rules for every code change in this repo:
 
-1. NEW CAPABILITY → registry entry. If your change adds or completes a
-   feature, add/update its entry in `state/registry/features/*.yaml`
-   (separate PR to paged-media/state, reference it from this PR).
-   Feature IDs are immutable.
-2. EVERY NEW TEST → feature tag. Playwright: `{ tag: ['@feat:<id>'] }`.
-   Rust: `#[feature_test("<id>")]`. Untagged new tests fail CI.
-   (Until the macro ships from state, use the naming convention
-   `fn <feature_id_with_underscores>_…()` and the registry row's
-   `tests:` pointer in `registry/*.yaml` here.)
-3. STATUS CHANGE → registry, not prose. "X is now shipped/partial" is
-   expressed by editing the registry entry, never by writing it into
-   READMEs or docs.
-4. NEVER hand-edit generated files: `state/data/*.json`,
-   `state/STATUS.md`, docs conformance tables. They are overwritten on
-   every generation.
-5. BEFORE claiming a feature done: check its row on the dashboard (or
-   run `/matrix`) — done means status reflects reality AND linked tests
-   are green.
-6. FOUND A BUG while working? If a test exposes it, just let it fail and
-   push — the bug reporter files the issue. For untestable findings,
-   open an issue with label `state-bug` + `feat:<id>`.
+1. NEW CAPABILITY → feature file. If your change adds or completes a feature, add or update
+   `cockpit/docs/features/<chapter>/<id>.md` (separate commit in `paged/cockpit`, referenced
+   from this one). Feature ids are immutable; rename with `superseded_by`.
+2. EVERY NEW TEST → feature link. Playwright: `{ tag: ['@feat:<id>'] }`. Rust: a test name
+   ending in `__feat__<id_with_underscores>` or containing `[<id>]`. Otherwise an entry in
+   `cockpit/test-map.yaml`.
+3. STATUS CHANGE → `claims:` in the feature file, never prose. "X is now shipped/partial" is a
+   claim edit; whether it *works* is computed from evidence and cannot be written.
+4. BEFORE claiming a feature done: `cockpit feature <id> --json` (or its page in
+   `cockpit serve`) — done means the linked tests are green and were produced after the
+   latest implementation commit.
+5. `cockpit validate --strict` is the gate (references resolve, required evidence present and
+   fresh). `cockpit pull` fetches the newest CI artifacts; `cockpit status` is the summary.
+6. FOUND A BUG while working? If a test exposes it, let it fail and push — the failure shows
+   up as attention on its feature. Never commit `.cockpit/`.
 
 ## Hard rules (this repo's constitution — spec §2/§3/§6)
 
@@ -98,14 +92,15 @@ Rules for every code change in this repo:
 
 ## Two-registry split
 
-- `paged-media/state` `registry/features/plugin-image.yaml` — the
-  STATUS ledger (stage `plugin.image`; status planned/partial/shipped).
+- `~/paged/cockpit/docs/features/image/<id>.md` (Cockpit, chapter `image`) — the
+  STATUS ledger (component `plugin.image`; `claims:` planned/partial/shipped,
+  health from evidence).
 - `plugin-image/registry/*.yaml` (here) — the build-consumed
   kernel/PSD-block/codec metadata: class, `mip_exact`, `gpu_tolerance`,
   oracle, provenance, test pointers. `image-kernels/build.rs` generates
   the dispatch table FROM `registry/kernels.yaml` — an implementation
   without a row is unreachable by construction (§12.2). The ids mirror
-  the state `image.*` ids so the two registries join by id.
+  the Cockpit `image.*` ids so the two registries join by id.
 
 ## Layout
 
