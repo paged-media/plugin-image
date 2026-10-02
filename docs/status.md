@@ -1,0 +1,90 @@
+# Status
+
+What `paged.image` ships and what it does not, read from the code at commit `f7d21e5`
+(`@paged-media/image` 0.1.0-canary.16). How the parts fit is in
+[`architecture.md`](architecture.md).
+
+## Shipped
+
+- **Ingest.** "Adjust image" reads the original bytes of the one selected placed image; an
+  importer takes `.psd`, `.psb`, `.png`, `.jpg` and `.jpeg` files. PNG and JPEG, including
+  CMYK JPEG, are decoded by the codec adapters, a PSD from its merged composite. EXIF
+  orientation is applied. Decoding runs in a worker pool when the host grants workers.
+- **Adjustments.** The "Image" panel has a histogram and a re-runnable chain: exposure,
+  brightness, contrast, saturation, temperature and tint, levels (composite and per
+  channel), a tone curve, vibrance, colour balance, black and white, posterize, threshold,
+  photo filter, channel mixer, blur, sharpen, hue rotate, invert, and "Auto-enhance". Apply
+  runs it on the GPU, within the selection if there is one, and shows it inside the frame.
+- **Filters and fills.** One-shot kernels from the panel: gradient map, warp, emboss, find
+  edges, motion and radial blur, mosaic, twelve gallery effects, despeckle, dust and
+  scratches, offset, lens blur, reduce noise, smart sharpen, selective colour; gradient,
+  noise and content-aware fills.
+- **Selection.** Rectangle and ellipse marquee, lasso, polygonal lasso, magic wand and
+  quick selection, combined by add, subtract and intersect; select all, deselect, invert,
+  feather; a channel as selection; selection to path and path to selection.
+- **Paint, retouch, type.** Brush, pencil, eraser, clone stamp and healing brush on the
+  active layer, with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
+  presets from an `.abr` brush library. The type tool paints a shaped run of text into the
+  active layer with font bytes the host serves for the document's fonts.
+- **Layers.** Add, duplicate, remove, reorder; visibility, lock, opacity and 26 blend modes;
+  a mask from the selection; groups; clipping; adjustment layers; bake the chain into a
+  layer; undo and redo of pixel edits. In the `rasterImage` context, entered by
+  double-clicking an ingested frame, the host's Layers panel shows this stack.
+- **Crop, straighten, resize.** A crop tool with aspect presets and a straighten angle;
+  resize with a nearest, Mitchell or Lanczos 3 filter.
+- **PSD.** A PSD whose layers the model reproduces opens as layers. Layers of the retained
+  file can be renamed, removed and given another opacity before export. With no edit the
+  writer reproduces the input bytes (`image-psd/tests/roundtrip.rs`).
+- **Save-back and tiles.** "Apply to file" encodes the adjusted result as PSD, PNG or JPEG
+  and "Save the adjusted file" hands it to the host's save door; three exporters offer the
+  same formats. "Serve image tiles to the renderer" claims the frame's image resource.
+
+## Limits of what is shipped
+
+- **A GPU is required.** No kernel has a CPU path. Without WebGPU, adjustments, filters,
+  generator fills, painting, resize and the composite of more than one layer return an
+  error; decode, the identity composite, selection and histograms still work.
+- **The result on the page is a session preview**: one scene-layer image item, sent as RGBA8 in a JavaScript number array. It is
+  cleared when the frame leaves the selection and on Reset, is not written to the document, and no code restores it in a later session.
+  Save-back writes a separate file and does not change the frame's placed image ([ADR 460](adr/460-document-is-not-the-store.md)).
+- **Tiles** are level 0 only, served only after the command, and cut from the held image
+  without the panel's chain. The mip export `image_tile_rgba8_level` has no TypeScript caller.
+- **Colour.** Transforms run once, on the CPU, at decode: RGB with an embedded profile to
+  sRGB (perceptual, no black-point compensation); CMYK without a profile by the plain ink
+  formula. The profile of a PSD and of a PNG kept at 16 bits is not applied ("sRGB
+  assumed"). There is no rendering-intent control. Kernels receive encoded values.
+- **Depth.** A 16-bit RGB or RGBA PNG decoded on the main thread is held at 16 bits. The
+  decode worker returns RGBA8, a 16-bit PSD is reduced to 8 bits, and a 16-bit greyscale
+  PNG is refused (`image-js/src/ingest.rs:599-620`). `layers_open` (`image-js/src/lib.rs:2564`)
+  and the panel's chain (`image-js/src/ingest.rs:1123`) take the held buffer as four bytes
+  per pixel; `LayerStack::from_image_px`, which keeps the depth, is called only by tests.
+  The scene-layer item, tiles and PSD save-back are 8-bit. A curve is a 256-entry table.
+- **PSD.** The composite decode takes 8- and 16-bit RGB or greyscale, raw or RLE (not 16-bit RLE); other modes and depths are
+  refused. Layers are imported only from RGB files without groups or layer masks and within 384 MiB. Save-back is 8-bit RGB: it
+  replaces the pixels of a single canvas-sized layer or writes a new single-layer file. The session's layer stack is never written
+  to a file as layers. "Apply to file" and the PNG and JPEG exporters encode the composite; the PSD exporter does so only when the
+  parameters are not the identity, and otherwise returns the retained file ([ADR 460](adr/460-document-is-not-the-store.md)).
+- **Layers and undo.** Every layer is canvas-sized. A crop, resize or straighten replaces
+  the stack with one layer and drops the history. The journal holds at most 32 entries and
+  256 MiB, records pixels only, and is cleared when a layer is removed.
+- **Raster type** has no line wrapping. **Content-aware fill** searches a bounded window.
+- **Built, with no panel control or command:** pattern fill, moving the selected pixels,
+  shape blur, layer offset and smart-object layers. **Called only by tests:** Engine B's
+  op-node evaluation, the texture pool, batched dispatch, and the residency manager, whose
+  third tier (scratch storage) returns an error.
+- **Tests.** Comparisons of GPU output with the scalar reference skip without an adapter,
+  and CI has none. The perceptual tolerance arm of the harness is `unimplemented!`.
+- **Manifest.** It declares `rendering: hitTest` and `workers.sharedMemory`, which the
+  bundle does not use, and caps the wasm at 8 MiB while the build script stops at 100 MB.
+  The shipped `panels/image-adjustments.panel.json` is read by nothing.
+
+## Not built
+
+- Storing edits in the document ([ADR 460](adr/460-document-is-not-the-store.md)).
+- Handing a GPU texture to the host ([ADR 459](adr/459-scene-layer-image-and-tiles.md)).
+- A colour-transform kernel on the GPU ([ADR 457](adr/457-colour-management.md)).
+- Image formats other than PNG, JPEG and PSD/PSB. `registry/codecs.yaml` records AVIF and
+  JPEG XL as planned, camera RAW and HEIC as out of scope ([ADR 456](adr/456-codecs.md)).
+- A writer for PSD descriptors, which are parsed read-only (`registry/psd-blocks.yaml`).
+- Runners for the libvips and GEGL oracles that 83 rows of `registry/kernels.yaml` name
+  (every row has `status: implemented`), and a CI lane with a GPU adapter.
