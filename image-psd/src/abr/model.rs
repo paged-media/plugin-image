@@ -42,7 +42,7 @@
 //!
 //! # Provenance
 //!
-//! `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` §4.2
+//! the internal ABR behaviour specification (not published) §4.2
 //! (unit rules), §5 (tips), §6 (dynamics), §7 (brush-level keys and
 //! tool options), §9 (blend modes). Confidence tags are carried per item
 //! in the doc comments below: `[OBS]` facts were measured on 3,215 real

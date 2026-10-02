@@ -1,5 +1,5 @@
 # paged.image — Rust workspace. Crates live at REPO TOP LEVEL per the
-# spec (§4 of thoughts/docs/paged/plugin-image/base-idea.md), not under
+# spec (§4 of docs/concept.md), not under
 # crates/. references/ is NEVER a member (read-only clean-room mounts).
 [workspace]
 resolver = "2"

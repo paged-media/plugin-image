@@ -1370,7 +1370,7 @@ mod wasm {
     /// adjustment chain on a 16-bit image no longer quantises between
     /// steps. The LAYERED path still narrows, because the layer edit
     /// journal is tile-granular over `Arc<[u8]>` — that is step 4 of
-    /// `16-bit-stack-plan.md`, and narrowing HERE rather than pretending
+    /// `docs/design/16-bit-stack.md`, and narrowing HERE rather than pretending
     /// otherwise is what keeps `depth_reduced` honest.
     async fn land_fill_px(
         width: u32,
@@ -1385,7 +1385,7 @@ mod wasm {
         // and the undo journal are depth-aware: the journal stores
         // opaque tile handles and `FlatImage` always took
         // bytes-per-pixel as a parameter, so nothing in `image-graph`
-        // had to change (16-bit-stack-plan.md step 4).
+        // had to change (docs/design/16-bit-stack.md step 4).
         let ctx = GPU.with(|g| g.borrow().clone());
         let damage = SELECTION
             .with(|s| s.borrow().coverage().and_then(|c| c.bounds()))

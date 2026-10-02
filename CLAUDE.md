@@ -15,9 +15,9 @@ plus PSD/PSB round-trip (`image-psd`), GPU-only WGSL kernels
 (`image-conformance`). Shipped as a plugin bundle (`manifest/` + `glue/`)
 consuming ONLY the published plugin SDK.
 
-Spec (the authority): `thoughts/docs/paged/plugin-image/base-idea.md`.
-A-0 audit + D-11 ruling: `thoughts/docs/paged/plugin-image/a0-audit.md`.
-SDK gap tracker: the cross-repo RFI `thoughts/docs/paged/plugin-platform/rfi-core-sdk-gaps.md` (I-NN ids in §6; per-plugin BREAKAGE_LOG retired 2026-06-12).
+Spec (the authority): `docs/concept.md`.
+A-0 audit + D-11 ruling: an internal audit note (its colour-engine ruling is `docs/adr/457-colour-management.md`).
+SDK gap tracker: the cross-repo RFI (the internal gap register) (I-NN ids in §6; per-plugin BREAKAGE_LOG retired 2026-06-12).
 
 ## Project State & Feature Matrix (cockpit)
 
@@ -53,7 +53,7 @@ Rules for every code change in this repo:
   engine, PSD, or codec code — **MUST NOT read `references/`**, ever.
   Never paste, transliterate, or closely paraphrase reference code or
   comments into any artifact. Implementation derives from the spec, the
-  behavior specs in `thoughts/`, public documentation and academic
+  behavior specs in an internal notes repository, public documentation and academic
   literature, and the oracle tests.
 - **ISOLATION CONTRACT (§2.1).** Zero core contact. No imports from
   `core/` or `editor/` internals; the only `@paged-media/*` dependencies

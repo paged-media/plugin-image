@@ -40,7 +40,7 @@
 //!
 //! # Provenance
 //!
-//! `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` §2.2 —
+//! the internal ABR behaviour specification (not published) §2.2 —
 //! `[OBS]`, decoded byte-exactly from 3,202 sampled-tip records across
 //! 7 files; §2.3/§2.4 for the raw and PackBits-with-row-table plane
 //! payloads. The Adobe Photoshop File Formats Specification documents

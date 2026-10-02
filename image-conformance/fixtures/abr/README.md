@@ -3,7 +3,7 @@
 **Produced by:** an ANALYST-role session under the clean-room two-role
 protocol (`plugin-image/CLAUDE.md` §3.1).
 **Consumed by:** anyone, including IMPLEMENTER-role sessions and CI.
-**Specified by:** `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md`
+**Specified by:** the internal ABR behaviour specification (not published)
 §13.4 (what they are) and §14.3.1 (the gate they exist to make possible).
 
 ## Why these files exist

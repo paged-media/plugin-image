@@ -46,7 +46,7 @@
 //! (the header, the `key-or-4cc` convention, the OSType table and the
 //! unit codes) — `[PUB]`; the dual legacy/long-form dialect and the
 //! localisable-string form are recorded in the behaviour spec
-//! `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` §4.1, §6.4
+//! the internal ABR behaviour specification (not published) §4.1, §6.4
 //! and §9. `references/` is never read by implementers of this crate.
 //!
 //! # The preservation invariant is NOT weakened by this module

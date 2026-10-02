@@ -1183,7 +1183,7 @@ impl LayerStack {
         // depth-agnostic — it stores opaque tile byte handles and
         // `FlatImage` already took bytes-per-pixel as a parameter — so
         // a 16-bit edit journals and undoes at 16 bits with no change
-        // to `image-graph` at all (16-bit-stack-plan.md step 4).
+        // to `image-graph` at all (docs/design/16-bit-stack.md step 4).
         let want = (self.width as usize) * (self.height as usize) * pixels.bytes_per_pixel();
         if pixels.len() != want {
             return Err(IngestError::Decode(format!(

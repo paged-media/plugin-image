@@ -37,7 +37,7 @@
 //!
 //! Provenance: W3C Compositing and Blending Level 1 (public spec,
 //! <https://www.w3.org/TR/compositing-1/>); Porter–Duff `over` on
-//! premultiplied data is the spine (base-idea §8.4). The PSD merged-
+//! premultiplied data is the spine (docs/concept.md §8.4). The PSD merged-
 //! composite oracle (psd_composite) joins on the `BlendMode` fourcc
 //! mapping below.
 //!

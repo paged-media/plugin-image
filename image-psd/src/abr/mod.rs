@@ -38,7 +38,7 @@
 //!
 //! # Provenance
 //!
-//! The behaviour spec `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md`
+//! The behaviour spec the internal ABR behaviour specification (not published)
 //! (revision 3), which was written by an ANALYST under the clean-room
 //! two-role protocol and then verified against **3,215 real brush
 //! presets in 9 licensed files**. Facts it carries are tagged `[OBS]`

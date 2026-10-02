@@ -6,16 +6,27 @@ libvips-class streaming pipeline (Engine A) and a GEGL-class persistent
 tiled buffer graph (Engine B), with PSD/PSB round-trip as a constitutive
 property — "Paged never destroys a PSD."
 
-Concept / spec: `thoughts/docs/paged/plugin-image/base-idea.md` (v0.5).
+Concept / spec: [`docs/concept.md`](./docs/concept.md).
 First-party in authorship, third-party in discipline: this plugin runs
 under exactly the rules every external plugin runs under, and is
 deliberately the heaviest stress test the plugin platform has. Every
 place the SDK falls short is a row in the cross-repo RFI
-(`thoughts/docs/paged/plugin-platform/rfi-core-sdk-gaps.md`), never a core
+(the internal gap register), never a core
 modification. The old in-repo `BREAKAGE_LOG.md` was retired on 2026-06-12 —
 every I-NN it held resolved into a platform `C-`/`K-` row (I-01→C-1,
 I-02→K-3, I-04→C-5, I-06→C-6), and the RFI records that there is no
 image-local residual left to fold.
+
+## Documentation
+
+Everything about how the plugin is designed and built is in [`docs/`](./docs/README.md):
+
+- [`docs/concept.md`](./docs/concept.md): the specification, with notes on what was built.
+- [`docs/architecture.md`](./docs/architecture.md): crates, the two engines, the kernel model, how results reach the page.
+- [`docs/status.md`](./docs/status.md): what ships today and what does not.
+- [`docs/adr/`](./docs/adr/README.md): the architecture decisions, one per file.
+
+`docs/status.md` is the current record of what ships; the sections below are older in places.
 
 ## Packages
 
@@ -38,7 +49,7 @@ image-local residual left to fold.
 
 `references/gegl` and `references/libvips` are read-only inspiration
 mounts (gitignored, never vendored). The two-role protocol applies:
-analysts read references and write behavior specs into `thoughts/`;
+analysts read references and write behavior specs into an internal notes repository;
 implementers never read `references/`. See `CLAUDE.md` and spec §3.1.
 
 ## Setup
@@ -78,7 +89,7 @@ pnpm test && pnpm validate:manifest
   fill), CMS rung 1 and the K-10 save-file adoption.
 
   The living status is NOT here — it is
-  `thoughts/docs/paged/plugin-image/photoshop_clone_capability_catalog_with_paged_reuse.md`
+  an internal capability catalogue
   §36.4/§36.5 for the capability ledger and the `paged-media/state`
   registry for per-feature status. A milestone list in a README is a
   claim that goes stale the week after it is written; those two do not,

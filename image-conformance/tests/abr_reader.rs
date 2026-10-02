@@ -35,7 +35,7 @@
 //! Fixtures come from [`image_conformance::abr_builder`], an INDEPENDENT
 //! byte emitter that shares no code with the reader. Each test is named
 //! after the trap in
-//! `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` §10 that
+//! the internal ABR behaviour specification (not published) §10 that
 //! it exists to catch.
 //!
 //! What is tested ELSEWHERE, and why. Revision 2 of the behaviour spec

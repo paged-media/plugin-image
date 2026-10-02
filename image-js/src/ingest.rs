@@ -593,7 +593,7 @@ fn decode_source<S: ImageSource>(
     let info = source
         .probe()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
-    // 16-BIT RGBA rides through at full depth (16-bit-stack-plan.md
+    // 16-BIT RGBA rides through at full depth (docs/design/16-bit-stack.md
     // step 5). Other layouts at 16 bits would need their own widening
     // arms below, so they still take the narrowing path and say so.
     let keep16 =

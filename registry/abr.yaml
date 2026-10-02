@@ -13,7 +13,7 @@
 # PSD's own pattern records all need them).
 #
 # THE SOURCE OF EVERY FACT BELOW is the behaviour spec
-# `thoughts/docs/paged/plugin-image/abr-brush-format-spec.md` (rev. 3),
+# the internal ABR behaviour specification (not published) (rev. 3),
 # an ANALYST artifact under the clean-room two-role protocol
 # (plugin-image/CLAUDE.md §3.1), verified against 3,215 real brush
 # presets in 9 licensed files. Its confidence tags are carried through

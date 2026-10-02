@@ -158,7 +158,7 @@ impl<B: ByteSource> PngSource<B> {
         // KEEP the bits. A 16-bit file used to be narrowed here; it now
         // travels as native-endian pairs and the depth rides with it, so
         // an adjustment chain no longer quantises at every step
-        // (16-bit-stack-plan.md steps 3 and 5).
+        // (docs/design/16-bit-stack.md steps 3 and 5).
         let mut depth = SampleDepth::U8;
         let src = match result {
             zune_core::result::DecodingResult::U8(v) => v,
@@ -228,7 +228,7 @@ impl<B: ByteSource> ImageSource for PngSource<B> {
             height: i.height,
             // The file's OWN depth. 16-bit PNGs now keep their bits
             // through the pipeline instead of being narrowed at the
-            // codec boundary (16-bit-stack-plan.md step 5).
+            // codec boundary (docs/design/16-bit-stack.md step 5).
             format: png_format(
                 i.channels,
                 if i.source_depth_16 {
