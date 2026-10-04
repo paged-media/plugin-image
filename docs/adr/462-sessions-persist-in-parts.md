@@ -36,7 +36,8 @@ one layer, with the reason stated.
 - `glue/src/session-store.ts:90-119` — every buffer verified against its hash on read
 - `image-js/src/layers_persist.rs:134-200` — the stack as a manifest plus buffers
 - `image-js/src/layers_persist.rs:204-337` — the inverse, refusing damaged input
-- `glue/src/session.ts:977` — the bake is capped at 8 MB while images cross as JSON numbers
+- `glue/src/session.ts` (`MAX_BAKED_BYTES`) — the bake is capped at 8 MB only on the JSON lane
+- `glue/src/host66.ts` — the binary mutation lane, part deletion and the will-save hook, each probed
 
 ## Alternatives considered
 
@@ -52,11 +53,17 @@ exports without this plugin, and an IDML export carries the baked pixels, not th
 Parts are never overwritten, so the document's undo can only land on a marker whose revision
 exists. Unchanged layers are stored once across revisions.
 
-Not yet done: old revisions are not deleted (the parts door has no delete), and a bake
-larger than 8 MB is refused until the host accepts binary image transfers. A commit happens
-on the "Commit image edits to the document" command, when the image's edit context is left
-or committed, and when a frame with uncommitted edits is deselected
-(`glue/src/session.ts:1736`); saving the document does not yet trigger one.
+A commit happens on the "Commit image edits to the document" command, when the image's
+edit context is left or committed, when a frame with uncommitted edits is deselected, and,
+on a host that announces saves (`document.onWillSave@1`), before the document is saved.
+
+Where the host offers the protocol-66 doors (`glue/src/host66.ts`, each feature-detected):
+the composite PNG crosses as bytes (`document.mutateBinary@1`), so it has no size cap, and
+after each commit the frame's revisions older than the last eight, and the layer data only
+they named, are deleted (`storage.parts@2`; `glue/src/session-store.ts`, `collectGarbage`).
+The collection is awaited inside the commit, so it never overlaps the next commit's writes,
+which store buffers before the record that names them. On an older host the bake is still
+capped at 8 MB and nothing is deleted.
 
 ## Related
 
