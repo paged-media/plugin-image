@@ -2096,12 +2096,14 @@ export function createImageSession(host: BundleHost): ImageSession {
       src.height = wh.height;
       markPixelsEdited();
       refreshSourceReadout();
+      // Composite first: Apply writes its own status line, and this one
+      // (what the operation did) is the one to keep.
+      if (src.elementId) await api.apply();
       setStatus(
         `${op === "canvas" ? "Canvas size" : "Canvas"} → ${wh.width}×${wh.height}. ` +
           "One undo step.",
       );
-      if (src.elementId) await api.apply();
-      else emit();
+      emit();
       return true;
     },
 

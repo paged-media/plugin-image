@@ -1,6 +1,6 @@
 // IMAGE ▸ Rotate / Flip / Canvas Size — over the whole layer stack (every
-// layer, mask and smart source moves together). Exact pixel moves; the
-// undo history is cleared because its tiles addressed the old canvas.
+// layer, mask and smart source moves together). Exact pixel moves, each
+// one undo step (ADR 463: the history before it is kept).
 
 import type { CanvasOpKind } from "../../engine";
 import type { ImageSession } from "../../session";
@@ -97,8 +97,7 @@ export function CanvasSection({
       </div>
       <div style={note}>
         Rotate, flip and Canvas Size move every layer and mask exactly. Added
-        canvas is transparent; cut-off canvas is gone. Each clears the undo
-        history.
+        canvas is transparent; cut-off canvas is gone. Each is one undo step.
       </div>
     </>
   );

@@ -4106,10 +4106,19 @@ mod wasm {
             let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
                 JsValue::from_str("the spot healing brush is GPU-only — call init_gpu first")
             })?;
-            session
+            let healed = session
                 .resolve_spot_heal(&ctx)
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            // No source cleared the hole: nothing is committed, so the
+            // stroke costs no undo step and claims no paint.
+            if !healed {
+                return Err(JsValue::from_str(
+                    "the spot healing brush found no source near the stroke that \
+                     clears it, so nothing was healed — try a shorter stroke, or the \
+                     healing brush with an Alt-click source",
+                ));
+            }
         }
         let (w, h) = (session.width(), session.height());
         let handle = session.handle();
