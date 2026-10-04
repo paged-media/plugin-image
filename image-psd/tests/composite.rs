@@ -137,11 +137,14 @@ fn image_psd_global_merged_composite_decode_gray8_raw() {
 fn image_psd_global_merged_composite_decode_rgba8_rle_with_transparency() {
     // 3×2 RGBA, RLE. One count table covering all 4 channels' rows
     // (u16 entries for PSD), then the packed rows channel-major. The
-    // transparency flag marks channel 3 as the merged alpha.
+    // transparency flag marks channel 3 as the merged alpha, and the
+    // colour of a transparent merged image is stored matted against
+    // white, so the decode un-mattes it: 177 at α 128 is 100, 191 at
+    // α 64 is 0, and a clear pixel has no colour.
     let planes: [[u8; 6]; 4] = [
-        [1, 2, 3, 4, 5, 6],          // R
-        [11, 12, 13, 14, 15, 16],    // G
-        [21, 22, 23, 24, 25, 26],    // B
+        [1, 2, 3, 177, 191, 6],      // R
+        [11, 12, 13, 127, 255, 16],  // G
+        [21, 22, 23, 255, 191, 26],  // B
         [255, 255, 255, 128, 64, 0], // A
     ];
     let mut table = Vec::new();
@@ -164,9 +167,9 @@ fn image_psd_global_merged_composite_decode_rgba8_rle_with_transparency() {
             1, 11, 21, 255, //
             2, 12, 22, 255, //
             3, 13, 23, 255, //
-            4, 14, 24, 128, //
-            5, 15, 25, 64, //
-            6, 16, 26, 0,
+            100, 0, 255, 128, //
+            0, 255, 0, 64, //
+            0, 0, 0, 0,
         ]
     );
 }

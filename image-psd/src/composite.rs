@@ -140,10 +140,28 @@ impl PsdFile {
                 _ => (planes[0][i], planes[0][i], planes[0][i]),
             };
             let a = alpha.map_or(255, |p| p[i]);
+            // Photoshop stores a transparent merged image MATTED against
+            // white: stored = colour·α + 255·(1 − α). Undo it, so the
+            // decode is straight colour like every other source (left
+            // matted, every soft edge of a placed PSD came in lightened
+            // toward white — up to ~200 levels at low alpha, measured
+            // against Photoshop's own export).
+            let unmatte = |v: u8| -> u8 {
+                match a {
+                    255 => v,
+                    0 => 0,
+                    _ => {
+                        let al = f32::from(a) / 255.0;
+                        ((f32::from(v) - 255.0 * (1.0 - al)) / al)
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    }
+                }
+            };
             let o = i * 4;
-            rgba[o] = r;
-            rgba[o + 1] = g;
-            rgba[o + 2] = b;
+            rgba[o] = unmatte(r);
+            rgba[o + 1] = unmatte(g);
+            rgba[o + 2] = unmatte(b);
             rgba[o + 3] = a;
         }
         Ok(CompositeRgba8 {

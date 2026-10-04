@@ -149,11 +149,8 @@ fn photoshop_layer_stacks_flatten_as_recorded__feat__image_psd_layer_import() {
             "{id}: Photoshop wrote it with maximize compatibility, so 0x0421 must vouch"
         );
         let theirs = file.composite_rgba8().expect("merged composite decodes");
-        let reference = if file.layer_mask.transparency_in_merged {
-            Reference::MattedWhite
-        } else {
-            Reference::Straight
-        };
+        // The decoder un-mattes, so the merged composite is straight.
+        let reference = Reference::Straight;
         let got: Result<u8, String> = match flatten(&file) {
             Ok(ours) => Ok(compare_rgba8(&ours, &theirs.rgba, reference).channels[..3]
                 .iter()
@@ -187,18 +184,17 @@ fn photoshop_layer_stacks_flatten_as_recorded__feat__image_psd_layer_import() {
 
 /// MERGED-COMPOSITE MATTE. A transparent document's merged composite
 /// stores its colour MATTED against white (`c·α + 255·(1 − α)`) — the
-/// corpus shows it on every transparent file and Photoshop's own PNG
+/// corpus shows it on every transparent file, and Photoshop's own PNG
 /// export of the same document, which is straight, confirms it. The
 /// decoder (`PsdFile::composite_rgba8`, the flattened-ingest path)
-/// returns those matted values as STRAIGHT colour, so every semi-
-/// transparent edge of a placed PSD comes in lightened toward white
-/// (a halo over anything dark). Up to ~255 levels as α → 0; ~9 levels at
-/// α = 225, measured on the corpus.
+/// un-mattes; left matted, every semi-transparent edge of a placed PSD
+/// came in lightened toward white (up to ~255 levels as α → 0).
+///
+/// The stored value is 8-bit, so un-matting divides its rounding error
+/// by α: the bound is `1 + 128/α` levels (2 when opaque, 9 at α = 16).
 #[test]
 #[allow(non_snake_case)]
-#[ignore = "DEFECT: composite_rgba8 does not un-matte the white-matted merged colour of a transparent PSD"]
-fn defect_merged_composite_of_a_transparent_psd_decodes_to_straight_colour__feat__image_psd_rendered(
-) {
+fn merged_composite_of_a_transparent_psd_decodes_to_straight_colour__feat__image_psd_rendered() {
     let file = psd("transparent-soft");
     assert!(
         file.layer_mask.transparency_in_merged,
@@ -206,45 +202,39 @@ fn defect_merged_composite_of_a_transparent_psd_decodes_to_straight_colour__feat
     );
     let ours = file.composite_rgba8().expect("decode").rgba;
     let theirs = png_rgba8(&dir().join("transparent-soft.png"));
-    let mut worst = (0u8, 0u8);
+    let mut over = Vec::new();
     for (a, b) in ours.chunks_exact(4).zip(theirs.chunks_exact(4)) {
         if b[3] < 16 {
             continue; // colour is ill-conditioned this close to clear
         }
+        let bound = 1 + 128 / u32::from(b[3]);
         let d = (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
-        if d > worst.0 {
-            worst = (d, b[3]);
+        if u32::from(d) > bound {
+            over.push((d, b[3]));
         }
     }
     assert!(
-        worst.0 <= 2,
-        "merged colour is {} levels from Photoshop's straight export (at alpha {})",
-        worst.0,
-        worst.1
+        over.is_empty(),
+        "{} pixels beyond the 8-bit bound, e.g. {:?} (levels, alpha)",
+        over.len(),
+        &over[..over.len().min(5)]
     );
 }
 
-/// The same file with the matte undone agrees — which is what proves the
-/// matte is the whole story, and keeps a fix honest.
+/// Opaque pixels are not touched by the un-matte (α = 255 is the identity),
+/// and alpha itself decodes exactly.
 #[test]
 #[allow(non_snake_case)]
-fn unmatting_the_merged_composite_recovers_photoshops_colour__feat__image_psd_rendered() {
+fn unmatting_leaves_alpha_and_opaque_pixels_exact__feat__image_psd_rendered() {
     let file = psd("transparent-soft");
     let ours = file.composite_rgba8().expect("decode").rgba;
     let theirs = png_rgba8(&dir().join("transparent-soft.png"));
     for (a, b) in ours.chunks_exact(4).zip(theirs.chunks_exact(4)) {
         assert_eq!(a[3], b[3], "alpha decodes exactly");
-        if b[3] < 64 {
-            continue;
-        }
-        let al = b[3] as f64 / 255.0;
-        for c in 0..3 {
-            let un = ((a[c] as f64 - 255.0 * (1.0 - al)) / al).clamp(0.0, 255.0);
+        if b[3] == 255 {
             assert!(
-                (un - b[c] as f64).abs() <= 3.0,
-                "un-matted {un:.1} vs Photoshop {} at alpha {}",
-                b[c],
-                b[3]
+                (0..3).all(|c| a[c].abs_diff(b[c]) <= 1),
+                "opaque pixel changed"
             );
         }
     }

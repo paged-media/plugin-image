@@ -190,15 +190,9 @@ fn evaluate(bytes: &[u8], ctx: &image_gpu::GpuContext) -> Result<Row, String> {
             return Ok(row);
         }
     };
-    // The merged composite of a transparent document stores colour
-    // matted against white; ours is straight. Compare like with like
-    // (see `Reference::MattedWhite`). The DECODER's failure to un-matte
-    // is a separate defect, pinned in psd_composite_photoshop.rs.
-    let reference = if psd.layer_mask.transparency_in_merged {
-        Reference::MattedWhite
-    } else {
-        Reference::Straight
-    };
+    // The decoder un-mattes a transparent document's merged composite,
+    // so both sides are straight colour.
+    let reference = Reference::Straight;
     row.diff = Some(compare_rgba8(&ours, &theirs.rgba, reference));
     row.outcome = "compared";
     Ok(row)
