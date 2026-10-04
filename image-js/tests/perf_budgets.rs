@@ -311,11 +311,11 @@ fn a_twenty_step_opacity_drag__feat__image_editor_layers() {
 /// (one upload in, one readback out); the dispatches are the same ones.
 const APPLY6: [(&str, u64); 6] = [
     ("pipelines_built", 0),       // was 276: the per-device pipeline cache
-    ("dispatches", 276),          // unchanged: the same dispatches
+    ("dispatches", 108),          // was 276: blur windows only over the image
     ("submits", 18),              // was 276: resident chains
     ("textures_created", 0),      // was 832: scratch pool + constant mask
     ("readbacks", 18),            // was 276
-    ("bytes_uploaded", 26098352), // was 54978224: no intermediate re-uploads
+    ("bytes_uploaded", 25445456), // was 54978224, then 26098352: windows, not halos past the edge
 ];
 
 /// Apply with six stages on (exposure, contrast, saturation, hue, blur,

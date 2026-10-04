@@ -43,8 +43,8 @@
 //! compared with Photoshop's merged composite. [`EXPECT`] holds the
 //! outcome and the measured distance of every case — an improvement
 //! passes, a regression fails, and a changed refusal is a diff to
-//! review. Defects are pinned by the `defect_*` tests, `#[ignore]`d so
-//! CI stays green and failing until fixed.
+//! review. The defects this file found (the merged-composite matte, the
+//! clipping group) are fixed and their tests kept.
 
 use std::path::{Path, PathBuf};
 
@@ -63,18 +63,15 @@ fn dir() -> PathBuf {
 /// white); `Err(category)` = refused for that reason.
 ///
 /// Recorded 2026-10 against Photoshop 27.10:
-/// * `transparent-soft` and `opacity-blend-stack` AGREE (the merged
-///   composite compared through its white matte);
-/// * `clip-base-100` / `clip-base-50` are the CLIPPING-GROUP defect:
-///   clipped layers blend against everything below instead of against
-///   the clip base alone, so the base's anti-aliased edge (27 levels) and
-///   its opacity (64 levels) leak the clipped blend onto the backdrop;
-///   pinned by `defect_clipping_groups_match_photoshop` below and, without
-///   a PSD, in `composite_defects.rs`;
+/// * `transparent-soft` and `opacity-blend-stack` AGREE;
+/// * `clip-base-100` / `clip-base-50` AGREE since the fold composites a
+///   clip base and its clipped layers as a group (they were 27 and 64
+///   levels off while the clipped layers blended against everything
+///   below); `clipping_groups_match_photoshop` below keeps it;
 /// * groups and layer masks are REFUSED by the import, by design today.
 const EXPECT: &[(&str, Result<u8, &str>)] = &[
-    ("clip-base-100", Ok(27)),
-    ("clip-base-50", Ok(64)),
+    ("clip-base-100", Ok(1)),
+    ("clip-base-50", Ok(1)),
     ("group-isolated-50", Err("groups")),
     ("group-pass-through", Err("groups")),
     ("layer-mask", Err("layer-mask")),
@@ -242,8 +239,7 @@ fn unmatting_leaves_alpha_and_opaque_pixels_exact__feat__image_psd_rendered() {
 
 #[test]
 #[allow(non_snake_case)]
-#[ignore = "DEFECT: clipped layers blend against everything below, not against the clip base alone (27 levels at the base's edge, 64 at 50 % base opacity)"]
-fn defect_clipping_groups_match_photoshop__feat__image_layers_clipping() {
+fn clipping_groups_match_photoshop__feat__image_layers_clipping() {
     for id in ["clip-base-100", "clip-base-50"] {
         let file = psd(id);
         let theirs = file.composite_rgba8().expect("merged").rgba;

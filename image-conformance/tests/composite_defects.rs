@@ -30,12 +30,10 @@
  *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
  */
 
-//! DEFECT PINS found by the composite oracles. Each test states the
-//! behaviour Photoshop shows and FAILS until the engine matches it; each
-//! is `#[ignore]`d with a `DEFECT` reason so CI stays green while the
-//! defect stays visible (`cargo test -- --ignored` runs them). Engine
-//! code is not changed here — a pin is the record, the fix is its own
-//! commit that removes the `#[ignore]`.
+//! Defects found by the composite oracles, each pinned by a test stating
+//! the behaviour Photoshop shows. A pin is `#[ignore]`d with a `DEFECT`
+//! reason until its fix lands, and the fix removes the `#[ignore]`; every
+//! pin in this file is fixed today.
 
 use std::sync::Arc;
 
@@ -74,8 +72,9 @@ fn flatten(layers: Vec<LayerPlate>) -> Option<Arc<[u8]>> {
 /// blend mode) apply to the whole clipping group: the clipped layers
 /// blend onto the base at full strength, and THAT result is faded onto
 /// what lies below. The fold applies the base's opacity to the base
-/// alone and then blends the clipped layer over the already-faded
-/// result.
+/// alone and then blended the clipped layer over the already-faded
+/// result; it now folds a clip base and its clipped layers as a group
+/// (`layers/fold.rs`, `ClipOpen` / `ClipClose`).
 ///
 /// Found by the corpus composite oracle (a base at 90 % opacity under a
 /// clipped `divide` layer: 4,135 pixels off by up to 9 levels; the
@@ -91,8 +90,7 @@ fn flatten(layers: Vec<LayerPlate>) -> Option<Arc<[u8]>> {
 /// ```
 #[test]
 #[allow(non_snake_case)]
-#[ignore = "DEFECT: clip base opacity is not applied to the clipping group (Photoshop semantics); ~50 levels on this stimulus"]
-fn defect_clip_base_opacity_fades_the_whole_clipping_group__feat__image_layers_clipping() {
+fn clip_base_opacity_fades_the_whole_clipping_group__feat__image_layers_clipping() {
     let Some(out) = flatten(vec![
         plate("L0", [200, 200, 200], 255, b"norm", false),
         plate("L1", [40, 60, 80], 128, b"norm", false),

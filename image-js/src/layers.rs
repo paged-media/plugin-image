@@ -1856,6 +1856,11 @@ impl LayerStack {
         // longer enclose it and open the ones that newly do. The
         // ancestor chain is what those comparisons run on.
         let mut open: Vec<(u32, Vec<u8>)> = Vec::new();
+        // CLIPPING GROUPS (the resident fold's ClipOpen/ClipClose, op for
+        // op): the last unclipped pixel layer as it was blended, which a
+        // clipped layer above it reopens as a clipping group.
+        let mut last_base: Option<RefClipBase> = None;
+        let mut clip_group: Option<RefClipGroup> = None;
         for (layer, px) in plates {
             let want = self.chain_of(layer.group);
             // A layer inside ANY hidden group contributes nothing —
@@ -1864,12 +1869,21 @@ impl LayerStack {
             if want.iter().any(|g| !self.group_enabled(*g)) {
                 continue;
             }
+            if !layer.clipped {
+                if let Some(g) = clip_group.take() {
+                    acc = ref_clip_close(ctx, &acc, g, w, h).await?;
+                }
+            }
             // Close what no longer encloses this layer, innermost first.
             while let Some((gid, _)) = open.last() {
                 let still = want.contains(gid);
                 if still {
                     break;
                 }
+                if let Some(g) = clip_group.take() {
+                    acc = ref_clip_close(ctx, &acc, g, w, h).await?;
+                }
+                last_base = None;
                 let (gid, parked) = open.pop().expect("non-empty");
                 let inner = std::mem::replace(&mut acc, parked);
                 acc = self.blend_group(ctx, gid, acc, inner, w, h).await?;
@@ -1887,6 +1901,10 @@ impl LayerStack {
                     .find(|g| g.id == gid)
                     .is_some_and(|g| g.isolates());
                 if isolates {
+                    if let Some(g) = clip_group.take() {
+                        acc = ref_clip_close(ctx, &acc, g, w, h).await?;
+                    }
+                    last_base = None;
                     let parked =
                         std::mem::replace(&mut acc, vec![0u8; (w as usize) * (h as usize) * 8]);
                     open.push((gid, parked));
@@ -1905,6 +1923,13 @@ impl LayerStack {
                     // the one behaviour a designer cannot recover from.
                     continue;
                 }
+                if clip_group.is_none() {
+                    if let Some(base) = last_base.take() {
+                        let (g, opaque) = ref_clip_open(ctx, base, w, h).await?;
+                        clip_group = Some(g);
+                        acc = opaque;
+                    }
+                }
             } else if layer.is_pixels() {
                 clip_base = Some(alpha_of(&px));
             }
@@ -1912,7 +1937,9 @@ impl LayerStack {
             // The clip base multiplies into the layer's own coverage,
             // so a clipped-AND-masked layer is confined by both. Two
             // coverages multiply; they do not override each other.
-            let clip = if layer.clipped {
+            // Inside a clipping group the base's alpha is applied once,
+            // at its close, instead.
+            let clip = if layer.clipped && clip_group.is_none() {
                 clip_base.as_deref()
             } else {
                 None
@@ -1935,6 +1962,7 @@ impl LayerStack {
                 )
                 .await?;
                 acc = premultiply(ctx, &adjusted, w, h).await?;
+                last_base = None;
                 continue;
             }
 
@@ -1962,6 +1990,7 @@ impl LayerStack {
                         .bytes()
                         .to_vec()
                 });
+            let below = (!layer.clipped).then(|| acc.clone());
             acc = image_gpu::execute_tile_once_async(
                 ctx,
                 layer.blend,
@@ -1982,8 +2011,18 @@ impl LayerStack {
             )
             .await
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+            last_base = below.map(|below| RefClipBase {
+                below,
+                premul,
+                mask: mask_bytes,
+                blend: layer.blend,
+                opacity: layer.opacity,
+            });
         }
 
+        if let Some(g) = clip_group.take() {
+            acc = ref_clip_close(ctx, &acc, g, w, h).await?;
+        }
         // Groups still open at the top of the stack close here,
         // innermost first.
         while let Some((gid, parked)) = open.pop() {
@@ -2008,6 +2047,133 @@ impl LayerStack {
         };
         Ok(Arc::from(f16_to_rgba8(&out).into_boxed_slice()))
     }
+}
+
+/// The reference fold's record of the last unclipped pixel layer.
+#[cfg(any(test, feature = "reference-fold"))]
+struct RefClipBase {
+    below: Vec<u8>,
+    premul: Vec<u8>,
+    mask: Option<Vec<u8>>,
+    blend: &'static KernelDef,
+    opacity: f32,
+}
+
+/// The reference fold's open clipping group.
+#[cfg(any(test, feature = "reference-fold"))]
+struct RefClipGroup {
+    parked: Vec<u8>,
+    base: Vec<u8>,
+    blend: &'static KernelDef,
+    opacity: f32,
+}
+
+/// `fold::clip_base` on bytes: the base alone, and its colour opaque.
+#[cfg(any(test, feature = "reference-fold"))]
+async fn ref_clip_open(
+    ctx: &GpuContext,
+    b: RefClipBase,
+    w: u32,
+    h: u32,
+) -> Result<(RefClipGroup, Vec<u8>), IngestError> {
+    use image_kernels::families::band::{BandSetAlphaParams, BAND_SET_ALPHA};
+    let zeros = vec![0u8; (w as usize) * (h as usize) * 8];
+    let base = image_gpu::execute_tile_once_async(
+        ctx,
+        &COMPOSE_NORMAL,
+        &[
+            TileInput { f16_bytes: &zeros },
+            TileInput {
+                f16_bytes: &b.premul,
+            },
+        ],
+        ComposeParams::new(1.0).as_bytes(),
+        b.mask.as_deref(),
+        w,
+        h,
+    )
+    .await
+    .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+    let straight = dispatch_unary(
+        ctx,
+        &CAST_UNPREMULTIPLY,
+        CastUnpremultiplyParams::new().as_bytes(),
+        &base,
+        w,
+        h,
+    )
+    .await?;
+    let opaque = dispatch_unary(
+        ctx,
+        &BAND_SET_ALPHA,
+        BandSetAlphaParams::new(1.0).as_bytes(),
+        &straight,
+        w,
+        h,
+    )
+    .await?;
+    Ok((
+        RefClipGroup {
+            parked: b.below,
+            base,
+            blend: b.blend,
+            opacity: b.opacity,
+        },
+        opaque,
+    ))
+}
+
+/// `fold::clip_close` on bytes.
+#[cfg(any(test, feature = "reference-fold"))]
+async fn ref_clip_close(
+    ctx: &GpuContext,
+    inner: &[u8],
+    g: RefClipGroup,
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, IngestError> {
+    use image_kernels::families::arithmetic::{MathMulParams, MATH_MUL};
+    use image_kernels::families::band::{BandBroadcastAlphaParams, BAND_BROADCAST_ALPHA};
+    let pipe = |e: image_gpu::GpuError| IngestError::Pipeline(e.to_string());
+    let alpha = dispatch_unary(
+        ctx,
+        &BAND_BROADCAST_ALPHA,
+        BandBroadcastAlphaParams::new().as_bytes(),
+        &g.base,
+        w,
+        h,
+    )
+    .await?;
+    let group = image_gpu::execute_tile_once_async(
+        ctx,
+        &MATH_MUL,
+        &[
+            TileInput { f16_bytes: inner },
+            TileInput { f16_bytes: &alpha },
+        ],
+        MathMulParams::new().as_bytes(),
+        None,
+        w,
+        h,
+    )
+    .await
+    .map_err(pipe)?;
+    image_gpu::execute_tile_once_async(
+        ctx,
+        g.blend,
+        &[
+            TileInput {
+                f16_bytes: &g.parked,
+            },
+            TileInput { f16_bytes: &group },
+        ],
+        ComposeParams::new(g.opacity).as_bytes(),
+        None,
+        w,
+        h,
+    )
+    .await
+    .map_err(pipe)
 }
 
 /// The `compose.*` kernel for a PSD blend-mode fourcc.

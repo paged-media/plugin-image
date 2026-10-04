@@ -1,7 +1,7 @@
 {
   "about": "Photoshop oracle ledger: every recorded case, classified, with our measured distance (8-bit levels, CIEDE2000). Regenerate the numbers with PAGED_PHOTOSHOP_LEDGER=write; classes and notes are kept.",
   "agree_levels": 2,
-  "summary": {"agreement": 63, "convention": 14, "defect": 3},
+  "summary": {"agreement": 64, "convention": 16},
   "cases": {
     "blend-modes/identity-bottom": {"class": "agreement", "max_levels": 0.01, "mean_levels": 0.01, "p99_levels": 0.01, "de00_p95": 0, "de00_max": 0, "note": ""},
     "blend-modes/normal@100": {"class": "agreement", "max_levels": 0.01, "mean_levels": 0.01, "p99_levels": 0.01, "de00_p95": 0, "de00_max": 0, "note": ""},
@@ -74,9 +74,9 @@
     "adjustments/photo-filter": {"class": "convention", "max_levels": 86.47, "mean_levels": 30.41, "p99_levels": 77.82, "de00_p95": 19.82, "de00_max": 26.9, "note": "Engine: mix(c, c x filter, density) + luminosity restore; Photoshop's gel model differs."},
     "adjustments/black-white": {"class": "agreement", "max_levels": 0.14, "mean_levels": 0.03, "p99_levels": 0.1, "de00_p95": 0.02, "de00_max": 0.04, "note": "Default six weights; the engine's hue-sector mix reproduces Photoshop."},
     "filters/identity": {"class": "agreement", "max_levels": 0.01, "mean_levels": 0.01, "p99_levels": 0.01, "de00_p95": 0, "de00_max": 0, "note": "Open + save round trip."},
-    "filters/gaussian-r2": {"class": "defect", "max_levels": 253.23, "mean_levels": 83.78, "p99_levels": 194.77, "de00_p95": 53.17, "de00_max": 96.88, "note": "The adjust chain's blur stage is broken (pinned in adjust_defects.rs: a constant image does not survive blur_sigma; transparent past the first tile). Radius 2 -> sigma 2."},
-    "filters/gaussian-r5": {"class": "defect", "max_levels": 233.26, "mean_levels": 80.13, "p99_levels": 164.54, "de00_p95": 39.61, "de00_max": 89.59, "note": "Same broken chain blur as gaussian-r2 (radius 5 -> sigma 5)."},
-    "filters/unsharp-100-r1.5": {"class": "defect", "max_levels": 126.51, "mean_levels": 41.58, "p99_levels": 100.32, "de00_p95": 22.09, "de00_max": 36.04, "note": "Unsharp rides the same broken chain blur (fixed sigma 1.5 = Photoshop radius 1.5, amount 100 % -> 1.0)."},
+    "filters/gaussian-r2": {"class": "convention", "max_levels": 2.74, "mean_levels": 0.2, "p99_levels": 2.01, "de00_p95": 0.18, "de00_max": 0.86, "note": "Separable Gaussian, sigma = Photoshop radius, the image edge repeated; Photoshop's radius-to-kernel mapping is slightly different at small radii (under 3 levels)."},
+    "filters/gaussian-r5": {"class": "agreement", "max_levels": 1.25, "mean_levels": 0.17, "p99_levels": 0.88, "de00_p95": 0.11, "de00_max": 0.4, "note": "Separable Gaussian, sigma = Photoshop radius, the image edge repeated."},
+    "filters/unsharp-100-r1.5": {"class": "convention", "max_levels": 3.13, "mean_levels": 0.14, "p99_levels": 1.44, "de00_p95": 0.1, "de00_max": 1.3, "note": "a + amount x (a - blur(a)) over the sigma 1.5 Gaussian; the small-radius kernel difference of gaussian-r2, amplified by the amount (about 3 levels)."},
     "filters/motion-30-r10": {"class": "convention", "max_levels": 84.51, "mean_levels": 3.08, "p99_levels": 9.77, "de00_p95": 1.91, "de00_max": 22.28, "note": "conv.motion box-averages along the angle; Photoshop's motion kernel and end weighting differ (mean 3 levels, edges larger)."},
     "filters/emboss": {"class": "convention", "max_levels": 41.95, "mean_levels": 6.07, "p99_levels": 13.6, "de00_p95": 4.63, "de00_max": 9.25, "note": "conv.emboss (angle 135, height 3) is the engine's own relief formula; Photoshop's amount/height scale differs."},
     "filters/find-edges": {"class": "convention", "max_levels": 241.38, "mean_levels": 0.49, "p99_levels": 0.37, "de00_p95": 0.13, "de00_max": 68.3, "note": "Interior agrees (mean 0.5 level); the border row/column differs - Photoshop and the edge-clamped window treat the image edge differently."},

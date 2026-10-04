@@ -70,10 +70,14 @@ use image_gpu::coverage::SelectionCoverage;
 use image_gpu::selection::SelectionMask;
 use image_gpu::stroke::window_is_opaque;
 use image_gpu::{GpuBatch, GpuContext, Resident, TexFormat};
+use image_kernels::families::arithmetic::{MathMulParams, MATH_MUL};
+use image_kernels::families::band::{
+    BandBroadcastAlphaParams, BandSetAlphaParams, BAND_BROADCAST_ALPHA, BAND_SET_ALPHA,
+};
 use image_kernels::families::cast::{
     CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
 };
-use image_kernels::families::compose::ComposeParams;
+use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
 use image_kernels::KernelDef;
 
 use super::{alpha_of, effective_coverage, LayerStack};
@@ -148,6 +152,22 @@ pub(super) enum Step {
     },
     /// Park the accumulator and start an isolated group's own.
     Open { group: u32 },
+    /// Start a CLIPPING GROUP (Photoshop's): park the accumulator, put the
+    /// clip base in alone — normal, full strength, through its own mask —
+    /// and make it opaque, so the clipped layers blend onto the base and
+    /// nothing else.
+    ClipOpen {
+        layer: u32,
+        px: Arc<[u8]>,
+        cov: CovKey,
+    },
+    /// End it: give the group the base's alpha back and blend it onto the
+    /// parked accumulator with the BASE's blend mode and opacity — which
+    /// is why a clip base at 50 % fades its clipped layers too.
+    ClipClose {
+        blend: &'static KernelDef,
+        opacity: f32,
+    },
     /// Blend the group's accumulator into the parked one (`None`: the
     /// group vanished, and the parked accumulator comes back unchanged).
     Close {
@@ -190,6 +210,21 @@ impl Step {
             ) => params == p2 && cov.same(c2),
             (Step::Open { group }, Step::Open { group: g2 }) => group == g2,
             (
+                Step::ClipOpen { layer, px, cov },
+                Step::ClipOpen {
+                    layer: l2,
+                    px: p2,
+                    cov: c2,
+                },
+            ) => layer == l2 && Arc::ptr_eq(px, p2) && cov.same(c2),
+            (
+                Step::ClipClose { blend, opacity },
+                Step::ClipClose {
+                    blend: b2,
+                    opacity: o2,
+                },
+            ) => std::ptr::eq(*blend, *b2) && opacity.to_bits() == o2.to_bits(),
+            (
                 Step::Close { group, blend },
                 Step::Close {
                     group: g2,
@@ -210,7 +245,10 @@ impl Step {
     }
 
     fn is_layer(&self) -> bool {
-        matches!(self, Step::Pixel { .. } | Step::Adjust { .. })
+        matches!(
+            self,
+            Step::Pixel { .. } | Step::Adjust { .. } | Step::ClipOpen { .. }
+        )
     }
 }
 
@@ -224,6 +262,9 @@ pub(super) fn same_steps(a: &[Step], b: &[Step]) -> bool {
 pub(super) struct FoldState {
     acc: Option<Resident>,
     parked: Vec<Option<Resident>>,
+    /// The premultiplied base of each open clipping group (its alpha is
+    /// the group's).
+    clip: Vec<Resident>,
 }
 
 /// Everything the fold keeps on the device between composites.
@@ -338,7 +379,7 @@ impl FoldCache {
         let live: Vec<u32> = steps
             .iter()
             .filter_map(|s| match s {
-                Step::Pixel { layer, .. } => Some(*layer),
+                Step::Pixel { layer, .. } | Step::ClipOpen { layer, .. } => Some(*layer),
                 _ => None,
             })
             .collect();
@@ -357,6 +398,13 @@ impl LayerStack {
         let mut steps = Vec::new();
         let mut open: Vec<u32> = Vec::new();
         let mut clip_base: Option<Arc<[u8]>> = None;
+        // The base's (blend, opacity) while a clipping group is open.
+        let mut clip_group: Option<(&'static KernelDef, f32)> = None;
+        let close_clip = |steps: &mut Vec<Step>, g: &mut Option<(&'static KernelDef, f32)>| {
+            if let Some((blend, opacity)) = g.take() {
+                steps.push(Step::ClipClose { blend, opacity });
+            }
+        };
         let mut checkpoint = None;
         for (index, px) in plates {
             let layer = &self.layers[*index];
@@ -367,10 +415,14 @@ impl LayerStack {
             if want.iter().any(|g| !self.group_enabled(*g)) {
                 continue;
             }
+            if !layer.clipped {
+                close_clip(&mut steps, &mut clip_group);
+            }
             while let Some(gid) = open.last() {
                 if want.contains(gid) {
                     break;
                 }
+                close_clip(&mut steps, &mut clip_group);
                 let gid = open.pop().expect("non-empty");
                 steps.push(self.close_step(gid));
                 clip_base = None;
@@ -385,21 +437,47 @@ impl LayerStack {
                     .find(|g| g.id == gid)
                     .is_some_and(|g| g.isolates());
                 if isolates {
+                    close_clip(&mut steps, &mut clip_group);
                     open.push(gid);
                     steps.push(Step::Open { group: gid });
                     clip_base = None;
                 }
             }
             if layer.clipped {
-                if clip_base.is_none() {
+                let Some(base) = &clip_base else {
                     continue;
+                };
+                // The first clipped layer turns the base's step into the
+                // start of its clipping group.
+                if clip_group.is_none() {
+                    if let Some(Step::Pixel {
+                        layer,
+                        px,
+                        blend,
+                        opacity,
+                        cov,
+                    }) = steps.last()
+                    {
+                        if Arc::ptr_eq(px, base) {
+                            clip_group = Some((*blend, *opacity));
+                            let open_step = Step::ClipOpen {
+                                layer: *layer,
+                                px: Arc::clone(px),
+                                cov: cov.clone(),
+                            };
+                            *steps.last_mut().expect("non-empty") = open_step;
+                        }
+                    }
                 }
             } else if layer.is_pixels() {
                 clip_base = Some(Arc::clone(px));
             }
             let cov = CovKey {
                 own: layer.live_mask().cloned(),
-                clip: if layer.clipped {
+                // Inside a clipping group the base's alpha is applied
+                // once, at its close; outside one (no base step to open
+                // it on) the clip falls back to confining coverage.
+                clip: if layer.clipped && clip_group.is_none() {
                     clip_base.clone()
                 } else {
                     None
@@ -421,6 +499,7 @@ impl LayerStack {
             });
         }
         let checkpoint = checkpoint.unwrap_or(steps.len());
+        close_clip(&mut steps, &mut clip_group);
         while let Some(gid) = open.pop() {
             steps.push(self.close_step(gid));
         }
@@ -467,6 +546,24 @@ impl LayerStack {
                 Step::Open { .. } => {
                     let acc = st.acc.take();
                     st.parked.push(acc);
+                }
+                Step::ClipOpen { layer, px, cov } => {
+                    let plate = cache.plate(batch, *layer, px, w, h)?;
+                    let mask = cache.mask(batch, *layer, cov, w, h);
+                    let acc = st.acc.take();
+                    st.parked.push(acc);
+                    let (base, opaque) = clip_base(ctx, batch, &plate, mask.as_ref(), w, h)?;
+                    st.clip.push(base);
+                    st.acc = Some(opaque);
+                }
+                Step::ClipClose { blend, opacity } => {
+                    let base = st.clip.pop().expect("a clip group is open");
+                    let inner = st.acc.take().unwrap_or_else(|| ctx.zeros(w, h));
+                    let outer = st.parked.pop().flatten();
+                    let outer = outer.unwrap_or_else(|| ctx.zeros(w, h));
+                    st.acc = Some(clip_close(
+                        batch, &base, &inner, &outer, blend, *opacity, w, h,
+                    )?);
                 }
                 Step::Close { blend, .. } => {
                     let inner = st.acc.take();
@@ -611,6 +708,97 @@ impl LayerStack {
     }
 }
 
+/// A clipping group's start: the base alone (premultiplied, through its
+/// own mask) and the same colour made opaque for the clipped layers to
+/// blend onto. Shared with the reference fold, op for op.
+pub(super) fn clip_base(
+    ctx: &GpuContext,
+    batch: &mut GpuBatch<'_>,
+    plate: &Resident,
+    mask: Option<&Resident>,
+    w: u32,
+    h: u32,
+) -> Result<(Resident, Resident), IngestError> {
+    let zeros = ctx.zeros(w, h);
+    let base = batch.target(w, h);
+    batch
+        .dispatch(
+            &COMPOSE_NORMAL,
+            &[&zeros, plate],
+            ComposeParams::new(1.0).as_bytes(),
+            mask,
+            &base,
+        )
+        .map_err(gpu_err)?;
+    let straight = batch.target(w, h);
+    batch
+        .dispatch(
+            &CAST_UNPREMULTIPLY,
+            &[&base],
+            CastUnpremultiplyParams::new().as_bytes(),
+            None,
+            &straight,
+        )
+        .map_err(gpu_err)?;
+    let opaque = batch.target(w, h);
+    batch
+        .dispatch(
+            &BAND_SET_ALPHA,
+            &[&straight],
+            BandSetAlphaParams::new(1.0).as_bytes(),
+            None,
+            &opaque,
+        )
+        .map_err(gpu_err)?;
+    Ok((base, opaque))
+}
+
+/// A clipping group's end: the group (opaque) times the base's alpha,
+/// blended onto `outer` with the base's blend mode and opacity.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn clip_close(
+    batch: &mut GpuBatch<'_>,
+    base: &Resident,
+    inner: &Resident,
+    outer: &Resident,
+    blend: &'static KernelDef,
+    opacity: f32,
+    w: u32,
+    h: u32,
+) -> Result<Resident, IngestError> {
+    let alpha = batch.target(w, h);
+    batch
+        .dispatch(
+            &BAND_BROADCAST_ALPHA,
+            &[base],
+            BandBroadcastAlphaParams::new().as_bytes(),
+            None,
+            &alpha,
+        )
+        .map_err(gpu_err)?;
+    let group = batch.target(w, h);
+    batch
+        .dispatch(
+            &MATH_MUL,
+            &[inner, &alpha],
+            MathMulParams::new().as_bytes(),
+            None,
+            &group,
+        )
+        .map_err(gpu_err)?;
+    let out = batch.target(w, h);
+    batch
+        .dispatch(
+            blend,
+            &[outer, &group],
+            ComposeParams::new(opacity).as_bytes(),
+            None,
+            &out,
+        )
+        .map_err(gpu_err)?;
+    Ok(out)
+}
+
 /// The (old, new) pixels of the one plate a brush sample changed.
 type PlatePair = (Arc<[u8]>, Arc<[u8]>);
 
@@ -701,6 +889,14 @@ impl LayerStack {
         let Some((last_steps, _)) = &cache.last else {
             return Ok(None);
         };
+        // A clipping group refolds whole (its base's alpha and its close
+        // are not windowed here).
+        if steps
+            .iter()
+            .any(|s| matches!(s, Step::ClipOpen { .. } | Step::ClipClose { .. }))
+        {
+            return Ok(None);
+        }
         let Some((prefix, state)) = &cache.checkpoint else {
             return Ok(None);
         };
@@ -887,7 +1083,9 @@ impl LayerStack {
                         .map_err(gpu_err)?;
                     acc = Some(out);
                 }
-                Step::Adjust { .. } => unreachable!("excluded above"),
+                Step::Adjust { .. } | Step::ClipOpen { .. } | Step::ClipClose { .. } => {
+                    unreachable!("excluded above")
+                }
             }
         }
         let a = acc.unwrap_or_else(|| ctx.zeros(rw, rh));

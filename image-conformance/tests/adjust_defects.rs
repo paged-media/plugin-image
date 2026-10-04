@@ -45,7 +45,10 @@
 //! fault is in how the chain windows them. Unsharp (`sharpen_amount`)
 //! rides the same blur and inherits it.
 //!
-//! `#[ignore]`d so CI stays green; each fails until the chain is fixed.
+//! Fixed: the scheduler gave a windowed kernel its bare tile, while the
+//! kernel reads a window `radius` wider on each side. It now gathers the
+//! window across tiles and repeats the image edge outside the image
+//! (`image-pipeline/src/schedule.rs`, `windows`); these tests keep it so.
 
 use image_js::ingest::{adjust_rgba8, AdjustParams, DecodedImage};
 
@@ -75,8 +78,7 @@ fn run(w: u32, h: u32, p: AdjustParams) -> Option<(u8, u32, u32)> {
 
 #[test]
 #[allow(non_snake_case)]
-#[ignore = "DEFECT: the adjust chain's Gaussian blur changes a constant image (alpha and colour), transparent past the first tile"]
-fn defect_blur_of_a_constant_image_is_the_constant__feat__image_editor_filters() {
+fn blur_of_a_constant_image_is_the_constant__feat__image_editor_filters() {
     for (w, h) in [(64, 64), (300, 40)] {
         for sigma in [0.5f32, 2.0] {
             let Some((d, x, y)) = run(
@@ -100,8 +102,7 @@ fn defect_blur_of_a_constant_image_is_the_constant__feat__image_editor_filters()
 
 #[test]
 #[allow(non_snake_case)]
-#[ignore = "DEFECT: unsharp mask inherits the broken chain blur and changes a constant image"]
-fn defect_unsharp_of_a_constant_image_is_the_constant__feat__image_editor_filters() {
+fn unsharp_of_a_constant_image_is_the_constant__feat__image_editor_filters() {
     let Some((d, x, y)) = run(
         64,
         64,

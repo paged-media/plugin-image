@@ -59,7 +59,11 @@ use image_core::{
     TileMap, TileSliceMut, TILE,
 };
 use image_gpu::chain::{ChainStage, ChainTile};
-use image_gpu::{execute_tile_once, execute_tile_once_async, GpuContext, TileInput};
+use image_gpu::{
+    execute_tile_once, execute_tile_once_async, GpuBatch, GpuContext, ReadTicket, TexFormat,
+    TileInput,
+};
+use image_kernels::KernelClass;
 
 use crate::cache::{OpKey, OperationCache};
 use crate::node::{ApplyInputs, ApplyNode, OpNode};
@@ -114,7 +118,7 @@ pub(crate) fn materialize_node(
     let (input_hash, materialized_input) = match node {
         OpNode::Source(_) => (source_identity_hash(node, roi), None),
         OpNode::Apply(apply) => {
-            let in_roi = required_input_roi(apply.def.class, roi);
+            let in_roi = input_roi(nodes, apply, roi)?;
             let (a_id, b_id) = apply.inputs.as_pair();
             let (a_map, a_hash) = materialize_node(nodes, cache, a_id, in_roi, ctx, selection)?;
             match b_id {
@@ -142,7 +146,15 @@ pub(crate) fn materialize_node(
         OpNode::Source(_) => materialize_source(node, roi)?,
         OpNode::Apply(apply) => {
             let (a_map, b_map) = materialized_input.unwrap();
-            if cache.unbatched {
+            if let KernelClass::Windowed { radius } = apply.def.class {
+                check_arity(apply, b_map.is_some())?;
+                let in_roi = input_roi(nodes, apply, roi)?;
+                let bounds = source_bounds(nodes, apply)?;
+                let wins = windows(&a_map, in_roi, bounds, roi, radius);
+                let mut batch = GpuBatch::new(ctx);
+                let tickets = record_windows(&mut batch, apply, &wins, radius, selection)?;
+                collect_windows(tickets, batch.finish()?)
+            } else if cache.unbatched {
                 materialize_apply(apply, a_map, b_map, roi, ctx, selection)?
             } else {
                 let stages = [ChainStage {
@@ -199,7 +211,7 @@ pub(crate) fn materialize_node_async<'a>(
         let (input_hash, materialized_input) = match node {
             OpNode::Source(_) => (source_identity_hash(node, roi), None),
             OpNode::Apply(apply) => {
-                let in_roi = required_input_roi(apply.def.class, roi);
+                let in_roi = input_roi(nodes, apply, roi)?;
                 let (a_id, b_id) = apply.inputs.as_pair();
                 let (a_map, a_hash) =
                     materialize_node_async(nodes, cache, a_id, in_roi, ctx, selection).await?;
@@ -228,7 +240,15 @@ pub(crate) fn materialize_node_async<'a>(
             OpNode::Source(_) => materialize_source(node, roi)?,
             OpNode::Apply(apply) => {
                 let (a_map, b_map) = materialized_input.unwrap();
-                if cache.unbatched {
+                if let KernelClass::Windowed { radius } = apply.def.class {
+                    check_arity(apply, b_map.is_some())?;
+                    let in_roi = input_roi(nodes, apply, roi)?;
+                    let bounds = source_bounds(nodes, apply)?;
+                    let wins = windows(&a_map, in_roi, bounds, roi, radius);
+                    let mut batch = GpuBatch::new(ctx);
+                    let tickets = record_windows(&mut batch, apply, &wins, radius, selection)?;
+                    collect_windows(tickets, batch.finish_async().await?)
+                } else if cache.unbatched {
                     materialize_apply_async(apply, a_map, b_map, roi, ctx, selection).await?
                 } else {
                     let stages = [ChainStage {
@@ -688,6 +708,146 @@ fn content_hash_of(map: &TileMap) -> ContentHash {
 /// The pixel rectangle a level-0 tile covers (256² at its grid origin).
 fn tile_pixel_region(coord: TileCoord) -> Region {
     Region::new(coord.x * TILE as i32, coord.y * TILE as i32, TILE, TILE)
+}
+
+/// The input ROI an apply node pulls from upstream. A windowed kernel
+/// needs its radius around `roi`, but never past the image: outside it
+/// the window repeats the edge pixel (see [`windows`]), so upstream
+/// tiles beyond the image would be computed for nothing.
+fn input_roi(nodes: &[OpNode], apply: &ApplyNode, roi: Region) -> Result<Region, PipelineError> {
+    let wanted = required_input_roi(apply.def.class, roi);
+    if !matches!(apply.def.class, KernelClass::Windowed { .. }) {
+        return Ok(wanted);
+    }
+    let bounds = source_bounds(nodes, apply)?;
+    Ok(wanted.intersect(bounds).unwrap_or(Region::new(0, 0, 0, 0)))
+}
+
+/// The extent of the image an apply node works on: its first input's
+/// source, after decode shrink. Point and windowed kernels keep the
+/// extent, so the walk follows input `a` down to the leaf.
+fn source_bounds(nodes: &[OpNode], apply: &ApplyNode) -> Result<Region, PipelineError> {
+    let mut id = apply.inputs.as_pair().0;
+    loop {
+        match nodes.get(id.0) {
+            Some(OpNode::Apply(a)) => id = a.inputs.as_pair().0,
+            Some(OpNode::Source(src)) => {
+                let shrink = src.decode_shrink.max(1);
+                let info = src
+                    .source
+                    .lock()
+                    .map_err(|_| PipelineError::Graph("source mutex poisoned".into()))?
+                    .probe()?;
+                return Ok(Region::new(
+                    0,
+                    0,
+                    info.width.div_ceil(shrink),
+                    info.height.div_ceil(shrink),
+                ));
+            }
+            None => return Err(PipelineError::Graph(format!("dangling node {id:?}"))),
+        }
+    }
+}
+
+/// The input window of every output tile of a windowed kernel over
+/// `roi`: the tile's work extent grown by `radius` on each side, read
+/// from `input` (materialized over `in_roi`). Pixels outside the image
+/// `bounds` repeat the nearest edge pixel — a blur of a constant image is
+/// that constant up to the border, as in Photoshop; reading them as
+/// transparent would fade every edge.
+fn windows(
+    input: &TileMap,
+    in_roi: Region,
+    bounds: Region,
+    roi: Region,
+    radius: (u16, u16),
+) -> Vec<(TileCoord, Region, Vec<u8>)> {
+    let (rx, ry) = (i32::from(radius.0), i32::from(radius.1));
+    // One pixel of `input` at image coordinates, or transparent where
+    // nothing was materialized (an empty image).
+    let mut last: Option<(TileCoord, Region, &[u8])> = None;
+    let mut pixel = |x: i32, y: i32| -> [u8; WORKING_BPP] {
+        let x = x.clamp(bounds.x, bounds.x + bounds.w as i32 - 1);
+        let y = y.clamp(bounds.y, bounds.y + bounds.h as i32 - 1);
+        let coord = TileCoord {
+            level: 0,
+            x: x.div_euclid(TILE as i32),
+            y: y.div_euclid(TILE as i32),
+        };
+        if last.as_ref().is_none_or(|(c, _, _)| *c != coord) {
+            last = tile_work_region(coord, in_roi).and_then(|r| {
+                let tile = input.get(coord)?;
+                Some((coord, r, heap_bytes(tile).ok()?))
+            });
+        }
+        let Some((_, r, bytes)) = last else {
+            return [0; WORKING_BPP];
+        };
+        let o = (((y - r.y) * r.w as i32 + (x - r.x)) as usize) * WORKING_BPP;
+        bytes
+            .get(o..o + WORKING_BPP)
+            .and_then(|p| p.try_into().ok())
+            .unwrap_or([0; WORKING_BPP])
+    };
+    let mut out = Vec::new();
+    if bounds.w == 0 || bounds.h == 0 {
+        return out;
+    }
+    for coord in roi.tiles_at(0) {
+        let Some(work) = tile_work_region(coord, roi) else {
+            continue;
+        };
+        let (ww, wh) = (work.w as i32 + 2 * rx, work.h as i32 + 2 * ry);
+        let mut win = Vec::with_capacity((ww * wh) as usize * WORKING_BPP);
+        for j in 0..wh {
+            for i in 0..ww {
+                win.extend_from_slice(&pixel(work.x - rx + i, work.y - ry + j));
+            }
+        }
+        out.push((coord, work, win));
+    }
+    out
+}
+
+/// Record one windowed dispatch per tile into `batch` — the node is one
+/// submit and one readback, like a resident point chain.
+fn record_windows(
+    batch: &mut GpuBatch<'_>,
+    apply: &ApplyNode,
+    wins: &[(TileCoord, Region, Vec<u8>)],
+    radius: (u16, u16),
+    selection: Option<&PipelineSelection>,
+) -> Result<Vec<(TileCoord, ReadTicket)>, PipelineError> {
+    let mut tickets = Vec::with_capacity(wins.len());
+    for (coord, work, win) in wins {
+        let input = batch.upload(
+            work.w + 2 * u32::from(radius.0),
+            work.h + 2 * u32::from(radius.1),
+            TexFormat::Rgba16Float,
+            win,
+        );
+        let mask = selection.map(|s| {
+            batch.upload(
+                work.w,
+                work.h,
+                TexFormat::R16Float,
+                &s.coverage.mask_window_f16(*work),
+            )
+        });
+        let out = batch.target(work.w, work.h);
+        batch.dispatch(apply.def, &[&input], &apply.params, mask.as_ref(), &out)?;
+        tickets.push((*coord, batch.read(&out)));
+    }
+    Ok(tickets)
+}
+
+fn collect_windows(tickets: Vec<(TileCoord, ReadTicket)>, mut reads: Vec<Vec<u8>>) -> TileMap {
+    let mut out = TileMap::new(PixelFormat::GPU_WORKING);
+    for (coord, t) in tickets {
+        out.insert(coord, heap_tile(std::mem::take(&mut reads[t.0])));
+    }
+    out
 }
 
 /// A tile's WORK extent: the part of the tile inside the requested ROI.

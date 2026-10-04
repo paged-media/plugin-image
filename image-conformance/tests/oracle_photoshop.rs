@@ -42,8 +42,9 @@
 //!   which, e.g. a textbook formula where Photoshop uses its own);
 //! * `defect` — we claim Photoshop's behaviour (the PSD layer import maps
 //!   Photoshop's blend keys onto these kernels) and do not deliver it.
-//!   Each defect is pinned by `defects_reach_agreement`, ignored so CI
-//!   stays green, failing until fixed;
+//!   `defects_reach_agreement` fails while any case is classed so (none
+//!   is, since every recorded defect was fixed); a new one is recorded
+//!   as a red test, not hidden;
 //! * `no-counterpart` — Photoshop recorded, nothing in the engine to
 //!   compare (kept so the gap is visible, not forgotten).
 //!
@@ -592,7 +593,6 @@ fn every_photoshop_case_holds_its_ledger_row__feat__image_conformance_harness() 
 
 #[test]
 #[allow(non_snake_case)]
-#[ignore = "DEFECT pins: every case the ledger classes `defect` must reach agreement (fails until fixed)"]
 fn defects_reach_agreement__feat__image_conformance_harness() {
     let led = ledger();
     let bad: Vec<String> = measure_all()
