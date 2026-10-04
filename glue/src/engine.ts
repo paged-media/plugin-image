@@ -767,9 +767,37 @@ export interface BrushLibraryInfo {
   presets: readonly BrushPresetInfo[];
 }
 
+/** Engine + GPU work counts since the last reset (`perf_counters`). What
+ *  the performance budgets count — never wall-clock time. */
+export interface PerfCounters {
+  engine: {
+    wholeImageCopies: number;
+    bytesCopied: number;
+    depthNarrowings: number;
+    narrowedBytes: number;
+    composites: number;
+    layersFolded: number;
+    tilesCut: number;
+  };
+  gpu: {
+    shaderModules: number;
+    pipelinesBuilt: number;
+    dispatches: number;
+    dispatchedTexels: number;
+    submits: number;
+    texturesCreated: number;
+    bytesUploaded: number;
+    readbacks: number;
+    bytesReadBack: number;
+  };
+}
+
 export interface ImageEngine {
   abiVersion(): number;
   kernelCount(): number;
+  /** Work counters since the last `perfCountersReset` (budgets only). */
+  perfCounters(): PerfCounters;
+  perfCountersReset(): void;
   /** Request the WebGPU device in the bundle realm. Resolves false when
    *  the environment has no WebGPU — the honest no-GPU state (kernels
    *  are GPU-only; identity adjusts still work, nothing else). */
@@ -1323,6 +1351,8 @@ export interface ImageWasmModule {
   /** The source hash this wasm was built from (scripts/source-hash.mjs);
    *  "unstamped" outside scripts/build-wasm.sh. Read by wasm-fresh.spec.ts. */
   engine_source_hash(): string;
+  perf_counters(): string;
+  perf_counters_reset(): void;
   init_gpu(): Promise<void>;
   gpu_ready(): boolean;
   decode_image(bytes: Uint8Array): DecodedHandleWasm;
@@ -1745,6 +1775,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
   return {
     abiVersion: () => wasm.abi_version(),
     kernelCount: () => wasm.kernel_count(),
+    perfCounters: () => JSON.parse(wasm.perf_counters()) as PerfCounters,
+    perfCountersReset: () => wasm.perf_counters_reset(),
     async initGpu() {
       if (wasm.gpu_ready()) return true;
       try {

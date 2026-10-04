@@ -1015,11 +1015,6 @@ export function encode_image_opt(rgba, width, height, format, quality, reduce) {
 }
 
 /**
- * The hash of the sources this wasm was built from
- * (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
- * "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
- * compares it with the checkout, so a stale committed wasm fails
- * the suite instead of being tested in place of the code.
  * @returns {string}
  */
 export function engine_source_hash() {
@@ -1838,6 +1833,37 @@ export function layers_ungroup(id) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * The hash of the sources this wasm was built from
+ * (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
+ * "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
+ * compares it with the checkout, so a stale committed wasm fails
+ * the suite instead of being tested in place of the code.
+ * Engine + GPU work counters since the last reset, as JSON
+ * (`{engine:{…}, gpu:{…}}`, see `counters::to_json`). What the
+ * bundle's performance budgets count.
+ * @returns {string}
+ */
+export function perf_counters() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.perf_counters();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Zero the engine and GPU work counters.
+ */
+export function perf_counters_reset() {
+    wasm.perf_counters_reset();
 }
 
 /**

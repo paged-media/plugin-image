@@ -443,13 +443,6 @@ export function encode_image(rgba: Uint8Array, width: number, height: number, fo
  */
 export function encode_image_opt(rgba: Uint8Array, width: number, height: number, format: string, quality: number, reduce: boolean): Uint8Array;
 
-/**
- * The hash of the sources this wasm was built from
- * (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
- * "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
- * compares it with the checkout, so a stale committed wasm fails
- * the suite instead of being tested in place of the code.
- */
 export function engine_source_hash(): string;
 
 /**
@@ -829,6 +822,23 @@ export function layers_undo(): Promise<string>;
 export function layers_ungroup(id: number): void;
 
 /**
+ * The hash of the sources this wasm was built from
+ * (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
+ * "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
+ * compares it with the checkout, so a stale committed wasm fails
+ * the suite instead of being tested in place of the code.
+ * Engine + GPU work counters since the last reset, as JSON
+ * (`{engine:{…}, gpu:{…}}`, see `counters::to_json`). What the
+ * bundle's performance budgets count.
+ */
+export function perf_counters(): string;
+
+/**
+ * Zero the engine and GPU work counters.
+ */
+export function perf_counters_reset(): void;
+
+/**
  * PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
  * retained parse behind `psd_handle` (the merged composite is always
  * rewritten; the layer structure is handled per the returned shape)
@@ -1166,6 +1176,8 @@ export interface InitOutput {
     readonly layers_set_visible: (a: number, b: number) => [number, number];
     readonly layers_undo: () => any;
     readonly layers_ungroup: (a: number) => [number, number];
+    readonly perf_counters: () => [number, number];
+    readonly perf_counters_reset: () => void;
     readonly psd_apply_adjusted: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly psd_close: (a: number) => void;
     readonly psd_layer_list: (a: number) => [number, number, number, number];
