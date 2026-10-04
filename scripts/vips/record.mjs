@@ -436,10 +436,6 @@ function measured() {
 }
 
 export const DIVERGES = {
-  "resample.mitchell":
-    "libvips reduce widens the filter support by the shrink factor (an antialiased, prefiltered reduction); the engine's resamplers evaluate the kernel at SOURCE scale with no widening, so a 2x reduction differs by up to 0.31 (measured on the unit stimulus) - and aliases where libvips does not. Upscaling is no common ground either: libvips upsizes through an interpolator, not this kernel.",
-  "resample.lanczos3":
-    "as resample.mitchell: libvips reduce widens lanczos3 by the shrink factor, the engine does not; up to 0.48 apart on a 2x reduction (measured).",
 };
 
 function writeYaml() {

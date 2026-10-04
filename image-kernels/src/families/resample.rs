@@ -47,10 +47,17 @@
 //!
 //! (`inv_scale = 1/scale`: >1 downscales, <1 upscales; identity is
 //! `inv_scale = 1`, `off = 0` ⇒ `sx = x` ⇒ near-passthrough.) The 2-D
-//! filter is the separable product `w(sx - i) * w(sy - j)`. Taps span the
-//! integer window `[floor(s) - support + 1, floor(s) + support]` (the
-//! kernel's half-extent), **clamped to `[0, dim - 1]`** — that clamp IS
-//! the edge rule (clamp-to-edge / sample replication). Weights are
+//! filter is the separable product `w((sx - i)/fx) * w((sy - j)/fy)`.
+//! `f = clamp(inv_scale, 1, 16)` is the FILTER SCALE: 1 when enlarging,
+//! the shrink factor when reducing, so a reduction averages every source
+//! texel it passes over instead of point-sampling the kernel at source
+//! scale (which aliases — a 2× reduction of a one-pixel checkerboard
+//! came out as the checkerboard's phase, not grey). Capped at 16 to bound
+//! the taps; past a 16× reduction the remainder aliases. Taps span the
+//! integer window `[floor(s - support·f) + 1, floor(s + support·f)]`
+//! (at f = 1 the old `[floor(s) - support + 1, floor(s) + support]`,
+//! tap for tap), **clamped to `[0, dim - 1]`** — that clamp IS the edge
+//! rule (clamp-to-edge / sample replication). Weights are
 //! normalised by their accumulated sum (mandatory at edges where the
 //! support window is truncated, and for mitchell/lanczos whose taps do
 //! not analytically sum to 1 at arbitrary phase).
@@ -253,19 +260,23 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     let sx = (f32(xy.x) + 0.5) * params.inv_scale_x - 0.5 + params.src_off_x;
     let sy = (f32(xy.y) + 0.5) * params.inv_scale_y - 0.5 + params.src_off_y;
-    // Support 2.0: taps span [floor(s)-1 .. floor(s)+2].
-    let bx = i32(floor(sx)) - 1;
-    let by = i32(floor(sy)) - 1;
+    // Support 2.0, stretched by the filter scale when shrinking: taps
+    // span [floor(s - 2f) + 1 .. floor(s + 2f)] (f = 1: [floor(s)-1 ..
+    // floor(s)+2]).
+    let fx = min(max(params.inv_scale_x, 1.0), 16.0);
+    let fy = min(max(params.inv_scale_y, 1.0), 16.0);
+    let x0 = i32(floor(sx - 2.0 * fx)) + 1;
+    let x1 = i32(floor(sx + 2.0 * fx));
+    let y0 = i32(floor(sy - 2.0 * fy)) + 1;
+    let y1 = i32(floor(sy + 2.0 * fy));
 
     var sum = vec4<f32>(0.0);
     var wsum = 0.0;
-    for (var dj = 0; dj < 4; dj = dj + 1) {
-        let j = by + dj;
-        let wy = mitchell(sy - f32(j));
+    for (var j = y0; j <= y1; j = j + 1) {
+        let wy = mitchell((sy - f32(j)) / fy);
         let cj = clamp(j, 0, wdims.y - 1);
-        for (var di = 0; di < 4; di = di + 1) {
-            let i = bx + di;
-            let wx = mitchell(sx - f32(i));
+        for (var i = x0; i <= x1; i = i + 1) {
+            let wx = mitchell((sx - f32(i)) / fx);
             let ci = clamp(i, 0, wdims.x - 1);
             let w = wx * wy;
             sum = sum + textureLoad(in0, vec2<i32>(ci, cj), 0) * w;
@@ -320,19 +331,22 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     let sx = (f32(xy.x) + 0.5) * params.inv_scale_x - 0.5 + params.src_off_x;
     let sy = (f32(xy.y) + 0.5) * params.inv_scale_y - 0.5 + params.src_off_y;
-    // Support 3.0: taps span [floor(s)-2 .. floor(s)+3].
-    let bx = i32(floor(sx)) - 2;
-    let by = i32(floor(sy)) - 2;
+    // Support 3.0, stretched by the filter scale when shrinking (see
+    // mitchell): taps span [floor(s - 3f) + 1 .. floor(s + 3f)].
+    let fx = min(max(params.inv_scale_x, 1.0), 16.0);
+    let fy = min(max(params.inv_scale_y, 1.0), 16.0);
+    let x0 = i32(floor(sx - 3.0 * fx)) + 1;
+    let x1 = i32(floor(sx + 3.0 * fx));
+    let y0 = i32(floor(sy - 3.0 * fy)) + 1;
+    let y1 = i32(floor(sy + 3.0 * fy));
 
     var sum = vec4<f32>(0.0);
     var wsum = 0.0;
-    for (var dj = 0; dj < 6; dj = dj + 1) {
-        let j = by + dj;
-        let wy = lanczos3(sy - f32(j));
+    for (var j = y0; j <= y1; j = j + 1) {
+        let wy = lanczos3((sy - f32(j)) / fy);
         let cj = clamp(j, 0, wdims.y - 1);
-        for (var di = 0; di < 6; di = di + 1) {
-            let i = bx + di;
-            let wx = lanczos3(sx - f32(i));
+        for (var i = x0; i <= x1; i = i + 1) {
+            let wx = lanczos3((sx - f32(i)) / fx);
             let ci = clamp(i, 0, wdims.x - 1);
             let w = wx * wy;
             sum = sum + textureLoad(in0, vec2<i32>(ci, cj), 0) * w;

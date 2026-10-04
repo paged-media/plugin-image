@@ -153,18 +153,25 @@ fn separable_ref(
 ) -> Px {
     let sx = src_coord(ox, p.inv_scale_x, p.src_off_x);
     let sy = src_coord(oy, p.inv_scale_y, p.src_off_y);
-    let bx = (sx.floor() as i32) - (ext - 1);
-    let by = (sy.floor() as i32) - (ext - 1);
-    let taps = 2 * ext;
+    // The filter scale: 1 enlarging, the shrink factor reducing (≤ 16).
+    let fx = p.inv_scale_x.clamp(1.0, 16.0);
+    let fy = p.inv_scale_y.clamp(1.0, 16.0);
+    let e = ext as f32;
+    let (x0, x1) = (
+        (sx - e * fx).floor() as i32 + 1,
+        (sx + e * fx).floor() as i32,
+    );
+    let (y0, y1) = (
+        (sy - e * fy).floor() as i32 + 1,
+        (sy + e * fy).floor() as i32,
+    );
 
     let mut sum = Px([0.0; 4]);
     let mut wsum = 0.0_f32;
-    for dj in 0..taps {
-        let j = by + dj;
-        let wy = weight(sy - j as f32);
-        for di in 0..taps {
-            let i = bx + di;
-            let wx = weight(sx - i as f32);
+    for j in y0..=y1 {
+        let wy = weight((sy - j as f32) / fy);
+        for i in x0..=x1 {
+            let wx = weight((sx - i as f32) / fx);
             let wgt = wx * wy;
             sum = sum + Px(fetch(win, w, h, i, j).0.map(|ch| ch * wgt));
             wsum += wgt;
@@ -201,9 +208,11 @@ fn window(def: &KernelDef, out_w: u32, out_h: u32, inv_x: f32, inv_y: f32) -> Re
 }
 
 fn run(def: &'static KernelDef, ref_fn: fn(&[Px], u32, u32, u32, u32, &ResampleParams) -> Px) {
-    // Four mappings: 2x downscale, 1.5x downscale, 2x upscale, identity.
+    // Five mappings: 4x and 2x downscale (the filter widened 4x / 2x),
+    // 1.5x downscale, 2x upscale, identity.
     let cases = [
-        (32u32, 24u32, 2.0f32, 2.0f32),
+        (16u32, 12u32, 4.0f32, 4.0f32),
+        (32, 24, 2.0, 2.0),
         (40, 30, 1.5, 1.5),
         (48, 36, 0.5, 0.5),
         (32, 32, 1.0, 1.0),
@@ -234,4 +243,37 @@ fn resample_mitchell_parity() {
 #[test]
 fn resample_lanczos3_parity() {
     run(&RESAMPLE_LANCZOS3, lanczos3_ref);
+}
+
+/// A REDUCTION AVERAGES what it passes over. A one-pixel checkerboard
+/// reduced 2× is grey (its mean) under a filter widened by the shrink
+/// factor; evaluated at source scale, it came out as whichever phase the
+/// output texels landed on (the libvips oracle recorded the divergence:
+/// up to 0.31 for Mitchell, 0.48 for Lanczos-3). Away from the clamped
+/// border, every output texel is within 2 % of 0.5.
+#[test]
+#[allow(non_snake_case)]
+fn a_two_times_reduction_of_a_checkerboard_is_grey__feat__image_kernel_family_t1() {
+    let (w, h) = (64u32, 64u32);
+    let board: Vec<Px> = (0..w * h)
+        .map(|k| {
+            let v = ((k % w + k / w) % 2) as f32;
+            Px([v, v, v, 1.0])
+        })
+        .collect();
+    let p = ResampleParams::new(2.0, 2.0, 0.0, 0.0);
+    for (name, f) in [
+        (
+            "mitchell",
+            mitchell_ref as fn(&[Px], u32, u32, u32, u32, &ResampleParams) -> Px,
+        ),
+        ("lanczos3", lanczos3_ref),
+    ] {
+        for oy in 4..28 {
+            for ox in 4..28 {
+                let v = f(&board, w, h, ox, oy, &p).0[0];
+                assert!((v - 0.5).abs() < 0.02, "{name} ({ox},{oy}): {v}");
+            }
+        }
+    }
 }

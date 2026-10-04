@@ -206,10 +206,16 @@
   gpu_tolerance_measured: 0
 
 - id: resample.mitchell
-  diverges: "libvips reduce widens the filter support by the shrink factor (an antialiased, prefiltered reduction); the engine's resamplers evaluate the kernel at SOURCE scale with no widening, so a 2x reduction differs by up to 0.31 (measured on the unit stimulus) - and aliases where libvips does not. Upscaling is no common ground either: libvips upsizes through an interpolator, not this kernel."
+  fixture: image-conformance/fixtures/vips/resample.mitchell.v
+  vips: "vips reduce A O 2 2 --kernel mitchell"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 49e-5
 
 - id: resample.lanczos3
-  diverges: "as resample.mitchell: libvips reduce widens lanczos3 by the shrink factor, the engine does not; up to 0.48 apart on a 2x reduction (measured)."
+  fixture: image-conformance/fixtures/vips/resample.lanczos3.v
+  vips: "vips reduce A O 2 2 --kernel lanczos3"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 49e-5
 
 - id: geom.flip_h
   fixture: image-conformance/fixtures/vips/geom.flip_h.v
