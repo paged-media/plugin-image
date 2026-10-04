@@ -53,70 +53,19 @@
 //! PAGED_PSD_CORPUS=1 cargo test -p image-conformance --test real_psd_corpus -- --ignored --nocapture
 //! ```
 
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-
+use image_conformance::psd_corpus::{corpus_root, psds_by_magic, CorpusFile};
 use image_psd::{model::ColorMode, PsdFile};
+use std::collections::BTreeSet;
 
-/// Every extracted `assets/psd/*` file, or `None` with a printed reason.
-fn corpus_psds() -> Option<Vec<PathBuf>> {
-    let Some(switch) = std::env::var_os("PAGED_PSD_CORPUS") else {
-        eprintln!(
-            "SKIP psd corpus lane: PAGED_PSD_CORPUS unset \
-             (set it to 1, or to a corpus root, and run with --ignored)"
-        );
-        return None;
-    };
-    let switch = switch.to_string_lossy().into_owned();
-    let root = if switch == "1" || switch.is_empty() {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../corpus")
-    } else {
-        PathBuf::from(switch)
-    };
-    // Every group's packs, not just idml's. Since 2026-08-20 packs are
-    // filed by PRIMARY format, so the 16 Photoshop packs live at
-    // `psd/packs/<pack>/primary.psd` — nine of them 105-285 MB mockups
-    // with layer trees psd_builder cannot synthesise.
-    let mut out = Vec::new();
-    let mut any_group = false;
-    for group in ["psd", "idml", "docx", "vector", "html", "pptx"] {
-        let Ok(entries) = std::fs::read_dir(root.join(group).join("packs")) else {
-            continue;
-        };
-        any_group = true;
-        for pack in entries.flatten() {
-            let dir = pack.path();
-            for cand in ["primary.psd", "primary.psb"] {
-                let p = dir.join(cand);
-                if p.is_file() {
-                    out.push(p);
-                }
-            }
-            let Ok(files) = std::fs::read_dir(dir.join("assets").join("psd")) else {
-                continue;
-            };
-            for f in files.flatten() {
-                let p = f.path();
-                let is_psd = p.extension().is_some_and(|e| {
-                    matches!(e.to_string_lossy().to_lowercase().as_str(), "psd" | "psb")
-                });
-                if p.is_file() && is_psd {
-                    out.push(p);
-                }
-            }
-        }
-    }
-    if !any_group {
-        eprintln!(
-            "SKIP psd corpus lane: no <group>/packs under {}",
-            root.display()
-        );
-        return None;
-    }
-    out.sort();
+/// Every corpus file whose CONTENT is a PSD/PSB (`8BPS` magic), or
+/// `None` with a printed reason. Selected by content, never by
+/// extension, and named by its path relative to the corpus root.
+fn corpus_psds() -> Option<Vec<CorpusFile>> {
+    let root = corpus_root("PAGED_PSD_CORPUS")?;
+    let out = psds_by_magic(&root);
     if out.is_empty() {
         eprintln!(
-            "SKIP psd corpus lane: no PSDs under {} — run corpus/harness/unpack.sh",
+            "SKIP psd corpus lane: no PSD content under {} — run corpus/harness/unpack.sh",
             root.display()
         );
         return None;
@@ -136,12 +85,9 @@ fn every_real_psd_parses_with_a_sane_header() {
     let mut depths: BTreeSet<u16> = BTreeSet::new();
     let mut failures: Vec<String> = Vec::new();
 
-    for path in &files {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let bytes = std::fs::read(path).expect("read corpus psd");
+    for file in &files {
+        let name = &file.rel;
+        let bytes = std::fs::read(&file.path).expect("read corpus psd");
         match PsdFile::parse(&bytes) {
             Ok(psd) => {
                 let h = &psd.header;
@@ -202,11 +148,11 @@ fn the_corpus_covers_cmyk_which_no_synthesised_fixture_does() {
     // regression and must be loud — CMYK is a print format and this is a
     // print engine.
     let mut cmyk = Vec::new();
-    for path in &files {
-        let bytes = std::fs::read(path).expect("read corpus psd");
+    for file in &files {
+        let bytes = std::fs::read(&file.path).expect("read corpus psd");
         if let Ok(psd) = PsdFile::parse(&bytes) {
             if matches!(psd.header.color_mode, ColorMode::Cmyk) {
-                cmyk.push((path.clone(), psd.header.channels, psd.header.depth));
+                cmyk.push((file.rel.clone(), psd.header.channels, psd.header.depth));
             }
         }
     }
@@ -216,11 +162,8 @@ fn the_corpus_covers_cmyk_which_no_synthesised_fixture_does() {
          project has just disappeared (psd_builder cannot synthesise one, and \
          codec_jpeg.rs documents the same gap for JPEG)"
     );
-    for (path, channels, depth) in &cmyk {
-        println!(
-            "  cmyk {} — {channels} channels, {depth}-bit",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        );
+    for (rel, channels, depth) in &cmyk {
+        println!("  cmyk {rel} — {channels} channels, {depth}-bit");
         assert!(
             *channels >= 4,
             "a CMYK PSD needs at least 4 channels, got {channels}"
