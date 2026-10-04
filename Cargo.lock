@@ -655,6 +655,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "half",
+ "image-cms",
  "image-codecs",
  "image-core",
  "image-gpu",

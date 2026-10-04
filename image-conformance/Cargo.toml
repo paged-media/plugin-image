@@ -32,6 +32,8 @@ proptest = { workspace = true }
 # owns it. Dev-only: image-js never depends back on this crate, and the
 # wasm32 cargo-tree guard is about image-js's own tree.
 image-js = { path = "../image-js" }
+# Colour-conversion properties (prop_colour.rs) round-trip both CMS backends.
+image-cms = { path = "../image-cms" }
 criterion = { workspace = true }
 # D-4 bench (png_d4): zune-png is the chosen adapter; image/png is the
 # loser kept here ONLY as the bench comparison baseline (dev-dep, never
