@@ -1,0 +1,29 @@
+{
+  "id": "morph.dilate",
+  "oracle": "libvips",
+  "vips_version": "vips-8.18.6",
+  "recorded_at": "2026-10-04T10:37:41.049Z",
+  "runner": "scripts/vips/record.mjs",
+  "stimulus": {
+    "size": [
+      64,
+      64
+    ],
+    "bands": 4,
+    "formula": "h = (7x + 13y + 29c + 31*seed + 17*((x*y) mod 11)) mod 257; inputs use seed 1, 2",
+    "kinds": [
+      "unit"
+    ]
+  },
+  "params": {},
+  "out": [
+    62,
+    62
+  ],
+  "region": null,
+  "commands": [
+    "vips rank -- A.v T1.v 3 3 8",
+    "vips extract_area -- T1.v O.v 1 1 62 62"
+  ],
+  "note": null
+}

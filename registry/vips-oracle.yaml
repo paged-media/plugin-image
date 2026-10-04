@@ -1,0 +1,314 @@
+# libvips oracle table — one row per registry/kernels.yaml kernel whose
+# `oracle` is `vips` or `both`. Each row is a vips command chain
+# (recorded by scripts/vips/record.mjs into image-conformance/fixtures/vips/)
+# or `diverges: <reason>` where libvips implements a different formula.
+# Replayed by image-conformance/tests/oracle_vips.rs; the tolerances are
+# MEASURED there (max |ours - vips| over the compared region, rounded up)
+# and written back with PAGED_VIPS_TOLERANCE=write. GENERATED — edit
+# scripts/vips/record.mjs, not this file.
+
+- id: math.linear
+  fixture: image-conformance/fixtures/vips/math.linear.v
+  vips: "vips linear A O 1.5 -0.125"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.invert
+  fixture: image-conformance/fixtures/vips/math.invert.v
+  vips: "vips linear A O -1 1"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.add
+  fixture: image-conformance/fixtures/vips/math.add.v
+  vips: "vips add A B O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.sub
+  fixture: image-conformance/fixtures/vips/math.sub.v
+  vips: "vips subtract A B O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.mul
+  fixture: image-conformance/fixtures/vips/math.mul.v
+  vips: "vips multiply A B O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 46e-5
+
+- id: math.div
+  fixture: image-conformance/fixtures/vips/math.div.v
+  vips: "vips divide A B O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 19e-4
+
+- id: math.add_const
+  fixture: image-conformance/fixtures/vips/math.add_const.v
+  vips: "vips linear A O 1 0.375"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.mul_const
+  fixture: image-conformance/fixtures/vips/math.mul_const.v
+  vips: "vips linear A O 1.75 0"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.abs
+  fixture: image-conformance/fixtures/vips/math.abs.v
+  vips: "vips abs A O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.sign
+  fixture: image-conformance/fixtures/vips/math.sign.v
+  vips: "vips sign A O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.neg
+  fixture: image-conformance/fixtures/vips/math.neg.v
+  vips: "vips linear A O -1 0"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: rel.eq
+  fixture: image-conformance/fixtures/vips/rel.eq.v
+  vips: "vips relational A B T1 equal"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: rel.ne
+  fixture: image-conformance/fixtures/vips/rel.ne.v
+  vips: "vips relational A B T1 noteq"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: rel.lt
+  fixture: image-conformance/fixtures/vips/rel.lt.v
+  vips: "vips relational A B T1 less"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: rel.le
+  fixture: image-conformance/fixtures/vips/rel.le.v
+  vips: "vips relational A B T1 lesseq"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: rel.gt
+  fixture: image-conformance/fixtures/vips/rel.gt.v
+  vips: "vips relational A B T1 more"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: rel.ge
+  fixture: image-conformance/fixtures/vips/rel.ge.v
+  vips: "vips relational A B T1 moreeq"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: bool.and
+  fixture: image-conformance/fixtures/vips/bool.and.v
+  vips: "vips boolean A B T1 and"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: bool.or
+  fixture: image-conformance/fixtures/vips/bool.or.v
+  vips: "vips boolean A B T1 or"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: bool.xor
+  fixture: image-conformance/fixtures/vips/bool.xor.v
+  vips: "vips boolean A B T1 eor"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: bool.not
+  fixture: image-conformance/fixtures/vips/bool.not.v
+  vips: "vips relational_const A T1 equal 0"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: band.extract
+  fixture: image-conformance/fixtures/vips/band.extract.v
+  vips: "vips extract_band A T1 1 && vips bandjoin T1 T1 T1 T2 && vips bandjoin_const T2 O 1"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: band.set_alpha
+  fixture: image-conformance/fixtures/vips/band.set_alpha.v
+  vips: "vips extract_band A T1 0 --n 3 && vips bandjoin_const T1 O 0.5"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.min
+  fixture: image-conformance/fixtures/vips/math.min.v
+  vips: "vips minpair A B O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.max
+  fixture: image-conformance/fixtures/vips/math.max.v
+  vips: "vips maxpair A B O"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.clamp
+  fixture: image-conformance/fixtures/vips/math.clamp.v
+  vips: "vips clamp A O --min 0.25 --max 0.75"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.min_const
+  fixture: image-conformance/fixtures/vips/math.min_const.v
+  vips: "vips clamp A O --min -1000 --max 0.5"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: math.max_const
+  fixture: image-conformance/fixtures/vips/math.max_const.v
+  vips: "vips clamp A O --min 0.5 --max 1000"
+  oracle_tolerance: 0
+  gpu_tolerance_measured: 0
+
+- id: conv.box
+  fixture: image-conformance/fixtures/vips/conv.box.v
+  vips: "vips conv A T1 box.mat --precision float && vips extract_area T1 O 1 1 62 62"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 44e-5
+
+- id: conv.gaussian_h
+  fixture: image-conformance/fixtures/vips/conv.gaussian_h.v
+  vips: "vips gaussmat G 1.5 0.001 --separable --precision float && vips conv A T1 G --precision float && vips extract_area T1 O 24 0 16 64"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 49e-5
+
+- id: conv.gaussian_v
+  fixture: image-conformance/fixtures/vips/conv.gaussian_v.v
+  vips: "vips gaussmat G 1.5 0.001 --separable --precision float && vips rot G GV d90 && vips conv A T1 GV --precision float && vips extract_area T1 O 0 24 64 16"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 49e-5
+
+- id: conv.unsharp
+  fixture: image-conformance/fixtures/vips/conv.unsharp.v
+  vips: "vips subtract A B T1 && vips linear T1 T2 0.8 0 && vips add A T2 O"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 30e-5
+
+- id: resample.nearest
+  fixture: image-conformance/fixtures/vips/resample.nearest.v
+  vips: "vips resize A O 2 --kernel nearest"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: resample.mitchell
+  diverges: "libvips reduce widens the filter support by the shrink factor (an antialiased, prefiltered reduction); the engine's resamplers evaluate the kernel at SOURCE scale with no widening, so a 2x reduction differs by up to 0.31 (measured on the unit stimulus) - and aliases where libvips does not. Upscaling is no common ground either: libvips upsizes through an interpolator, not this kernel."
+
+- id: resample.lanczos3
+  diverges: "as resample.mitchell: libvips reduce widens lanczos3 by the shrink factor, the engine does not; up to 0.48 apart on a 2x reduction (measured)."
+
+- id: geom.flip_h
+  fixture: image-conformance/fixtures/vips/geom.flip_h.v
+  vips: "vips flip A O horizontal"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: geom.flip_v
+  fixture: image-conformance/fixtures/vips/geom.flip_v.v
+  vips: "vips flip A O vertical"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: geom.rotate90_cw
+  fixture: image-conformance/fixtures/vips/geom.rotate90_cw.v
+  vips: "vips rot A O d90"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: geom.rotate90_ccw
+  fixture: image-conformance/fixtures/vips/geom.rotate90_ccw.v
+  vips: "vips rot A O d270"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: geom.crop
+  fixture: image-conformance/fixtures/vips/geom.crop.v
+  vips: "vips extract_area A O 8 4 40 32"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: geom.rotate_bilinear
+  fixture: image-conformance/fixtures/vips/geom.rotate_bilinear.v
+  vips: "vips affine A O 0.8660254037844387 -0.49999999999999994 0.49999999999999994 0.8660254037844387 --interpolate bilinear --oarea 0 0 64 64 --idx -31.5 --idy -31.5 --odx 31.5 --ody 31.5"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 49e-5
+
+- id: morph.dilate
+  fixture: image-conformance/fixtures/vips/morph.dilate.v
+  vips: "vips rank A T1 3 3 8 && vips extract_area T1 O 1 1 62 62"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: morph.erode
+  fixture: image-conformance/fixtures/vips/morph.erode.v
+  vips: "vips rank A T1 3 3 0 && vips extract_area T1 O 1 1 62 62"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: rank.median3
+  fixture: image-conformance/fixtures/vips/rank.median3.v
+  vips: "vips rank A T1 3 3 4 && vips extract_area T1 O 1 1 62 62"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: adjust.exposure
+  fixture: image-conformance/fixtures/vips/adjust.exposure.v
+  vips: "vips linear A O 1.4142135623730951 1.4142135623730951 1.4142135623730951 1 0 0 0 0"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 98e-5
+
+- id: adjust.brightness_contrast
+  fixture: image-conformance/fixtures/vips/adjust.brightness_contrast.v
+  vips: "vips linear A O 1.3 1.3 1.3 1 -0.05000000000000002 -0.05000000000000002 -0.05000000000000002 0"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 79e-5
+
+- id: adjust.levels
+  fixture: image-conformance/fixtures/vips/adjust.levels.v
+  vips: "vips linear A T1 1.25 1.25 1.25 1 -0.125 -0.125 -0.125 0 && vips clamp T1 T2 --min 0 --max 1 && vips math2_const T2 T3 pow 0.7692307692307692 0.7692307692307692 0.7692307692307692 1 && vips linear T3 O 0.9 0.9 0.9 1 0.05 0.05 0.05 0"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 49e-5
+
+- id: adjust.levels_rgb
+  fixture: image-conformance/fixtures/vips/adjust.levels_rgb.v
+  vips: "vips linear A T1 1.1111111111111112 1.25 1 1 -0.05555555555555556 -0.125 0 0 && vips clamp T1 T2 --min 0 --max 1 && vips math2_const T2 O pow 0.8333333333333334 1.25 0.6666666666666666 1"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 49e-5
+
+- id: adjust.saturation
+  fixture: image-conformance/fixtures/vips/adjust.saturation.v
+  vips: "vips recomb A O sat.mat"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 45e-5
+
+- id: adjust.hue_rotate
+  fixture: image-conformance/fixtures/vips/adjust.hue_rotate.v
+  vips: "vips recomb A O hue.mat"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 64e-5
+
+- id: adjust.invert_rgb
+  fixture: image-conformance/fixtures/vips/adjust.invert_rgb.v
+  vips: "vips linear A O -1 -1 -1 1 1 1 1 0"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 0
+
+- id: adjust.white_balance
+  fixture: image-conformance/fixtures/vips/adjust.white_balance.v
+  vips: "vips linear A O 1.3 0.8 0.7 1 0 0 0 0"
+  oracle_tolerance: none (no scalar reference in image-kernels)
+  gpu_tolerance_measured: 79e-5

@@ -1,0 +1,29 @@
+{
+  "id": "bool.or",
+  "oracle": "libvips",
+  "vips_version": "vips-8.18.6",
+  "recorded_at": "2026-10-04T10:37:34.100Z",
+  "runner": "scripts/vips/record.mjs",
+  "stimulus": {
+    "size": [
+      64,
+      64
+    ],
+    "bands": 4,
+    "formula": "h = (7x + 13y + 29c + 31*seed + 17*((x*y) mod 11)) mod 257; inputs use seed 1, 2",
+    "kinds": [
+      "binary",
+      "binary"
+    ]
+  },
+  "params": {},
+  "out": [
+    64,
+    64
+  ],
+  "region": null,
+  "commands": [
+    "vips boolean -- A.v B.v T1.v or"
+  ],
+  "note": "vips casts to int and works bitwise; on 0/1 stimuli that is the engine's truthiness logic"
+}

@@ -1,0 +1,37 @@
+{
+  "id": "adjust.levels",
+  "oracle": "libvips",
+  "vips_version": "vips-8.18.6",
+  "recorded_at": "2026-10-04T10:37:42.678Z",
+  "runner": "scripts/vips/record.mjs",
+  "stimulus": {
+    "size": [
+      64,
+      64
+    ],
+    "bands": 4,
+    "formula": "h = (7x + 13y + 29c + 31*seed + 17*((x*y) mod 11)) mod 257; inputs use seed 1, 2",
+    "kinds": [
+      "opaque"
+    ]
+  },
+  "params": {
+    "in_black": 0.1,
+    "in_white": 0.9,
+    "gamma": 1.3,
+    "out_black": 0.05,
+    "out_white": 0.95
+  },
+  "out": [
+    64,
+    64
+  ],
+  "region": null,
+  "commands": [
+    "vips linear -- A.v T1.v \"1.25 1.25 1.25 1\" \"-0.125 -0.125 -0.125 0\"",
+    "vips clamp --min=0 --max=1 -- T1.v T2.v",
+    "vips math2_const -- T2.v T3.v pow \"0.7692307692307692 0.7692307692307692 0.7692307692307692 1\"",
+    "vips linear -- T3.v O.v \"0.9 0.9 0.9 1\" \"0.05 0.05 0.05 0\""
+  ],
+  "note": null
+}

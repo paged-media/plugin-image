@@ -1,0 +1,28 @@
+{
+  "id": "geom.rotate90_cw",
+  "oracle": "libvips",
+  "vips_version": "vips-8.18.6",
+  "recorded_at": "2026-10-04T10:37:39.953Z",
+  "runner": "scripts/vips/record.mjs",
+  "stimulus": {
+    "size": [
+      64,
+      64
+    ],
+    "bands": 4,
+    "formula": "h = (7x + 13y + 29c + 31*seed + 17*((x*y) mod 11)) mod 257; inputs use seed 1, 2",
+    "kinds": [
+      "unit"
+    ]
+  },
+  "params": {},
+  "out": [
+    64,
+    64
+  ],
+  "region": null,
+  "commands": [
+    "vips rot -- A.v O.v d90"
+  ],
+  "note": null
+}
