@@ -659,6 +659,7 @@ dependencies = [
  "image-core",
  "image-gpu",
  "image-graph",
+ "image-js",
  "image-kernels",
  "image-pipeline",
  "image-psd",
