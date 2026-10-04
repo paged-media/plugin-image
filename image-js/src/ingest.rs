@@ -1114,11 +1114,11 @@ fn apply_curve_lut_f16(
         if cov <= 0.0 {
             continue;
         }
-        for ch in 0..3 {
+        for (ch, lut) in luts.iter().enumerate() {
             let o = ch * 2;
             let v = half::f16::from_le_bytes([texel[o], texel[o + 1]]).to_f32();
             let idx = (v.clamp(0.0, 1.0) * 255.0).round() as usize;
-            let mapped = f32::from(luts[ch][idx.min(255)]) / 255.0;
+            let mapped = f32::from(lut[idx.min(255)]) / 255.0;
             let out = v + (mapped - v) * cov;
             let b = half::f16::from_f32(out).to_le_bytes();
             texel[o] = b[0];
