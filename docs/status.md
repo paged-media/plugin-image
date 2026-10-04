@@ -60,11 +60,13 @@ landed. How the parts fit is in
 - **A GPU is required.** No kernel has a CPU path. Without WebGPU, adjustments, filters,
   generator fills, painting, resize and the composite of more than one layer return an
   error; decode, the identity composite, selection and histograms still work.
-- **The preview on the page** is one scene-layer image item, sent as RGBA8 in a JavaScript
-  number array, cleared when the frame leaves the selection and on Reset. Edits reach the
-  document only by a commit (ADR 462), whose baked PNG is capped at 8 MB while images cross
-  as number arrays; stored revisions are never deleted yet; saving the document does not
-  trigger a commit.
+- **The preview on the page** is one scene-layer image, cleared when the frame leaves the
+  selection and on Reset. On a host with the protocol-66 doors (`glue/src/host66.ts`) it
+  crosses as bytes and a brush sample sends only the rectangle it changed; on an older host
+  it is RGBA8 in a JavaScript number array. Edits reach the document only by a commit
+  (ADR 462). With the protocol-66 doors the baked PNG crosses as bytes, revisions older than
+  the last eight are deleted, and saving the document commits first; on an older host the
+  bake is capped at 8 MB, nothing is deleted and a save does not commit.
 - **Tiles** are level 0 only, served only after the command, and cut from the held image
   without the panel's chain. The mip export `image_tile_rgba8_level` has no TypeScript caller.
 - **Colour.** Transforms run once, on the CPU, at decode: RGB with an embedded profile to
@@ -77,21 +79,29 @@ landed. How the parts fit is in
   and the panel's chain (`image-js/src/ingest.rs:1123`) take the held buffer as four bytes
   per pixel; `LayerStack::from_image_px`, which keeps the depth, is called only by tests.
   The scene-layer item, tiles and PSD save-back are 8-bit. A curve is a 256-entry table.
-- **PSD.** The composite decode takes 8- and 16-bit RGB or greyscale, raw or RLE (not 16-bit RLE); other modes and depths are
-  refused. Layers are imported only from RGB files without groups or layer masks and within 384 MiB. Save-back is 8-bit RGB: it
-  replaces the pixels of a single canvas-sized layer or writes a new single-layer file. The session's layer stack is never written
-  to a file as layers. "Apply to file" and the PNG and JPEG exporters encode the composite. The PSD exporter returns the retained file
+- **PSD.** The composite decode takes 8- and 16-bit RGB or greyscale, raw or RLE (not 16-bit
+  RLE); other modes and depths are refused, and a transparent document's white-matted merged
+  colour is un-matted. Layers are imported from RGB files, with groups, clipping, user masks
+  and fill opacity, within 384 MiB; a file with smart objects, layer effects, adjustment
+  layers, artboards, vector masks, group masks or mask density/feather opens flattened, and
+  says which (`image-psd/src/layer_pixels.rs`). Save-back is 8-bit RGB. "Apply to file" and
+  the PNG and JPEG exporters encode the composite. The PSD exporter returns the retained file
   byte for byte only when the parameters are the identity and the pixels have not been edited since ingest; otherwise it
   runs the save-back, and when the save-back declines (a size change, a non-RGB or non-8-bit file) it exports nothing
   and says why (`glue/src/session.ts`, `psdExportBytes`; [ADR 460](adr/460-document-is-not-the-store.md)).
-- **Layers and undo.** Every layer is canvas-sized. A crop, resize or straighten replaces
-  the stack with one layer and drops the history. The journal holds at most 32 entries and
-  256 MiB, records pixels only, and is cleared when a layer is removed.
+- **Layers and undo.** Every layer is canvas-sized; the layer fold keeps whole-canvas
+  textures, so the largest image is the device's texture limit (16384 px on Apple silicon,
+  8192 on many others). A crop, resize or straighten replaces the stack with one layer and
+  drops the history. The undo list keeps 200 structure steps; its pixel steps live in a tile
+  journal of at most 32 entries and 256 MiB.
 - **Raster type** has no line wrapping. **Content-aware fill** searches a bounded window.
-- **Built, with no panel control or command:** pattern fill, moving the selected pixels,
-  shape blur, layer offset and smart-object layers. **Called only by tests:** Engine B's
-  op-node evaluation, the texture pool, batched dispatch, and the residency manager, whose
-  third tier (scratch storage) returns an error.
+- **Called only by tests:** Engine B's op-node evaluation and the residency manager's third
+  tier (scratch storage), which returns an error.
+- **Oracles.** Photoshop 2026's answers for 80 blend, adjustment and filter cases and seven
+  layered PSDs are replayed in CI (`image-conformance/tests/oracle_photoshop.rs`,
+  `psd_composite_photoshop.rs`): every case agrees or differs by a stated convention, none
+  is a defect. libvips's answers for the rows that name it are replayed by
+  `oracle_vips.rs`; the GEGL-only rows have no runner.
 - **Tests.** Device tests skip without a GPU adapter unless `REQUIRE_GPU=1` is set, which
   turns the skip into a failure (`image-gpu/src/test_support.rs`). CI runs them on a software
   Vulkan adapter for every pull request and on Apple silicon after merges to main
@@ -109,5 +119,6 @@ landed. How the parts fit is in
 - Image formats other than PNG, JPEG and PSD/PSB. `registry/codecs.yaml` records AVIF and
   JPEG XL as planned, camera RAW and HEIC as out of scope ([ADR 456](adr/456-codecs.md)).
 - A writer for PSD descriptors, which are parsed read-only (`registry/psd-blocks.yaml`).
-- Runners for the libvips and GEGL oracles that 83 rows of `registry/kernels.yaml` name
-  (every row has `status: implemented`).
+- A runner for the GEGL oracle the registry names for some rows.
+- Rendering a smart object from its embedded source, layer effects, and reading PSD
+  adjustment layers back as adjustment layers.
