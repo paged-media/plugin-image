@@ -13,7 +13,8 @@ landed. How the parts fit is in
   orientation is applied. Decoding runs in a worker pool when the host grants workers.
 - **Adjustments.** The "Image" panel has a histogram and a re-runnable chain: exposure,
   brightness, contrast, saturation, temperature and tint, levels (composite and per
-  channel), a tone curve, vibrance, colour balance, black and white, posterize, threshold,
+  channel), tone curves (composite and per channel), Hue/Saturation (master, six colour
+  ranges, colorize), vibrance, colour balance, black and white, posterize, threshold,
   photo filter, channel mixer, blur, sharpen, hue rotate, invert, and "Auto-enhance". Apply
   runs it on the GPU, within the selection if there is one, and shows it inside the frame.
   Sliders preview live on a resampled proxy; full resolution follows when they rest.
@@ -22,7 +23,7 @@ landed. How the parts fit is in
   scratches, offset, lens blur, reduce noise, smart sharpen, selective colour, median,
   maximum and minimum (3×3), colour lookup from a `.cube` file, shape blur; gradient (foreground
   to background), noise, solid, pattern and content-aware fills; Define pattern; the paint
-  bucket.
+  bucket; a gradient tool (drag the line); red-eye removal.
 - **Selection.** Rectangle and ellipse marquee, lasso, polygonal lasso, magic wand and
   quick selection, combined by add, subtract and intersect; select all, deselect, invert,
   feather; expand, contract, border and smooth; wand and bucket tolerance and contiguity;
