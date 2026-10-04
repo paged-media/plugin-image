@@ -35,6 +35,14 @@ import type {
 } from "@paged-media/plugin-api";
 
 import { latestWins } from "./coalesce";
+import {
+  binaryMutations,
+  hostColorPicker,
+  imageScene,
+  mutateWithBytes,
+  partsDelete,
+  type ColorPickerProps,
+} from "./host66";
 import { parseCube, toKernelCube } from "./cube";
 import {
   readSession,
@@ -87,6 +95,7 @@ import {
   resolveFrameFit,
 } from "./frame-fit";
 import { claimImageTiles } from "./tile-provider";
+import { collectGarbage } from "./session-store";
 import { createDecodePool, type DecodePool } from "./decode-pool";
 import { createCropMachine, type CropMachine } from "./crop-machine";
 import {
@@ -356,6 +365,12 @@ export interface ImageSession {
   onDidChange(listener: () => void): Disposable;
   /** Ingest the single selected element's placed image via C-5. */
   ingestSelection(): Promise<boolean>;
+  /** The ingested frame's element (what an edit context is entered on),
+   *  or null for an imported file. */
+  sourceElement(): ElementId | null;
+  /** The host's colour picker widget, or null (the panel then uses the
+   *  browser's colour input). */
+  colorPicker(): import("react").ComponentType<ColorPickerProps> | null;
   /** Ingest opened/dropped file bytes (the K-2 importer path). */
   importBytes(name: string, bytes: Uint8Array): Promise<boolean>;
   /** RESAMPLE the engine-held source to a new pixel size (GPU-only —
@@ -986,10 +1001,13 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  mutation doors need), or null for an import. */
   let sourceRef: ElementId | null = null;
 
-  /** The largest PNG the bake sends: the image travels to the host as a
-   *  JSON number array today, and past this the transfer itself is the
-   *  problem. A binary transfer lifts it. */
+  /** The largest PNG the bake sends over the JSON lane, where the image
+   *  travels as a number array and past this the transfer itself is the
+   *  problem. A host that takes mutation bytes as bytes
+   *  (`document.mutateBinary@1`) has no such limit. */
   const MAX_BAKED_BYTES = 8 * 1024 * 1024;
+  /** Committed revisions kept per frame once old ones can be deleted. */
+  const KEEP_REVISIONS = 8;
 
   /** Reopen a committed frame: when the frame's image is EXACTLY what the
    *  last commit baked, restore that commit's layers; otherwise the image
@@ -1538,6 +1556,40 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  clipped + transformed by core; §8.5 — the plugin never compensates).
    *  The ONE composite path: the committed Apply and the live stroke
    *  preview both land here, so they cannot lay pixels out differently. */
+  /** What the frame's scene image last was, when it went through the
+   *  image door — a brush sample may then patch only its tiles. */
+  let submitted: { target: string; width: number; height: number } | null = null;
+
+  /** Patch the rectangle a brush sample changed instead of resending the
+   *  image. False when the host or the last submission does not allow it
+   *  (the caller then resends the whole image). */
+  const submitDirty = async (target: string, rgba: Uint8Array, width: number, height: number) => {
+    const surface = scene();
+    const images = surface && imageScene(surface);
+    const rect = engine?.brushDirtyRect();
+    if (
+      !images ||
+      !rect ||
+      !submitted ||
+      submitted.target !== target ||
+      submitted.width !== width ||
+      submitted.height !== height
+    ) {
+      return false;
+    }
+    const tile = new Uint8Array(rect.w * rect.h * 4);
+    for (let row = 0; row < rect.h; row++) {
+      const from = ((rect.y + row) * width + rect.x) * 4;
+      tile.set(rgba.subarray(from, from + rect.w * 4), row * rect.w * 4);
+    }
+    await images.submitImageTiles(
+      target,
+      [{ x: rect.x, y: rect.y, width: rect.w, height: rect.h, rgba: tile }],
+      { transfer: true },
+    );
+    return true;
+  };
+
   const submitLayer = async (
     target: string,
     rgba: Uint8Array,
@@ -1560,6 +1612,21 @@ export function createImageSession(host: BundleHost): ImageSession {
     state.ptPerPx = scale;
     const w = layoutWidth * scale;
     const h = layoutHeight * scale;
+    // Protocol 66: the image crosses as bytes, and the frame's pages
+    // alone repaint. The `number[]` item below is the older host's lane.
+    const images = imageScene(surface);
+    if (images) {
+      await images.submitImage(target, {
+        rgba,
+        width,
+        height,
+        dest: [(box.w - w) / 2, (box.h - h) / 2, w, h],
+      });
+      submitted = { target, width, height };
+      state.compositedFrame = target;
+      return true;
+    }
+    submitted = null;
     await surface.submit(target, {
       items: [
         {
@@ -2395,6 +2462,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       return c;
     },
 
+    sourceElement: () => sourceRef,
+    colorPicker: () => hostColorPicker(host),
+
     async commitToDocument() {
       const src = state.source;
       if (!src || !engine || !src.elementId || !sourceRef) {
@@ -2418,7 +2488,7 @@ export function createImageSession(host: BundleHost): ImageSession {
         // adjustments that were never applied are not part of it.
         const rgba = engine.tile(src.handle, 0, 0, src.width, src.height);
         const png = engine.encode(rgba, src.width, src.height, "png");
-        if (png.length > MAX_BAKED_BYTES) {
+        if (png.length > MAX_BAKED_BYTES && !binaryMutations(host)) {
           setStatus(
             `The baked image is ${(png.length / 1048576).toFixed(1)} MB; the ` +
               "host takes at most 8 MB per image until it accepts binary " +
@@ -2437,11 +2507,13 @@ export function createImageSession(host: BundleHost): ImageSession {
           baked,
         );
         const marker: CommittedMarker = { owns: "pixels", rev, record: path, baked };
-        await host.document.mutate({
+        // The PNG crosses as bytes where the host takes them, else as the
+        // JSON lane's number[] (`mutateWithBytes` splices it in).
+        await mutateWithBytes(host, {
           op: "batch",
           args: {
             ops: [
-              { op: "replaceImageBytes", args: { elementId: src.elementId, bytes: Array.from(png) } },
+              { op: "replaceImageBytes", args: { elementId: src.elementId, bytes: [] } },
               {
                 op: "setPluginMetadata",
                 args: {
@@ -2453,9 +2525,20 @@ export function createImageSession(host: BundleHost): ImageSession {
               },
             ],
           },
-        });
+        }, png);
         state.committedRev = rev;
         state.uncommitted = false;
+        // Old revisions and the layer data only they used go, where the
+        // host can delete parts (the document's undo can reach the last
+        // KEEP_REVISIONS commits; older ones are unreachable anyway).
+        const del = partsDelete(host);
+        // Awaited, not fired off: a collection overlapping the next
+        // commit could delete buffers written before their record.
+        if (del) {
+          await collectGarbage(host.parts, del, src.elementId, rev, KEEP_REVISIONS).catch((err) =>
+            host.log.warn(`image: clearing old revisions failed: ${err}`),
+          );
+        }
         setStatus(
           `Committed revision ${rev}: ${state.layers.layers.length} layer` +
             `${state.layers.layers.length === 1 ? "" : "s"} stored in the document ` +
@@ -3383,7 +3466,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       // of a drag; the committed Apply (which brushCommit triggers) puts
       // the adjusted composite back. Stated in the panel.
       if (strokeTarget && strokeBox) {
-        await submitLayer(strokeTarget, rgba, src.width, src.height, strokeBox);
+        // Only the dabs' rectangle crosses when the host takes tiles.
+        const patched = await submitDirty(strokeTarget, rgba, src.width, src.height);
+        if (!patched) await submitLayer(strokeTarget, rgba, src.width, src.height, strokeBox);
       }
       emit();
       return true;

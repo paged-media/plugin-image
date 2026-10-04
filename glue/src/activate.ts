@@ -38,6 +38,8 @@ import { contributeMenu } from "./menu";
 import manifest from "../manifest.json";
 
 import { createImageSession } from "./session";
+import { enterEditContext, onWillSave, toolSettings } from "./host66";
+import { bindToolSettings, toolOptionFields } from "./tool-options";
 import { makeImagePanel } from "./panels/image-panel";
 import { makeCropGesture } from "./crop-tool";
 import { makeMoveGesture } from "./move-tool";
@@ -108,7 +110,12 @@ export function activate(host: BundleHost): BundleHandle {
     category: "Image",
     handler: () => {
       host.shell.openPanel(PANEL_ID);
-      void session.ingestSelection();
+      // Into the image's edit context too, so its tools and Cmd+Z follow
+      // (the host's own double-click gesture, from a command).
+      void session.ingestSelection().then(async (ok) => {
+        const el = session.sourceElement();
+        if (ok && el) await enterEditContext(host, "rasterImage", el);
+      });
     },
   });
 
@@ -145,6 +152,20 @@ export function activate(host: BundleHost): BundleHandle {
   // (image_core::crop geometry) and renders the crop frame through the
   // LIVE host.overlay door. The COMMIT rides the commitCrop command (and
   // the panel button) so it's a deliberate, single action.
+  // Tool options in the host's bar, where the host reports them back.
+  const toolFields = toolSettings(host)
+    ? toolOptionFields({
+        brush: BRUSH_TOOL_ID,
+        pencil: PENCIL_TOOL_ID,
+        eraser: ERASER_TOOL_ID,
+        wand: MAGIC_WAND_TOOL_ID,
+        bucket: BUCKET_TOOL_ID,
+        gradient: GRADIENT_TOOL_ID,
+      })
+    : null;
+  const optionsFor = (toolId: string) =>
+    toolFields?.[toolId] ? { options: { toolId, fields: toolFields[toolId] } } : {};
+
   contributeTool(host, {
     id: CROP_TOOL_ID,
     title: "Crop",
@@ -174,6 +195,7 @@ export function activate(host: BundleHost): BundleHandle {
   // the foreground. Shares the brush slot; no shortcut ("g" is taken).
   contributeTool(host, {
     id: BUCKET_TOOL_ID,
+    ...optionsFor(BUCKET_TOOL_ID),
     title: "Paint bucket",
     icon: "tool-gradient",
     group: BRUSH_TOOL_ID,
@@ -185,6 +207,7 @@ export function activate(host: BundleHost): BundleHandle {
   // brush slot with the bucket (Photoshop pairs them).
   contributeTool(host, {
     id: GRADIENT_TOOL_ID,
+    ...optionsFor(GRADIENT_TOOL_ID),
     title: "Gradient",
     icon: "tool-gradient",
     group: BRUSH_TOOL_ID,
@@ -281,6 +304,7 @@ export function activate(host: BundleHost): BundleHandle {
   // follow-up).
   contributeTool(host, {
     id: MAGIC_WAND_TOOL_ID,
+    ...optionsFor(MAGIC_WAND_TOOL_ID),
     title: "Magic wand",
     icon: "tool-magic-wand",
     group: MAGIC_WAND_TOOL_ID,
@@ -327,6 +351,7 @@ export function activate(host: BundleHost): BundleHandle {
   // deliberately LEFT FREE for brush-size nudging.
   contributeTool(host, {
     id: BRUSH_TOOL_ID,
+    ...optionsFor(BRUSH_TOOL_ID),
     title: "Brush (raster)",
     icon: "tool-paintbrush",
     group: BRUSH_TOOL_ID,
@@ -337,6 +362,7 @@ export function activate(host: BundleHost): BundleHandle {
   });
   contributeTool(host, {
     id: PENCIL_TOOL_ID,
+    ...optionsFor(PENCIL_TOOL_ID),
     title: "Pencil (raster)",
     icon: "tool-pencil",
     group: PENCIL_TOOL_ID,
@@ -347,6 +373,7 @@ export function activate(host: BundleHost): BundleHandle {
   });
   contributeTool(host, {
     id: ERASER_TOOL_ID,
+    ...optionsFor(ERASER_TOOL_ID),
     title: "Eraser (raster)",
     icon: "tool-erase",
     group: ERASER_TOOL_ID,
@@ -790,8 +817,30 @@ export function activate(host: BundleHost): BundleHandle {
   // and not from a gesture; it takes the frame boundary anyway and
   // narrows by DECLINING in the providers, which the binding contract
   // models properly.
+  // SAVING THE DOCUMENT keeps the image: edits not yet committed are
+  // committed first (the host waits for this, bounded), so a save never
+  // writes a document that drops what the frame shows.
+  const toolSettingsSub = bindToolSettings(host, session, {
+    [BRUSH_TOOL_ID]: "brush",
+    [PENCIL_TOOL_ID]: "brush",
+    [ERASER_TOOL_ID]: "brush",
+    [MAGIC_WAND_TOOL_ID]: "wand",
+    [BUCKET_TOOL_ID]: "wand",
+    [GRADIENT_TOOL_ID]: "gradient",
+  });
+  const willSave = onWillSave(host, async () => {
+    if (session.state().uncommitted) await session.commitToDocument();
+  });
+
   if (host.supports("contribute.editContext@1")) {
     host.contribute.editContext({
+      // Protocol 66: the Edit menu reads "Undo <step>" (the contract
+      // pinned here predates these two members; an older host ignores
+      // them).
+      ...({
+        undoLabel: () => session.state().history?.undoLabel ?? null,
+        redoLabel: () => session.state().history?.redoLabel ?? null,
+      } as object),
       type: "rasterImage",
       entry: "doubleClick",
       // Claimed by OUR OWN METADATA, never by kind. The candidate is a
@@ -932,6 +981,8 @@ export function activate(host: BundleHost): BundleHandle {
       // disposed after its session would be a live provider over a
       // closed engine for however long the host takes to notice.
       providerInvalidate?.dispose();
+      willSave?.dispose();
+      toolSettingsSub?.dispose();
       menuSub.dispose();
       providerInvalidate = null;
       for (const h of providerHandles.splice(0)) h.dispose();

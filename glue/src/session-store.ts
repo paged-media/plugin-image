@@ -117,3 +117,46 @@ export async function readSession(
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 }
+
+/**
+ * Delete what no reachable revision needs: this frame's records older
+ * than its newest `keep` (revision `rev` is the newest), then every
+ * stored buffer that no remaining record — of any frame — names. Parts
+ * are written before the document points at them and never rewritten,
+ * so deleting only the unreachable ones keeps every revision the
+ * document's undo can land on. Returns how many parts went.
+ */
+export async function collectGarbage(
+  parts: PartsSurface,
+  del: (path: string) => Promise<boolean>,
+  frameId: string,
+  rev: number,
+  keep: number,
+): Promise<{ records: number; buffers: number }> {
+  const dir = recordPath(frameId, 0).replace(/r0\.json$/, "");
+  let records = 0;
+  for (const path of await parts.list(dir)) {
+    const m = /\/r(\d+)\.json$/.exec(path);
+    if (m && Number(m[1]) <= rev - keep) {
+      if (await del(path)) records++;
+    }
+  }
+  const live = new Set<string>();
+  for (const path of await parts.list("f/")) {
+    if (!path.endsWith(".json")) continue;
+    const raw = await parts.read(path);
+    if (!raw) continue;
+    try {
+      const r = JSON.parse(new TextDecoder().decode(raw)) as SessionRecord;
+      live.add(blobPath(r.manifest));
+      for (const b of r.buffers) live.add(blobPath(b));
+    } catch {
+      // An unreadable record keeps nothing alive and is left for a human.
+    }
+  }
+  let buffers = 0;
+  for (const path of await parts.list("px/")) {
+    if (!live.has(path) && (await del(path))) buffers++;
+  }
+  return { records, buffers };
+}

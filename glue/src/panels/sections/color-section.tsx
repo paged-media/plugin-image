@@ -1,7 +1,8 @@
 // COLOUR — foreground / background, swap (X) and reset (D), and a
-// picker. The picker is the browser's own colour input until the host
-// offers a colour-picker widget to plugins; Alt-click with a paint tool
-// samples the image into the foreground.
+// picker. The picker is the host's colour-picker widget where the host
+// offers one (`widgets.colorPicker@1`), else the browser's own colour
+// input; Alt-click with a paint tool samples the image into the
+// foreground.
 
 import { GRADIENT_KINDS, type GradientKind, type Rgba01 } from "../../engine";
 import { fromHex, toHex, type ColorPair } from "../../color-state";
@@ -33,31 +34,38 @@ export function ColorSection({
     if (which === "fg") session.setForeground(c);
     else session.setBackground(c);
   };
+  const HostPicker = session.colorPicker();
+  const picker = (which: "fg" | "bg", value: Rgba01) =>
+    HostPicker ? (
+      <span data-image-host-picker={which}>
+        <HostPicker
+          value={toHex(value)}
+          onChange={pick(which)}
+          ariaLabel={which === "fg" ? "Foreground colour" : "Background colour"}
+        />
+      </span>
+    ) : (
+      <input
+        id={`pg-image-${which}`}
+        type="color"
+        {...{ [`data-image-${which}`]: true }}
+        value={toHex(value)}
+        onChange={(e) => pick(which)(e.target.value)}
+      />
+    );
   return (
     <>
       <div style={sectionTitle}>Colour</div>
       <div style={row}>
         <label htmlFor="pg-image-fg">Foreground</label>
         <span style={swatch(colors.fg)} data-image-fg-swatch />
-        <input
-          id="pg-image-fg"
-          type="color"
-          data-image-fg
-          value={toHex(colors.fg)}
-          onChange={(e) => pick("fg")(e.target.value)}
-        />
+        {picker("fg", colors.fg)}
         <span style={mono}>{toHex(colors.fg)}</span>
       </div>
       <div style={row}>
         <label htmlFor="pg-image-bg">Background</label>
         <span style={swatch(colors.bg)} data-image-bg-swatch />
-        <input
-          id="pg-image-bg"
-          type="color"
-          data-image-bg
-          value={toHex(colors.bg)}
-          onChange={(e) => pick("bg")(e.target.value)}
-        />
+        {picker("bg", colors.bg)}
         <span style={mono}>{toHex(colors.bg)}</span>
       </div>
       <div style={row}>
