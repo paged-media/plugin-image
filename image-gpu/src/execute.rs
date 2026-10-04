@@ -143,7 +143,7 @@ pub fn execute_windowed_once(
             ),
         });
     }
-    let pipeline = KernelPipeline::build(ctx, def);
+    let pipeline = ctx.pipeline(def);
     let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
     let in_tex = make_texture(
         ctx,
@@ -190,7 +190,7 @@ pub async fn execute_windowed_once_async(
             ),
         });
     }
-    let pipeline = KernelPipeline::build(ctx, def);
+    let pipeline = ctx.pipeline(def);
     let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
     let in_tex = make_texture(
         ctx,
@@ -253,7 +253,7 @@ fn prepare_tile(
     params: &[u8],
     w: u32,
     h: u32,
-) -> Result<(KernelPipeline, Vec<wgpu::TextureView>), GpuError> {
+) -> Result<(std::sync::Arc<KernelPipeline>, Vec<wgpu::TextureView>), GpuError> {
     if inputs.len() != def.inputs as usize {
         return Err(GpuError::Kernel {
             kernel: def.id,
@@ -271,7 +271,7 @@ fn prepare_tile(
         });
     }
 
-    let pipeline = KernelPipeline::build(ctx, def);
+    let pipeline = ctx.pipeline(def);
 
     // Inputs (rgba16float, sampled via textureLoad).
     let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;

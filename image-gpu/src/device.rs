@@ -37,12 +37,24 @@
 //! `rgba16float` STORAGE_BINDING is wgpu-core (no feature flag) — the
 //! phase-0 smoke test verifies it on the running adapter anyway.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use image_kernels::KernelDef;
+
+use crate::pipeline::KernelPipeline;
 use crate::GpuError;
 
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
+    /// Compiled pipelines, one per kernel, for the life of the device.
+    /// A kernel's WGSL and bind-group layouts depend only on its
+    /// `KernelDef`, so building them once is exact; building them per
+    /// dispatch (as every dispatch did until 2026-10-04) cost a shader
+    /// compile per tile per stage.
+    pipelines: Mutex<HashMap<&'static str, Arc<KernelPipeline>>>,
 }
 
 impl GpuContext {
@@ -86,6 +98,23 @@ impl GpuContext {
             device,
             queue,
             adapter_info: adapter.get_info(),
+            pipelines: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The compiled pipeline for `def`, built on first use and shared
+    /// afterwards (keyed by the registry id, which is unique).
+    pub fn pipeline(&self, def: &'static KernelDef) -> Arc<KernelPipeline> {
+        let mut cache = self.pipelines.lock().expect("pipeline cache lock");
+        Arc::clone(
+            cache
+                .entry(def.id)
+                .or_insert_with(|| Arc::new(KernelPipeline::build(self, def))),
+        )
+    }
+
+    /// How many kernels have a compiled pipeline (diagnostics, tests).
+    pub fn cached_pipelines(&self) -> usize {
+        self.pipelines.lock().expect("pipeline cache lock").len()
     }
 }

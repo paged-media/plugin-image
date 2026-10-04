@@ -36,9 +36,8 @@
 //! A budget equals the measured value. It is lowered in the commit that
 //! earns it and never raised; raising one means the change made the
 //! engine do more work, which is the regression this file exists to
-//! catch. The numbers below are 2026-10-04's: every dispatch compiles
-//! its own shader module and pipeline, so running the same kernel twice
-//! costs two compiles. The pipeline cache lowers `REPEAT_PIPELINES`.
+//! catch. Measurements are of the STEADY STATE (after one warm-up run)
+//! so they do not depend on which test touched the shared device first.
 
 #![allow(non_snake_case)]
 
@@ -75,18 +74,21 @@ fn dispatch(ctx: &image_gpu::GpuContext, bytes: &[u8]) -> GpuCounters {
     cost
 }
 
-/// One unary point kernel over one 64×64 tile, constant mask.
+/// One unary point kernel over one 64×64 tile, constant mask, warm.
+/// Until 2026-10-04 every dispatch also compiled a shader module and a
+/// pipeline (1 + 1 here); the per-device pipeline cache made them 0.
 #[test]
 fn one_dispatch_costs_exactly_this__feat__image_conformance_harness() {
     let Some(ctx) = test_device() else { return };
     let bytes = tile();
+    dispatch(ctx, &bytes); // warm-up
     let c = dispatch(ctx, &bytes);
     let texels = (W * H) as u64;
     assert_eq!(
         c,
         GpuCounters {
-            shader_modules: 1,
-            pipelines_built: 1,
+            shader_modules: 0,
+            pipelines_built: 0,
             dispatches: 1,
             dispatched_texels: texels,
             submits: 1,
@@ -98,29 +100,26 @@ fn one_dispatch_costs_exactly_this__feat__image_conformance_harness() {
             // 64 texels × 8 bytes = 512 per row, already 256-aligned
             bytes_read_back: texels * 8,
         },
-        "one dispatch: {c:?}"
+        "one warm dispatch: {c:?}"
     );
 }
 
-/// BUDGET: the same kernel twice. Measured 2026-10-04: two shader
-/// modules and two pipelines — nothing is reused.
-const REPEAT_PIPELINES: u64 = 2;
-
+/// The pipeline is built once per device: a hundred dispatches of the
+/// same kernel build at most one (none if another test built it first).
 #[test]
-fn the_same_kernel_twice__feat__image_conformance_harness() {
+fn a_kernel_compiles_once_per_device__feat__image_conformance_harness() {
     let Some(ctx) = test_device() else { return };
     let bytes = tile();
-    let a = dispatch(ctx, &bytes);
-    let b = dispatch(ctx, &bytes);
-    let pipelines = a.pipelines_built + b.pipelines_built;
+    let (_, c) = counters::measure(|| {
+        for _ in 0..100 {
+            dispatch(ctx, &bytes);
+        }
+    });
     assert!(
-        pipelines <= REPEAT_PIPELINES,
-        "pipelines built for two identical dispatches: {pipelines} > budget {REPEAT_PIPELINES}"
+        c.pipelines_built <= 1,
+        "100 dispatches built {} pipelines",
+        c.pipelines_built
     );
-    // Equal to the budget, not just under it: a budget that is looser
-    // than the measurement cannot catch the next regression.
-    assert_eq!(
-        pipelines, REPEAT_PIPELINES,
-        "the work went down — lower REPEAT_PIPELINES to {pipelines} in this commit"
-    );
+    assert_eq!(c.shader_modules, c.pipelines_built);
+    assert_eq!(c.dispatches, 100);
 }

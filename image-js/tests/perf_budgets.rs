@@ -37,7 +37,9 @@
 //! lowered in the commit that earns it and never raised. `check` asserts
 //! EQUALITY: a budget looser than the measurement cannot catch the next
 //! regression, so an improvement fails too, with the line to change.
-//! Run with `--nocapture` to print every measurement.
+//! Each GPU case measures the STEADY STATE: the operation runs once to
+//! warm the device, then is measured, so the result does not depend on
+//! test order. Run with `--nocapture` to print every measurement.
 
 #![allow(non_snake_case)]
 
@@ -157,7 +159,7 @@ fn a_16bit_tile_cut__feat__image_editor_tile_provider() {
 /// Measured 2026-10-04 on Metal: one pipeline build, submit and readback per
 /// dispatch, and the accumulator re-uploaded for every layer.
 const COMPOSITE3: [(&str, u64); 6] = [
-    ("pipelines_built", 7),
+    ("pipelines_built", 0), // was 7: the per-device pipeline cache
     ("dispatches", 7),
     ("submits", 7),
     ("textures_created", 24),
@@ -170,6 +172,7 @@ const COMPOSITE3: [(&str, u64); 6] = [
 fn a_three_layer_composite__feat__image_editor_layers() {
     let Some(ctx) = device() else { return };
     let s = stack(512, 512, 3);
+    pollster::block_on(s.composite(Some(ctx), None)).expect("warm-up");
     counters::reset();
     let (out, e, g) = counters::measure(|| pollster::block_on(s.composite(Some(ctx), None)));
     out.expect("composite");
@@ -187,7 +190,7 @@ fn a_three_layer_composite__feat__image_editor_layers() {
 /// composite.
 /// Measured 2026-10-04 on Metal: 20 × the composite above.
 const DRAG20: [(&str, u64); 6] = [
-    ("pipelines_built", 140),
+    ("pipelines_built", 0), // was 140: the per-device pipeline cache
     ("dispatches", 140),
     ("submits", 140),
     ("textures_created", 480),
@@ -199,6 +202,7 @@ const DRAG20: [(&str, u64); 6] = [
 fn a_twenty_step_opacity_drag__feat__image_editor_layers() {
     let Some(ctx) = device() else { return };
     let mut s = stack(512, 512, 3);
+    pollster::block_on(s.composite(Some(ctx), None)).expect("warm-up");
     counters::reset();
     let ((), e, g) = counters::measure(|| {
         for step in 0..20 {
@@ -221,7 +225,7 @@ fn a_twenty_step_opacity_drag__feat__image_editor_layers() {
 /// Measured 2026-10-04 on Metal: every stage, every tile, its own pipeline
 /// build, upload, submit and readback.
 const APPLY6: [(&str, u64); 6] = [
-    ("pipelines_built", 276),
+    ("pipelines_built", 0), // was 276: the per-device pipeline cache
     ("dispatches", 276),
     ("submits", 276),
     ("textures_created", 832),
@@ -245,6 +249,7 @@ fn apply_with_six_stages__feat__image_editor_adjust_breadth() {
         sharpen_amount: 0.5,
         ..AdjustParams::default()
     };
+    pollster::block_on(adjust_rgba8(ctx, &img, &p, None)).expect("warm-up");
     counters::reset();
     let (out, _e, g) = counters::measure(|| pollster::block_on(adjust_rgba8(ctx, &img, &p, None)));
     out.expect("apply");
