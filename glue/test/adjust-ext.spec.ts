@@ -267,6 +267,55 @@ describe("the save-back lane (real engine wasm)", () => {
     handle.dispose();
   });
 
+  // A layer edit lands in the layer stack, never in the retained parse.
+  // Identity params used to be read as "nothing changed", so the export
+  // handed back the ORIGINAL file with the edit missing. Hiding the only
+  // layer is the one same-size layer edit Node can composite without a
+  // GPU (the stack folds to transparent); a stroke takes the same path.
+  it("a layer edit at identity params reaches the PSD export", async () => {
+    const fake = makeFakeEditor();
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+
+    const original = psdBytes();
+    expect(await session.importBytes("edit.psd", original)).toBe(true);
+    expect(await session.setLayerVisible(0, false)).toBe(true);
+    expect(isIdentity(session.state().params)).toBe(true);
+
+    const exported = await session.psdExportBytes();
+    expect(exported).not.toBeNull();
+    expect(Array.from(exported!.bytes)).not.toEqual(Array.from(original));
+    // The written file carries the edit: both pixels are now black
+    // (the hidden layer's transparent composite, RGB planes only).
+    const round = createImageSession(handle.host);
+    expect(await round.importBytes("again.psd", exported!.bytes)).toBe(true);
+    expect(round.state().histogram!.r[0]).toBe(2);
+    round.dispose();
+
+    session.dispose();
+    handle.dispose();
+  });
+
+  it("an edit the PSD save-back cannot write is refused, not exported as the original", async () => {
+    const fake = makeFakeEditor();
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+
+    expect(await session.importBytes("crop.psd", psdBytes())).toBe(true);
+    // Crop the 2×1 image to its left pixel (pure CPU windowing at 0°).
+    const machine = session.cropMachine()!;
+    machine.pointerDown([2, 0.5]);
+    machine.pointerMove([1, 0.5]);
+    machine.pointerUp();
+    expect(await session.commitCrop()).toBe(true);
+
+    expect(await session.psdExportBytes()).toBeNull();
+    expect(session.state().status).toMatch(/size mismatch/);
+
+    session.dispose();
+    handle.dispose();
+  });
+
   it("registers the three save-back exporters", async () => {
     const { imageBundle } = await import("../src/index");
     const { loadBundle } = await import("@paged-media/plugin-sdk");

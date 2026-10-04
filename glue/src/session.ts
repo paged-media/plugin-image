@@ -354,9 +354,11 @@ export interface ImageSession {
    *  bytes, it does not write files (the host wires no save-file door). */
   applyToFile(): Promise<SaveBackResult | null>;
   /** What the PSD exporter hands out: the ADJUSTED save-back when the
-   *  panel is off identity, else the preservation-safe re-emit
-   *  (zero-edit ⇒ BYTE-IDENTICAL — the §10.4 invariant survives; a plain
-   *  export never rewrites the composite). Null when no PSD is loaded. */
+   *  panel is off identity or the pixels were edited since ingest, else
+   *  the preservation-safe re-emit (zero-edit ⇒ BYTE-IDENTICAL — the
+   *  §10.4 invariant survives; a plain export never rewrites the
+   *  composite). Null when no PSD is loaded, and null (with the reason
+   *  as the status) when the save-back declines an edited file. */
   psdExportBytes(): Promise<{ bytes: Uint8Array; fileName: string } | null>;
   /** What the PNG / JPEG exporters hand out: the adjusted result
    *  re-encoded in the REQUESTED format (whatever the source was). */
@@ -828,6 +830,11 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  ("jpeg" only when the ORIGINAL bytes were a JPEG — a re-encode
    *  never invents a lossy format). */
   let sourceFormat: RasterFormat | "psd" | null = null;
+  /** Pixel edits since the last ingest (layer ops, strokes, fills,
+   *  filters, crop, resize, undo/redo). The PSD exporter reads it: the
+   *  byte-identical re-emit is only correct while it is 0, because the
+   *  retained parse never sees an edit that lands in the layer stack. */
+  let pixelEdits = 0;
 
   const emit = () => {
     for (const l of [...listeners]) l();
@@ -944,6 +951,13 @@ export function createImageSession(host: BundleHost): ImageSession {
     tileClaim?.bump();
   };
 
+  /** The source pixels changed after ingest. A staged save-back now
+   *  describes pixels that no longer exist, so it goes too. */
+  const markPixelsEdited = () => {
+    pixelEdits += 1;
+    state.saveBack = null;
+  };
+
   /** Re-read the engine's layer stack + undo readout into state. */
   const refreshLayers = () => {
     if (!engine || !state.source) {
@@ -980,6 +994,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       return false;
     }
     bumpTiles();
+    markPixelsEdited();
     refreshLayers();
     refreshHistogram();
     if (state.source.elementId) await api.apply();
@@ -997,6 +1012,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     src: SourceImage,
     next: { handle: number; width: number; height: number },
   ) => {
+    markPixelsEdited();
     if (next.handle === src.handle) {
       bumpTiles();
     } else {
@@ -1133,6 +1149,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     state.psd = null;
     sourceFormat = null;
     state.saveBack = null;
+    pixelEdits = 0;
   };
 
   /** "8BPS" — the PSD/PSB magic. */
@@ -1735,17 +1752,21 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     async psdExportBytes() {
       if (psdHandle === null || !engine || !state.psd) return null;
-      // PRESERVATION FIRST: an unadjusted export must stay byte-identical,
-      // so the save-back only runs when the panel is actually off
-      // identity.
-      if (isIdentity(state.params)) return api.psdExport();
+      // PRESERVATION FIRST: an unedited export must stay byte-identical,
+      // so the save-back only runs when the panel is off identity OR the
+      // pixels changed since ingest. Identity alone is not enough: a
+      // stroke, a layer edit, a crop all land in the layer stack, which
+      // the retained parse never sees — re-emitting it would hand back
+      // the original file with every one of those edits missing.
+      if (isIdentity(state.params) && pixelEdits === 0) return api.psdExport();
       const back = await api.applyToFile();
       if (back && back.mimeType === "image/vnd.adobe.photoshop") {
         return { bytes: back.bytes, fileName: back.fileName };
       }
-      // The save-back lane declined (unsupported mode/size) — fall back
-      // to the record-edit re-emit rather than exporting nothing.
-      return api.psdExport();
+      // The save-back lane declined (unsupported mode or size; its reason
+      // is already the status). Exporting the original instead would
+      // look like success and drop the edits, so export nothing.
+      return null;
     },
 
     async rasterExportBytes(format) {
@@ -2210,6 +2231,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       // the tile claim on the old handle, free it, adopt the new.
       releaseTiles();
       engine.freeImage(src.handle);
+      markPixelsEdited();
       src.handle = resized.handle;
       src.width = resized.width;
       src.height = resized.height;
@@ -3141,6 +3163,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       // pixels; a tile claim points at the old handle, so release it).
       releaseTiles();
       engine.freeImage(src.handle);
+      markPixelsEdited();
       src.handle = cropped.handle;
       src.width = cropped.width;
       src.height = cropped.height;
