@@ -56,3 +56,9 @@ image-gpu = { path = "../image-gpu", features = ["test-support"] }
 # only encodes RGB/Gray; jpeg-encoder writes the Adobe-APP14 CMYK form
 # zune-jpeg re-inverts on decode). Dev-only — never in the wasm artifact.
 jpeg-encoder = "0.7.0"
+criterion = { workspace = true }
+
+# Wall-clock trend (reported, never gated): `cargo bench --bench ops`.
+[[bench]]
+name = "ops"
+harness = false
