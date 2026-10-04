@@ -444,6 +444,15 @@ export function encode_image(rgba: Uint8Array, width: number, height: number, fo
 export function encode_image_opt(rgba: Uint8Array, width: number, height: number, format: string, quality: number, reduce: boolean): Uint8Array;
 
 /**
+ * The hash of the sources this wasm was built from
+ * (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
+ * "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
+ * compares it with the checkout, so a stale committed wasm fails
+ * the suite instead of being tested in place of the code.
+ */
+export function engine_source_hash(): string;
+
+/**
  * CONTENT-AWARE FILL: synthesise the selection from the rest of the
  * image (exemplar-based inpainting).
  *
@@ -1107,6 +1116,7 @@ export interface InitOutput {
     readonly decode_image: (a: number, b: number) => [number, number, number];
     readonly encode_image: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly encode_image_opt: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly engine_source_hash: () => [number, number];
     readonly fill_content_aware: (a: number) => any;
     readonly fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly fill_noise: (a: number, b: number, c: number) => any;
@@ -1195,9 +1205,9 @@ export interface InitOutput {
     readonly qcms_white_point_sRGB: (a: number) => void;
     readonly lut_inverse_interp16: (a: number, b: number, c: number) => number;
     readonly lut_interp_linear16: (a: number, b: number, c: number) => number;
-    readonly wasm_bindgen__convert__closures_____invoke__hb3a19924738e3ab7: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h9344d28c99dc1e49: (a: number, b: number, c: any, d: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h03919243d83d1356: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen__convert__closures_____invoke__h4104b19d0e1a1b9a: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

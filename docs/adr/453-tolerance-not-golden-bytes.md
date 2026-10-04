@@ -51,7 +51,7 @@ tolerance the kernel declares. GPU output is never compared with stored bytes.
   `unimplemented!`
 - `image-conformance/tests/gpu_module_kernels.rs:33-67` — the property checks for module
   kernels
-- `image-conformance/src/device.rs:45-63`,
+- `image-gpu/src/test_support.rs:62-86` (at `f7d21e5`: `image-conformance/src/device.rs`),
   `image-conformance/tests/gpu_module_kernels.rs:998-1013` — no adapter means the test
   skips, with a printed notice
 - `.github/workflows/ci.yml:55-61` — the CI runner has no adapter
@@ -88,3 +88,22 @@ rests on the property checks alone.
 - [ADR 451](451-one-kernel-definition.md) — which kernels get a generated reference
 - [ADR 452](452-kernel-abi.md) — the mask behaviour the property checks assert
 - [ADR 317](https://github.com/paged-media/plugin-sdk/blob/main/docs/adr/317-registry-driven-dispatch.md) — the registry rows that carry the tolerance and oracle fields
+
+## Amendment — 2026-10-04
+
+Three statements above no longer match the code.
+
+- The ΔE arm is implemented. `assert_within` bounds the mean CIEDE2000 between GPU output
+  and reference when a kernel declares `PerceptualDeltaE` (`image-conformance/src/harness.rs:249-257`),
+  using `image-conformance/src/delta_e.rs`, whose unit test reproduces the published
+  CIEDE2000 test pairs of Sharma, Wu and Dalal (2005). This supersedes "the ΔE arm is
+  `unimplemented!`".
+- CI runs the comparison. The `gpu-sw` job runs the whole suite on a software Vulkan adapter
+  for every pull request and the `gpu-metal` job on Apple silicon after merges to main, both
+  with `REQUIRE_GPU=1`, which makes a missing adapter fail every device test instead of
+  skipping it (`.github/workflows/ci.yml`, `image-gpu/src/test_support.rs:78-85`). This
+  supersedes the paragraph beginning "CI does not run the comparison". The `rust` job still
+  runs without an adapter, where the device tests skip.
+- The four per-crate device helpers became one, `image_gpu::test_support::device_or_skip`,
+  and `WGPU_FALLBACK` forces the fallback adapter only when set to `1`
+  (`image-gpu/src/device.rs:63-68`).

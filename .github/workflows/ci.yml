@@ -238,6 +238,35 @@ jobs:
       - name: install (plugin-sdk sibling satisfies the link chain)
         run: pnpm install --frozen-lockfile --dir plugin-image
 
+      # Build the engine wasm from THIS commit before the specs boot it.
+      # The committed glue/wasm is whatever was last rebuilt by hand;
+      # testing it instead of the sources is how a 2026-08-09 build went
+      # on passing for two months of Rust changes. wasm-fresh.spec.ts
+      # checks the stamp, so a local run against a stale copy fails too.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0" # mirrors rust-toolchain.toml
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugin-image
+          key: wasm
+      - name: wasm-bindgen (prebuilt; version from Cargo.lock)
+        working-directory: plugin-image
+        run: |
+          set -euo pipefail
+          WB=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
+          test -n "$WB" || { echo "could not read wasm-bindgen from Cargo.lock"; exit 1; }
+          curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/$WB/wasm-bindgen-$WB-x86_64-unknown-linux-musl.tar.gz" | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasm-bindgen-$WB-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: binaryen (prebuilt wasm-opt; pinned)
+        run: |
+          curl -fsSL https://github.com/WebAssembly/binaryen/releases/download/version_119/binaryen-version_119-x86_64-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_119/bin" >> "$GITHUB_PATH"
+      - name: build wasm
+        run: bash scripts/build-wasm.sh
+        working-directory: plugin-image
+
       # Isolation contract, TS half: every import must come through the
       # sanctioned contract surface (spec §2.1). An editor-internal import
       # fails here with a pointer to BREAKAGE_LOG.md.
@@ -250,8 +279,8 @@ jobs:
         working-directory: plugin-image
 
       # REQUIRE_REAL_WASM turns wasm-exec.spec.ts's "artifact missing"
-      # skip into a hard failure: the artifact is committed (glue/wasm),
-      # so a checkout that lacks it is a regression, and the only
+      # skip into a hard failure: the artifact was just built (and is
+      # committed too), so its absence is a regression, and the only
       # real-execution lane must never silently drop back to skip.
       - name: test
         run: pnpm -r test

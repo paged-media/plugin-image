@@ -152,6 +152,18 @@ mod wasm {
         super::kernel_count()
     }
 
+    /// The hash of the sources this wasm was built from
+    /// (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
+    /// "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
+    /// compares it with the checkout, so a stale committed wasm fails
+    /// the suite instead of being tested in place of the code.
+    #[wasm_bindgen]
+    pub fn engine_source_hash() -> String {
+        option_env!("IMAGE_JS_SOURCE_HASH")
+            .unwrap_or("unstamped")
+            .to_string()
+    }
+
     /// Does the embedding realm expose WebGPU (`navigator.gpu`)? Probed
     /// BEFORE touching wgpu so a GPU-less realm (Node tests, an old
     /// browser) gets a clean rejection instead of a wasm panic that

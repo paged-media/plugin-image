@@ -2,9 +2,17 @@ name: publish
 
 # Publish @paged-media/image to npm via OIDC TRUSTED PUBLISHING (tokenless).
 # Requires a Trusted Publisher on npm: org paged-media, this repo, workflow
-# publish.yml. Pre-1.0 -canary.N under the `canary` dist-tag; unchanged skip.
+# publish.yml (keep this FILE NAME: the trusted publisher is bound to it).
+# Pre-1.0 -canary.N under the `canary` dist-tag; unchanged skip.
+#
+# Runs only after `ci` succeeded on main, on exactly the commit ci tested,
+# and runs the bundle tests against the wasm it just built before packing.
+# It used to run on every push in parallel with ci and test nothing, so a
+# commit that failed ci could still reach npm.
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -14,9 +22,15 @@ permissions:
 
 jobs:
   publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # The version is READ FROM Cargo.lock, not written here. It used to
@@ -49,6 +63,14 @@ jobs:
       - name: upgrade npm (OIDC needs >= 11.5.1)
         run: npm install -g npm@latest
       - run: pnpm install --frozen-lockfile
+      # The bundle tests against the wasm built above (wasm-fresh.spec.ts
+      # proves it is the one these sources build). glue only: the
+      # manifest package validates through a sibling plugin-sdk checkout,
+      # which ci has and this job does not.
+      - name: test
+        run: node scripts/check-contract-imports.mjs && pnpm --dir glue test
+        env:
+          REQUIRE_REAL_WASM: "1"
       - run: pnpm -r build
       - name: publish via OIDC (canary)
         run: |

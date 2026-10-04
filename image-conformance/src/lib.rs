@@ -45,6 +45,7 @@
 pub mod abr_builder;
 pub mod abr_corpus;
 pub mod compose_ref;
+pub mod delta_e;
 pub mod device;
 pub mod harness;
 pub mod psd_builder;

@@ -98,6 +98,23 @@ pub struct ParityResult {
     pub max_ulp: u32,
     /// Texel index + channel of the worst divergence (diagnostics).
     pub worst_at: (usize, usize),
+    /// Mean CIEDE2000 over the texels, reading RGB as sRGB-encoded
+    /// values clamped to [0,1] (the pixel model holds encoded values,
+    /// ADR 455). What a `PerceptualDeltaE` tolerance bounds.
+    pub mean_delta_e: f64,
+}
+
+/// Mean ΔE00 between two f16 RGBA buffers' RGB channels.
+fn mean_delta_e(want: &[[f32; 4]], got: &[[f32; 4]]) -> f64 {
+    if want.is_empty() {
+        return 0.0;
+    }
+    let lab = |p: &[f32; 4]| crate::delta_e::srgb_to_lab([p[0] as f64, p[1] as f64, p[2] as f64]);
+    want.iter()
+        .zip(got)
+        .map(|(w, g)| crate::delta_e::ciede2000(lab(w), lab(g)))
+        .sum::<f64>()
+        / want.len() as f64
 }
 
 /// Run `def` on the test GPU and the scalar reference over the same
@@ -135,21 +152,31 @@ pub fn parity<P: bytemuck::Pod>(
     let zero = Px([0.0; 4]);
     let mut max_ulp = 0u32;
     let mut worst_at = (0usize, 0usize);
+    let mut wants = Vec::with_capacity((w * h) as usize);
+    let mut gots = Vec::with_capacity((w * h) as usize);
     for i in 0..(w * h) as usize {
         let a = quant[0][i];
         let b = if def.inputs == 2 { quant[1][i] } else { zero };
         let want = reference(a, b, params);
+        let mut got = [0f32; 4];
         for c in 0..4 {
             let want_bits = f32_to_f16_bits(want.0[c]);
             let got_bits = u16::from_le_bytes([gpu_out[i * 8 + c * 2], gpu_out[i * 8 + c * 2 + 1]]);
+            got[c] = half::f16::from_bits(got_bits).to_f32();
             let d = f16_ulp_distance(want_bits, got_bits);
             if d > max_ulp {
                 max_ulp = d;
                 worst_at = (i, c);
             }
         }
+        wants.push(want.0);
+        gots.push(got);
     }
-    Some(ParityResult { max_ulp, worst_at })
+    Some(ParityResult {
+        max_ulp,
+        worst_at,
+        mean_delta_e: mean_delta_e(&wants, &gots),
+    })
 }
 
 /// Windowed/resample parity (ABI v1.1 module kernels): the GPU lane
@@ -185,23 +212,33 @@ pub fn parity_windowed<P: bytemuck::Pod>(
     let quant = window.quantized_px();
     let mut max_ulp = 0u32;
     let mut worst_at = (0usize, 0usize);
+    let mut wants = Vec::with_capacity((out_w * out_h) as usize);
+    let mut gots = Vec::with_capacity((out_w * out_h) as usize);
     for oy in 0..out_h {
         for ox in 0..out_w {
             let i = (oy * out_w + ox) as usize;
             let want = reference(&quant, window.w, window.h, ox, oy, params);
+            let mut got = [0f32; 4];
             for c in 0..4 {
                 let want_bits = f32_to_f16_bits(want.0[c]);
                 let got_bits =
                     u16::from_le_bytes([gpu_out[i * 8 + c * 2], gpu_out[i * 8 + c * 2 + 1]]);
+                got[c] = half::f16::from_bits(got_bits).to_f32();
                 let d = f16_ulp_distance(want_bits, got_bits);
                 if d > max_ulp {
                     max_ulp = d;
                     worst_at = (i, c);
                 }
             }
+            wants.push(want.0);
+            gots.push(got);
         }
     }
-    Some(ParityResult { max_ulp, worst_at })
+    Some(ParityResult {
+        max_ulp,
+        worst_at,
+        mean_delta_e: mean_delta_e(&wants, &gots),
+    })
 }
 
 /// Assert a parity result satisfies the kernel's declared tolerance.
@@ -209,8 +246,14 @@ pub fn assert_within(result: ParityResult, def: &KernelDef) {
     let limit = match def.gpu_tolerance {
         Tolerance::Exact => 0,
         Tolerance::ChannelEpsF16(n) => n,
-        Tolerance::PerceptualDeltaE(_) => {
-            unimplemented!("ΔE tolerances arrive with the T1 color kernels")
+        Tolerance::PerceptualDeltaE(bound) => {
+            assert!(
+                result.mean_delta_e <= bound as f64,
+                "{}: mean ΔE00 {:.4} exceeds declared tolerance {bound}",
+                def.id,
+                result.mean_delta_e,
+            );
+            return;
         }
     };
     assert!(

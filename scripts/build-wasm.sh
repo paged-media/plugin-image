@@ -21,7 +21,12 @@ OUT=glue/wasm
 # total. Mirrors plugin-sdk WASM_BUDGETS — change them together.
 BUDGET=$((100 * 1000 * 1000))
 
-cargo build --release --target wasm32-unknown-unknown -p image-js
+# Stamp the source hash into the wasm and beside it, so
+# glue/test/wasm-fresh.spec.ts can tell a committed wasm built from these
+# sources from one built from older ones.
+SOURCE_HASH=$(node scripts/source-hash.mjs)
+IMAGE_JS_SOURCE_HASH=$SOURCE_HASH \
+  cargo build --release --target wasm32-unknown-unknown -p image-js
 
 # Pin check: wasm-bindgen-cli must match the Cargo.lock wasm-bindgen.
 LOCKED=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
@@ -46,6 +51,8 @@ fi
 # manifest/, which is what the plugin-cli size gate measures. Both must
 # be the same artifact — mirror it so the two never drift (they did:
 # the gate was measuring a stale copy).
+echo "$SOURCE_HASH" > "$OUT/SOURCE_HASH"
+
 mkdir -p manifest/wasm
 cp "$OUT"/image_js.js "$OUT"/image_js.d.ts \
    "$OUT"/image_js_bg.wasm "$OUT"/image_js_bg.wasm.d.ts manifest/wasm/

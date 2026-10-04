@@ -16,7 +16,7 @@ stood, for decisions made earlier; their status says so.
 | [450](450-gpu-only-kernels.md) | Kernels execute on the GPU only; the scalar twin is for tests | Accepted, recorded retroactively 2026-10-02 |
 | [451](451-one-kernel-definition.md) | One kernel definition feeds both lanes | Accepted, recorded retroactively 2026-10-02 |
 | [452](452-kernel-abi.md) | The frozen shader kernel ABI (v1, amended to v1.1) | Accepted, recorded retroactively 2026-10-02 |
-| [453](453-tolerance-not-golden-bytes.md) | GPU output is verified against the scalar reference by tolerance, never by golden bytes | Accepted, recorded retroactively 2026-10-02 |
+| [453](453-tolerance-not-golden-bytes.md) | GPU output is verified against the scalar reference by tolerance, never by golden bytes | Accepted, recorded retroactively 2026-10-02 (amended 2026-10-04) |
 | [454](454-two-evaluation-engines.md) | Two evaluation engines over one kernel set | Accepted, recorded retroactively 2026-10-02 |
 | [455](455-pixel-model.md) | The pixel model: explicit format, 16-bit float working tiles | Accepted, recorded retroactively 2026-10-02 |
 | [456](456-codecs.md) | Codecs are pure-Rust, permissively licensed adapters behind I/O-free traits | Accepted, recorded retroactively 2026-10-02 |

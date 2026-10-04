@@ -62,8 +62,10 @@ What `paged.image` ships and what it does not, read from the code at commit `f7d
 - **PSD.** The composite decode takes 8- and 16-bit RGB or greyscale, raw or RLE (not 16-bit RLE); other modes and depths are
   refused. Layers are imported only from RGB files without groups or layer masks and within 384 MiB. Save-back is 8-bit RGB: it
   replaces the pixels of a single canvas-sized layer or writes a new single-layer file. The session's layer stack is never written
-  to a file as layers. "Apply to file" and the PNG and JPEG exporters encode the composite; the PSD exporter does so only when the
-  parameters are not the identity, and otherwise returns the retained file ([ADR 460](adr/460-document-is-not-the-store.md)).
+  to a file as layers. "Apply to file" and the PNG and JPEG exporters encode the composite. The PSD exporter returns the retained file
+  byte for byte only when the parameters are the identity and the pixels have not been edited since ingest; otherwise it
+  runs the save-back, and when the save-back declines (a size change, a non-RGB or non-8-bit file) it exports nothing
+  and says why (`glue/src/session.ts`, `psdExportBytes`; [ADR 460](adr/460-document-is-not-the-store.md)).
 - **Layers and undo.** Every layer is canvas-sized. A crop, resize or straighten replaces
   the stack with one layer and drops the history. The journal holds at most 32 entries and
   256 MiB, records pixels only, and is cleared when a layer is removed.
@@ -72,8 +74,12 @@ What `paged.image` ships and what it does not, read from the code at commit `f7d
   shape blur, layer offset and smart-object layers. **Called only by tests:** Engine B's
   op-node evaluation, the texture pool, batched dispatch, and the residency manager, whose
   third tier (scratch storage) returns an error.
-- **Tests.** Comparisons of GPU output with the scalar reference skip without an adapter,
-  and CI has none. The perceptual tolerance arm of the harness is `unimplemented!`.
+- **Tests.** Device tests skip without a GPU adapter unless `REQUIRE_GPU=1` is set, which
+  turns the skip into a failure (`image-gpu/src/test_support.rs`). CI runs them on a software
+  Vulkan adapter for every pull request and on Apple silicon after merges to main
+  (`.github/workflows/ci.yml`, jobs `gpu-sw` and `gpu-metal`). The bundle specs run against a
+  wasm built from the same commit; `glue/test/wasm-fresh.spec.ts` fails when the wasm was
+  built from other sources.
 - **Manifest.** It declares `rendering: hitTest` and `workers.sharedMemory`, which the
   bundle does not use, and caps the wasm at 8 MiB while the build script stops at 100 MB.
   The shipped `panels/image-adjustments.panel.json` is read by nothing.
@@ -87,4 +93,4 @@ What `paged.image` ships and what it does not, read from the code at commit `f7d
   JPEG XL as planned, camera RAW and HEIC as out of scope ([ADR 456](adr/456-codecs.md)).
 - A writer for PSD descriptors, which are parsed read-only (`registry/psd-blocks.yaml`).
 - Runners for the libvips and GEGL oracles that 83 rows of `registry/kernels.yaml` name
-  (every row has `status: implemented`), and a CI lane with a GPU adapter.
+  (every row has `status: implemented`).
