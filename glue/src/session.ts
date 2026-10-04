@@ -78,6 +78,7 @@ import {
   type ImageHistogram,
   type LayerHistory,
   type LayerStackInfo,
+  type EditTarget,
   type PsdLayerInfo,
   type RasterFormat,
   type ResampleFilter,
@@ -85,6 +86,9 @@ import {
   type SelectionModifyOp,
   type Rgba01,
   SAMPLING_TOOLS,
+  TONE_TOOLS,
+  DEFAULT_TONE,
+  type ToneOptions,
   type LevelsParams,
   type SelectionStats,
   type StrokeTool,
@@ -343,6 +347,8 @@ export interface ImageSessionState {
    *  set. Session state rather than stroke state: the anchor SURVIVES a
    *  stroke, which is what makes repeated retouching strokes usable. */
   cloneSource: { x: number; y: number; aligned: boolean } | null;
+  /** The dodge / burn / sponge options, frozen into each such stroke. */
+  tone: ToneOptions;
   /** The per-channel readout for the ingested source (R/G/B/A + luma),
    *  or null before an ingest. Refreshed alongside the histogram, from
    *  the same buffer, so the two never disagree. */
@@ -513,6 +519,9 @@ export interface ImageSession {
   /** RED-EYE removal inside the ellipse that fits the box `(x, y, w, h)`
    *  (image px); `darken` 0–1 (default 0.5). */
   applyRedEye(box: { x: number; y: number; w: number; h: number }, darken?: number): Promise<boolean>;
+  /** PATCH: replace the selection with the region (dx, dy) image px away,
+   *  healed so it blends. Needs a selection. */
+  patchSelection(dx: number, dy: number): Promise<boolean>;
   /** NOISE ▸ Median (3×3). */
   applyMedian(): Promise<boolean>;
   /** OTHER ▸ Maximum ("max") / Minimum ("min"), 3×3. */
@@ -719,6 +728,8 @@ export interface ImageSession {
    *  the brush. Unaligned restarts from the anchor on every stroke,
    *  which is how a motif is stamped repeatedly. */
   setCloneAligned(aligned: boolean): void;
+  /** Merge into the dodge / burn / sponge options. */
+  setTone(patch: Partial<ToneOptions>): void;
   setBrushParams(p: Partial<BrushParams>): void;
   /** Load a Photoshop `.abr` brush library. Parses only — nothing about
    *  the current brush changes until `applyBrushPreset`. Resolves false
@@ -796,6 +807,14 @@ export interface ImageSession {
   setGroupPassThrough(id: number, passThrough: boolean): Promise<boolean>;
   /** Delete the mask outright. */
   clearLayerMask(index: number): Promise<boolean>;
+  /** ADD LAYER MASK to `index` — reveal all (white, nothing changes until
+   *  it is painted) or hide all (black). The mask becomes the paint
+   *  tools' target, so the next stroke paints it. One undo step. */
+  addLayerMask(index: number, revealAll: boolean): Promise<boolean>;
+  /** Point the paint tools at `index`'s pixels or at its layer MASK (and
+   *  make it active). On the mask the brush paints the foreground's grey
+   *  and the eraser paints white (reveals). */
+  setEditTarget(index: number, target: EditTarget): boolean;
   /** Convert a pixel layer into a smart object (one-way — the source is
    *  preserved and going back would discard it). */
   makeLayerSmart(index: number): Promise<boolean>;
@@ -949,6 +968,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     },
     ptPerPx: null,
     cloneSource: null,
+    tone: { ...DEFAULT_TONE },
     channels: null,
     brushLibrary: null,
     brushLibraryName: null,
@@ -1982,6 +2002,15 @@ export function createImageSession(host: BundleHost): ImageSession {
       return api.applyEffect("Red eye", (h) =>
         engine!.applyRedEye(h, box.x + box.w / 2, box.y + box.h / 2, box.w / 2, box.h / 2, darken),
       );
+    },
+
+    async patchSelection(dx, dy) {
+      if (!state.selection) {
+        setStatus("Patch needs a selection — select the area to replace, then drag it onto the source.");
+        return false;
+      }
+      if (Math.round(dx) === 0 && Math.round(dy) === 0) return false;
+      return api.applyEffect("Patch", (h) => engine!.patchSelection(h, dx, dy));
     },
 
     async applyMedian() {
@@ -3276,6 +3305,12 @@ export function createImageSession(host: BundleHost): ImageSession {
       );
     },
 
+    setTone(patch) {
+      state.tone = { ...state.tone, ...patch };
+      state.tone.exposure = Math.min(1, Math.max(0, state.tone.exposure));
+      emit();
+    },
+
     setCloneAligned(aligned) {
       state.cloneSource = state.cloneSource
         ? { ...state.cloneSource, aligned }
@@ -3431,6 +3466,7 @@ export function createImageSession(host: BundleHost): ImageSession {
             state.cloneSource.aligned,
           );
         }
+        if (TONE_TOOLS.includes(tool)) engine.brushSetTone(state.tone);
       } catch (err) {
         setStatus(`Paint failed: ${err instanceof Error ? err.message : err}`);
         return false;
@@ -3739,6 +3775,40 @@ export function createImageSession(host: BundleHost): ImageSession {
         );
       }
       return ok;
+    },
+
+    async addLayerMask(index, revealAll) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerAddMask(index, revealAll);
+      } catch (err) {
+        setStatus(`Add layer mask failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      const ok = await finishMaskEdit();
+      if (ok) {
+        setStatus(
+          (revealAll
+            ? "Added a reveal-all mask"
+            : "Added a hide-all mask — the layer is hidden until you paint it back in") +
+            ". Paint tools now edit the mask: the brush paints the foreground's grey, " +
+            "the eraser reveals.",
+        );
+      }
+      return ok;
+    },
+
+    setEditTarget(index, target) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerSetEditTarget(index, target);
+      } catch (err) {
+        setStatus(`Edit target failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      refreshLayers();
+      emit();
+      return true;
     },
 
     async clearLayerMask(index) {

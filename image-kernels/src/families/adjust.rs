@@ -2284,6 +2284,132 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
 "
 );
 
+// ─────────────────────────── dodge_burn ────────────────────────────
+//
+// The DODGE / BURN / SPONGE brushes' kernel (the stroke compositor masks
+// it by the dabs' coverage, so the brush decides WHERE and this decides
+// WHAT). On UNpremultiplied rgb clamped to [0, 1]:
+//
+//   y = 0.299·r + 0.587·g + 0.114·b              (Rec. 601 luma)
+//   w = shadows: (1 − y)²  midtones: 4·y·(1 − y)  highlights: y²
+//   k = amount · w
+//   dodge   c' = c + k·(1 − c)        (a screen-like lift toward white)
+//   burn    c' = c·(1 − k)            (a multiply-like fall toward black)
+//   sponge  c' = clamp(y + (c − y)·(1 ± amount), 0, 1)
+//           (+ saturates, − desaturates; the range is not used)
+//
+// re-premultiplied, alpha preserved; `amount` 0 is the identity in every
+// mode. PROVENANCE: dodging and burning are the darkroom terms for giving
+// a region less or more exposure; the tonal-range weights are the three
+// quadratic Bernstein basis polynomials of the luma (B₀ = (1 − y)²,
+// B₂ = y², and the midtone hump 2·B₁ = 4·y·(1 − y), which peaks at 1 on
+// mid-grey); lifting toward white by c + k(1 − c) and lowering toward
+// black by c(1 − k) are the textbook screen / multiply against a constant
+// grey k; the sponge is the linear saturation operator about the luma
+// (Haeberli, "Matrix Operations for Image Processing", 1993). Semantics
+// from the published descriptions of the tools; no reference reading.
+
+/// Dodge/burn/sponge params. `mode`: 0 dodge, 1 burn, 2 sponge saturate,
+/// 3 sponge desaturate. `range`: 0 shadows, 1 midtones, 2 highlights
+/// (dodge and burn only). `amount` 0–1: the EXPOSURE for dodge/burn, the
+/// strength for the sponge.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustDodgeBurnParams {
+    pub mode: u32,
+    pub range: u32,
+    pub amount: f32,
+    pub _abi_pad: u32,
+}
+
+impl AdjustDodgeBurnParams {
+    pub const DODGE: u32 = 0;
+    pub const BURN: u32 = 1;
+    pub const SPONGE_SATURATE: u32 = 2;
+    pub const SPONGE_DESATURATE: u32 = 3;
+    pub const SHADOWS: u32 = 0;
+    pub const MIDTONES: u32 = 1;
+    pub const HIGHLIGHTS: u32 = 2;
+
+    pub fn new(mode: u32, range: u32, amount: f32) -> Self {
+        Self {
+            mode,
+            range,
+            amount,
+            _abi_pad: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const DODGE_BURN_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "mode",
+        wgsl_ty: "u32",
+    },
+    ParamField {
+        name: "range",
+        wgsl_ty: "u32",
+    },
+    ParamField {
+        name: "amount",
+        wgsl_ty: "f32",
+    },
+];
+
+/// Dodge / burn by tonal range, and the sponge (see the section note).
+pub static ADJUST_DODGE_BURN: KernelDef = KernelDef {
+    id: "adjust.dodge_burn",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustDodgeBurnParams>(),
+        fields: DODGE_BURN_PARAMS_FIELDS,
+    },
+    wgsl: DODGE_BURN_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(4),
+};
+
+const DODGE_BURN_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    mode: u32,
+    range: u32,
+    amount: f32,
+    _abi_pad: u32,
+}",
+    "
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = clamp(unpremul_rgb(a), vec3<f32>(0.0), vec3<f32>(1.0));
+    let y = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+    var o = c;
+    if (params.mode >= 2u) {
+        var f = 1.0 - params.amount;
+        if (params.mode == 2u) { f = 1.0 + params.amount; }
+        o = clamp(vec3<f32>(y) + (c - vec3<f32>(y)) * f, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else {
+        var w = y * y;
+        if (params.range == 0u) {
+            w = (1.0 - y) * (1.0 - y);
+        } else if (params.range == 1u) {
+            w = 4.0 * y * (1.0 - y);
+        }
+        let k = params.amount * w;
+        if (params.mode == 0u) {
+            o = c + (vec3<f32>(1.0) - c) * k;
+        } else {
+            o = c * (1.0 - k);
+        }
+    }
+    return vec4<f32>(o * a.a, a.a);
+}
+"
+);
+
 pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_LUT1D,
     &ADJUST_LUT3D,
@@ -2305,4 +2431,5 @@ pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_LEVELS_RGB,
     &ADJUST_SELECTIVE_COLOR,
     &ADJUST_HUE_SATURATION,
+    &ADJUST_DODGE_BURN,
 ];

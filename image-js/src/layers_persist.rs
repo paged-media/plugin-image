@@ -333,6 +333,7 @@ impl LayerStack {
             undone: Vec::new(),
             dropped_steps: 0,
             structure_generation: 0,
+            edit_mask: false,
             fold: Default::default(),
         })
     }

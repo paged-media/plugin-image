@@ -423,6 +423,32 @@ fn alpha_of(rgba: &[u8]) -> Vec<u8> {
     rgba.chunks_exact(4).map(|p| p[3]).collect()
 }
 
+/// The journal-scope bit that marks an entry as a MASK edit. Layer ids
+/// are `u32`, so the bit above them can never collide with a pixel
+/// entry's scope.
+pub const MASK_SCOPE_BIT: u64 = 1 << 32;
+
+/// The journal scope of layer `id`'s mask.
+pub fn mask_scope(id: u32) -> u64 {
+    u64::from(id) | MASK_SCOPE_BIT
+}
+
+/// A mask as an opaque grey RGBA8 plate (`v, v, v, 255`).
+pub fn mask_to_grey(mask: &SelectionCoverage) -> Arc<[u8]> {
+    let mut out = Vec::with_capacity(mask.data().len() * 4);
+    for &v in mask.data() {
+        out.extend_from_slice(&[v, v, v, 255]);
+    }
+    Arc::from(out.into_boxed_slice())
+}
+
+/// Read a painted grey plate back as a mask: the RED channel. The plate
+/// stays grey through a stroke — every paint colour on it is a grey —
+/// so red, green and blue agree and any one of them is the value.
+pub fn mask_from_grey(width: u32, height: u32, rgba: &[u8]) -> Option<SelectionCoverage> {
+    SelectionCoverage::from_data(width, height, rgba.chunks_exact(4).map(|p| p[0]).collect())
+}
+
 /// A layer's own coverage AND its clip base, multiplied.
 ///
 /// Two coverages MULTIPLY — they do not override one another — so a
@@ -555,6 +581,13 @@ pub struct LayerStack {
     dropped_steps: u64,
     /// Bumped by every recorded or replayed structure step.
     structure_generation: u64,
+    /// The EDIT TARGET of the active layer: `true` when pixel tools write
+    /// its MASK rather than its pixels. Session state, not document state
+    /// (it is not in a [`Snapshot`] and is not persisted); it only means
+    /// something while the active layer HAS a mask, so it is read
+    /// through [`Self::edit_target_is_mask`] and reset whenever the
+    /// active layer changes.
+    edit_mask: bool,
     /// What the GPU-resident fold keeps between composites (plates, the
     /// checkpoint below the active layer, the last result). Keyed by
     /// identity, so it needs no invalidation — see `fold`.
@@ -659,6 +692,7 @@ impl LayerStack {
             undone: Vec::new(),
             dropped_steps: 0,
             structure_generation: 0,
+            edit_mask: false,
             fold: Default::default(),
         })
     }
@@ -744,6 +778,7 @@ impl LayerStack {
             undone: Vec::new(),
             dropped_steps: 0,
             structure_generation: 0,
+            edit_mask: false,
             fold: Default::default(),
         };
         if let Some(deep) = stack
@@ -1111,6 +1146,11 @@ impl LayerStack {
         if index >= self.layers.len() {
             return Err(IngestError::Unsupported(format!("no layer {index}")));
         }
+        if index != self.active {
+            // A new active layer starts on its PIXELS, as in Photoshop:
+            // the mask target belongs to the layer it was chosen on.
+            self.edit_mask = false;
+        }
         self.active = index;
         Ok(())
     }
@@ -1180,6 +1220,127 @@ impl LayerStack {
     pub fn set_mask_enabled(&mut self, index: usize, enabled: bool) -> Result<(), IngestError> {
         self.layer_mut(index)?.mask_enabled = enabled;
         Ok(())
+    }
+
+    /// ADD LAYER MASK in its two Photoshop forms: REVEAL ALL (all-one,
+    /// the layer looks unchanged until the mask is painted) or HIDE ALL
+    /// (all-zero, the layer disappears until it is painted back in).
+    /// Refused when the layer already has one — adding would silently
+    /// discard painted coverage; delete the old mask first.
+    pub fn add_mask(&mut self, index: usize, reveal_all: bool) -> Result<(), IngestError> {
+        if self.has_mask(index) {
+            return Err(IngestError::Unsupported(format!(
+                "layer {index} already has a mask — delete it before adding another"
+            )));
+        }
+        let (w, h) = (self.width, self.height);
+        let cov = if reveal_all {
+            SelectionCoverage::full(w, h)
+        } else {
+            SelectionCoverage::empty(w, h)
+        };
+        self.set_mask(index, Arc::new(cov))
+    }
+
+    /// Make `index` the active layer and choose what pixel tools write on
+    /// it: its pixels (`mask == false`) or its MASK. Choosing the mask of
+    /// a layer that has none is an error rather than a silent fall back
+    /// to pixels — a stroke the user meant for a mask landing in the
+    /// image would be the worst outcome.
+    pub fn set_edit_target(&mut self, index: usize, mask: bool) -> Result<(), IngestError> {
+        if mask && !self.has_mask(index) {
+            return Err(IngestError::Unsupported(format!(
+                "layer {index} has no mask to edit — add a layer mask first"
+            )));
+        }
+        self.set_active(index)?;
+        self.edit_mask = mask;
+        Ok(())
+    }
+
+    /// Do pixel tools currently write the ACTIVE layer's mask? True only
+    /// while the mask target was chosen AND the layer still has a mask
+    /// (an undo or a delete can take the mask away under the target).
+    pub fn edit_target_is_mask(&self) -> bool {
+        self.edit_mask && self.layers[self.active].mask.is_some()
+    }
+
+    /// The active layer's mask as an OPAQUE GREY RGBA8 plate (`v, v, v,
+    /// 255` per texel) — the buffer a stroke paints when the edit target
+    /// is the mask. Painting a mask is then painting a grey image through
+    /// the very same stroke compositor; [`mask_from_grey`] reads it back.
+    pub fn active_mask_as_grey(&self) -> Option<Arc<[u8]>> {
+        let m = self.layers[self.active].mask.as_ref()?;
+        Some(mask_to_grey(m))
+    }
+
+    /// Replace the ACTIVE layer's MASK, journaling the tiles `damage`
+    /// covers first — the mask twin of [`Self::edit_active`].
+    ///
+    /// The journal entry's scope is `layer id | MASK_SCOPE_BIT`, so the
+    /// one undo list replays it into the MASK of the right layer, even
+    /// when another layer (or that layer's pixels) is the target by then.
+    /// The journal is depth-agnostic, so a one-byte-per-texel mask needs
+    /// nothing from `image-graph` beyond `FlatImage`'s texel size.
+    pub fn edit_active_mask(
+        &mut self,
+        label: &str,
+        damage: Region,
+        mask: SelectionCoverage,
+    ) -> Result<RecordOutcome, IngestError> {
+        let (w, h) = (self.width, self.height);
+        if mask.width() != w || mask.height() != h {
+            return Err(IngestError::Decode(format!(
+                "mask edit is {}×{} for a {w}×{h} canvas",
+                mask.width(),
+                mask.height()
+            )));
+        }
+        let active = &self.layers[self.active];
+        if active.locked {
+            return Err(IngestError::Unsupported(format!(
+                "layer \"{}\" is locked",
+                active.name
+            )));
+        }
+        let Some(old) = active.mask.as_ref() else {
+            return Err(IngestError::Unsupported(format!(
+                "layer \"{}\" has no mask to edit",
+                active.name
+            )));
+        };
+        let clipped = damage
+            .intersect(Region::new(0, 0, w, h))
+            .unwrap_or(Region::new(0, 0, 0, 0));
+        let outcome = {
+            let view = FlatImage::new(w, h, 1, old.data())
+                .ok_or_else(|| IngestError::Decode("layer mask is mis-sized".into()))?;
+            self.journal
+                .record(label, mask_scope(active.id), &view, clipped)
+        };
+        self.layers[self.active].mask = Some(Arc::new(mask));
+        if matches!(outcome, RecordOutcome::Recorded { .. }) {
+            self.steps.push(Step::Pixels);
+            self.undone.clear();
+        }
+        self.sync_with_journal();
+        Ok(outcome)
+    }
+
+    /// Fold the stack with the ACTIVE layer's mask replaced by `mask` for
+    /// this composite only — how a mask stroke in flight previews. The
+    /// stack is restored before returning, whatever the outcome; nothing
+    /// about the fold itself changes (the mask is an ordinary mask).
+    pub async fn composite_with_active_mask(
+        &mut self,
+        ctx: Option<&GpuContext>,
+        mask: Arc<SelectionCoverage>,
+    ) -> Result<Arc<[u8]>, IngestError> {
+        let i = self.active;
+        let saved = self.layers[i].mask.replace(mask);
+        let out = self.composite(ctx, None).await;
+        self.layers[i].mask = saved;
+        out
     }
 
     // ── groups ───────────────────────────────────────────────────────
@@ -1673,6 +1834,9 @@ impl LayerStack {
         } else {
             self.journal.redo_scope()
         }?;
+        if scope & MASK_SCOPE_BIT != 0 {
+            return self.apply_mask_entry(scope & !MASK_SCOPE_BIT, undo);
+        }
         let idx = self.layers.iter().position(|l| l.id as u64 == scope)?;
         let (w, h) = (self.width, self.height);
         // The layer's OWN bytes, at its own depth — narrowing here
@@ -1690,7 +1854,31 @@ impl LayerStack {
         }?;
         self.layers[idx].rgba =
             crate::pixels::Pixels::from_raw(Arc::from(buf.into_boxed_slice()), depth);
+        if idx != self.active {
+            self.edit_mask = false;
+        }
         self.active = idx;
+        Some(label)
+    }
+
+    /// Replay one MASK journal entry into layer `id`'s mask. The layer
+    /// becomes active with its MASK as the edit target, so the change is
+    /// visibly where it happened.
+    fn apply_mask_entry(&mut self, id: u64, undo: bool) -> Option<String> {
+        let idx = self.layers.iter().position(|l| u64::from(l.id) == id)?;
+        let (w, h) = (self.width, self.height);
+        let mut buf: Vec<u8> = self.layers[idx].mask.as_ref()?.data().to_vec();
+        let label = {
+            let mut view = FlatImage::new(w, h, 1, buf.as_mut_slice())?;
+            if undo {
+                self.journal.undo(&mut view)
+            } else {
+                self.journal.redo(&mut view)
+            }
+        }?;
+        self.layers[idx].mask = Some(Arc::new(SelectionCoverage::from_data(w, h, buf)?));
+        self.active = idx;
+        self.edit_mask = true;
         Some(label)
     }
 
@@ -4029,5 +4217,213 @@ mod tests {
             base.to_vec(),
             "an identity adjustment through the f16 path changes nothing"
         );
+    }
+
+    // ── mask painting: the edit target ───────────────────────────────
+
+    /// A two-layer stack: grey 128 background, an opaque WHITE layer on
+    /// top (active).
+    fn two_layers(w: u32, h: u32) -> LayerStack {
+        let mut s = stack(w, h);
+        let top = s.add("Top");
+        s.layers[top].rgba = crate::pixels::Pixels::from_rgba8(px(w, h, 255));
+        s
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn add_mask_comes_in_reveal_all_and_hide_all_and_refuses_a_second__feat__image_editor_mask_painting(
+    ) {
+        let mut s = two_layers(8, 8);
+        s.add_mask(1, true).expect("reveal all");
+        assert!(s.layers[1].mask.as_ref().unwrap().is_all_one());
+        assert!(
+            s.layers[1].live_mask().is_none(),
+            "a reveal-all mask is the identity, so the fold pays nothing for it"
+        );
+        let err = s.add_mask(1, false).expect_err("a second mask is refused");
+        assert!(err.to_string().contains("already has a mask"), "{err}");
+        s.clear_mask(1).expect("clear");
+        s.add_mask(1, false).expect("hide all");
+        assert!(s.layers[1].mask.as_ref().unwrap().is_all_zero());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_edit_target_needs_a_mask_and_follows_the_active_layer__feat__image_editor_mask_painting()
+    {
+        let mut s = two_layers(8, 8);
+        assert!(!s.edit_target_is_mask(), "a stack starts on pixels");
+        assert!(
+            s.set_edit_target(1, true).is_err(),
+            "no mask, no mask target — never a silent fall back to pixels"
+        );
+        s.add_mask(1, true).expect("mask");
+        s.set_edit_target(1, true).expect("target the mask");
+        assert!(s.edit_target_is_mask());
+        // Re-selecting the same layer keeps the target …
+        s.set_active(1).expect("same layer");
+        assert!(s.edit_target_is_mask());
+        // … another layer starts on its pixels.
+        s.set_active(0).expect("other layer");
+        assert!(!s.edit_target_is_mask());
+        s.set_edit_target(1, true).expect("back to the mask");
+        // Deleting the mask takes the target with it.
+        s.clear_mask(1).expect("clear");
+        assert!(!s.edit_target_is_mask());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_grey_plate_round_trips_a_mask_exactly__feat__image_editor_mask_painting() {
+        let data: Vec<u8> = (0..64u32).map(|i| (i * 4) as u8).collect();
+        let m = SelectionCoverage::from_data(8, 8, data.clone()).expect("mask");
+        let grey = mask_to_grey(&m);
+        assert!(grey
+            .chunks_exact(4)
+            .all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255));
+        assert_eq!(mask_from_grey(8, 8, &grey).expect("back").data(), &data[..]);
+        assert_ne!(mask_scope(7), 7, "a mask scope never equals a pixel scope");
+        assert_eq!(mask_scope(7) & !MASK_SCOPE_BIT, 7);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_mask_edit_is_one_step_on_the_one_undo_list_and_replays_into_the_mask__feat__image_editor_mask_painting(
+    ) {
+        let mut s = two_layers(16, 16);
+        s.recorded("Add mask", None, |st| st.add_mask(1, false))
+            .expect("mask");
+        s.set_edit_target(1, true).expect("target");
+        let pixels_before = s.layers[1].rgba.raw_arc();
+        let mut painted = vec![0u8; 256];
+        for y in 4..8 {
+            for x in 4..8 {
+                painted[y * 16 + x] = 255;
+            }
+        }
+        let new = SelectionCoverage::from_data(16, 16, painted.clone()).unwrap();
+        let out = s
+            .edit_active_mask("Paint mask", Region::new(4, 4, 4, 4), new)
+            .expect("edit");
+        assert!(matches!(out, RecordOutcome::Recorded { .. }));
+        assert_eq!(s.layers[1].mask.as_ref().unwrap().data(), &painted[..]);
+        assert_eq!(
+            s.layers[1].rgba.raw_arc(),
+            pixels_before,
+            "a mask edit leaves the layer's pixels alone"
+        );
+        assert_eq!(s.undo_labels(), vec!["Add mask", "Paint mask"]);
+
+        // Move away first: undo must find the MASK of layer 1 regardless.
+        s.set_active(0).expect("elsewhere");
+        assert_eq!(s.undo().as_deref(), Some("Paint mask"));
+        assert!(s.layers[1].mask.as_ref().unwrap().is_all_zero(), "undone");
+        assert_eq!(s.active_index(), 1, "undo lands where the edit was");
+        assert!(s.edit_target_is_mask(), "… on the mask");
+        assert_eq!(s.redo().as_deref(), Some("Paint mask"));
+        assert_eq!(s.layers[1].mask.as_ref().unwrap().data(), &painted[..]);
+        // Undo past it removes the mask itself (the structure step).
+        s.undo();
+        assert_eq!(s.undo().as_deref(), Some("Add mask"));
+        assert!(!s.has_mask(1));
+        assert!(!s.edit_target_is_mask());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_mask_edit_needs_a_mask_and_honours_the_lock__feat__image_editor_mask_painting() {
+        let mut s = two_layers(4, 4);
+        let m = || SelectionCoverage::full(4, 4);
+        assert!(s
+            .edit_active_mask("x", Region::new(0, 0, 4, 4), m())
+            .is_err());
+        s.add_mask(1, false).expect("mask");
+        s.set_locked(1, true).expect("lock");
+        assert!(s
+            .edit_active_mask("x", Region::new(0, 0, 4, 4), m())
+            .is_err());
+        s.set_locked(1, false).expect("unlock");
+        let wrong = SelectionCoverage::full(2, 2);
+        assert!(s
+            .edit_active_mask("x", Region::new(0, 0, 4, 4), wrong)
+            .is_err());
+        assert!(s.undo_labels().is_empty(), "no refusal spent an undo step");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn painting_a_hide_all_mask_reveals_the_layer_under_the_stroke__feat__image_editor_mask_painting(
+    ) {
+        // End to end on the device: hide-all mask on a white layer over
+        // grey; an ERASER stroke on the mask target paints WHITE into the
+        // mask, so the white layer shows through exactly under the
+        // stroke and nowhere else. The preview composite (mask override)
+        // equals the committed composite byte for byte.
+        let Some(ctx) = device() else { return };
+        let (w, h) = (48u32, 32u32);
+        let mut s = two_layers(w, h);
+        s.add_mask(1, false).expect("hide all");
+        s.set_edit_target(1, true).expect("target");
+        let hidden = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert!(hidden.chunks_exact(4).all(|p| p[0] == 128), "fully hidden");
+
+        let mut p = crate::stroke::StrokeParams::defaults(crate::stroke::StrokeTool::Eraser);
+        p.size = 8.0;
+        p.hardness = 1.0;
+        let p = p.for_mask_target();
+        let grey = s.active_mask_as_grey().expect("grey plate");
+        let mut stroke =
+            crate::stroke::StrokeSession::begin_on(1, w, h, grey, p, None).expect("begin");
+        for x in [12.0f32, 18.0, 24.0] {
+            pollster::block_on(stroke.extend(ctx, image_gpu::dab::StrokeSample::new(x, 16.0, 1.0)))
+                .expect("extend");
+        }
+        let bounds = stroke.stroke_bounds().expect("painted");
+        let painted = stroke.commit();
+        let mask = mask_from_grey(w, h, &painted).expect("mask");
+        let preview =
+            pollster::block_on(s.composite_with_active_mask(Some(ctx), Arc::new(mask.clone())))
+                .expect("preview");
+        assert!(
+            s.layers[1].mask.as_ref().unwrap().is_all_zero(),
+            "the preview restored the real mask"
+        );
+        s.edit_active_mask("Paint mask", bounds, mask)
+            .expect("commit");
+        let after = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert_eq!(preview.to_vec(), after.to_vec(), "preview == commit");
+        let at = |x: u32, y: u32| after[((y * w + x) * 4) as usize];
+        assert_eq!(at(18, 16), 255, "the stroke revealed the white layer");
+        assert_eq!(at(2, 2), 128, "away from the stroke the layer stays hidden");
+        assert_eq!(at(40, 28), 128);
+        // One undo puts the mask — and so the composite — back.
+        assert_eq!(s.undo().as_deref(), Some("Paint mask"));
+        let undone = pollster::block_on(s.composite(Some(ctx), None)).expect("composite");
+        assert_eq!(undone.to_vec(), hidden.to_vec());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_mask_stroke_paints_the_foregrounds_grey_and_the_eraser_paints_white__feat__image_editor_mask_painting(
+    ) {
+        use crate::stroke::{StrokeParams, StrokeTool};
+        let mut brush = StrokeParams::defaults(StrokeTool::Brush);
+        brush.color = [1.0, 0.0, 0.0, 0.5];
+        let m = brush.for_mask_target();
+        assert_eq!(m.tool, StrokeTool::Brush);
+        assert!(
+            (m.color[0] - 0.299).abs() < 1e-6,
+            "red's luma: {:?}",
+            m.color
+        );
+        assert_eq!(m.color[0], m.color[1]);
+        assert_eq!(m.color[3], 1.0, "a mask paints opaque grey");
+        let e = StrokeParams::defaults(StrokeTool::Eraser).for_mask_target();
+        assert_eq!(e.tool, StrokeTool::Brush, "erasing a mask PAINTS white");
+        assert_eq!(e.color, [1.0, 1.0, 1.0, 1.0]);
+        assert!(e.tool.antialias(), "with the eraser's antialiased tip");
+        let c = StrokeParams::defaults(StrokeTool::Clone).for_mask_target();
+        assert_eq!(c.tool, StrokeTool::Clone, "sampling tools are unchanged");
     }
 }

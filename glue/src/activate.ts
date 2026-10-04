@@ -46,6 +46,7 @@ import { makeMoveGesture } from "./move-tool";
 import { makeBucketGesture } from "./bucket-tool";
 import { makeGradientGesture } from "./gradient-tool";
 import { makeRedEyeGesture } from "./red-eye-tool";
+import { makePatchGesture } from "./patch-tool";
 import { makeSelectionGesture } from "./selection-tool";
 import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 import { makeTypeGesture } from "./type-tool";
@@ -58,6 +59,13 @@ const MOVE_TOOL_ID = "media.paged.image.tool.move";
 const BUCKET_TOOL_ID = "media.paged.image.tool.bucket";
 const GRADIENT_TOOL_ID = "media.paged.image.tool.gradient";
 const RED_EYE_TOOL_ID = "media.paged.image.tool.redEye";
+const DODGE_TOOL_ID = "media.paged.image.tool.dodge";
+const BURN_TOOL_ID = "media.paged.image.tool.burn";
+const SPONGE_TOOL_ID = "media.paged.image.tool.sponge";
+const BLUR_TOOL_ID = "media.paged.image.tool.blur";
+const SHARPEN_TOOL_ID = "media.paged.image.tool.sharpen";
+const SPOT_HEAL_TOOL_ID = "media.paged.image.tool.spotHeal";
+const PATCH_TOOL_ID = "media.paged.image.tool.patch";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -419,6 +427,56 @@ export function activate(host: BundleHost): BundleHandle {
     gesture: () => makeBrushGesture(host, session, "heal"),
   });
 
+  // ── TONING: dodge / burn / sponge ──
+  //
+  // FILTER STROKES: the same gesture, tip, spacing, pressure and
+  // selection masking as the brush, but the dabs deposit no paint — their
+  // coverage masks `adjust.dodge_burn` on the layer. They share the clone
+  // stamp's rail slot (the retouching slot) and take no shortcut.
+  for (const [id, title, tool] of [
+    [DODGE_TOOL_ID, "Dodge", "dodge"],
+    [BURN_TOOL_ID, "Burn", "burn"],
+    [SPONGE_TOOL_ID, "Sponge", "sponge"],
+    // Blur / sharpen: the same filter-stroke lane over the unsharp chain;
+    // the brush's flow is their strength.
+    [BLUR_TOOL_ID, "Blur (brush)", "blur"],
+    [SHARPEN_TOOL_ID, "Sharpen (brush)", "sharpen"],
+  ] as const) {
+    contributeTool(host, {
+      id,
+      title,
+      icon: "tool-clone",
+      group: CLONE_TOOL_ID,
+      section: "drawType",
+      cursor: PAINT_CURSOR,
+      gesture: () => makeBrushGesture(host, session, tool),
+    });
+  }
+
+  // SPOT HEALING BRUSH — shares the healing brush's slot; no anchor, no
+  // shortcut. The heal lands on release (the engine searches for the
+  // source then).
+  contributeTool(host, {
+    id: SPOT_HEAL_TOOL_ID,
+    title: "Spot healing brush",
+    icon: "tool-heal",
+    group: HEAL_TOOL_ID,
+    section: "drawType",
+    cursor: PAINT_CURSOR,
+    gesture: () => makeBrushGesture(host, session, "spot-heal"),
+  });
+
+  // PATCH — drag the selection onto the area to copy from; it is replaced
+  // and healed on release. Shares the healing brush's slot; no shortcut.
+  contributeTool(host, {
+    id: PATCH_TOOL_ID,
+    title: "Patch",
+    icon: "tool-heal",
+    group: HEAL_TOOL_ID,
+    section: "drawType",
+    gesture: () => makePatchGesture(host, session),
+  });
+
   // GENERATE — the `gen.*` family's editor reach. Fills the CURRENT
   // SELECTION (the whole image when there is none) with a fixed
   // two-stop gradient or with noise, composited through the coverage
@@ -470,6 +528,22 @@ export function activate(host: BundleHost): BundleHandle {
       void session.addLayer();
     },
   });
+  // ADD LAYER MASK, Photoshop's two forms. The mask becomes the paint
+  // tools' target (the panel's M toggle switches back to pixels).
+  for (const [suffix, title, reveal] of [
+    ["addLayerMask", "Add layer mask (reveal all)", true],
+    ["addLayerMaskHideAll", "Add layer mask (hide all)", false],
+  ] as const) {
+    host.contribute.command({
+      id: `media.paged.image.command.${suffix}`,
+      title,
+      category: "Image",
+      handler: () => {
+        host.shell.openPanel(PANEL_ID);
+        void session.addLayerMask(session.state().layers.active, reveal);
+      },
+    });
+  }
   host.contribute.command({
     id: "media.paged.image.command.bakeAdjustToLayer",
     title: "Bake adjustments into the active layer",
@@ -878,6 +952,13 @@ export function activate(host: BundleHost): BundleHandle {
         BUCKET_TOOL_ID,
         GRADIENT_TOOL_ID,
         RED_EYE_TOOL_ID,
+        DODGE_TOOL_ID,
+        BURN_TOOL_ID,
+        SPONGE_TOOL_ID,
+        BLUR_TOOL_ID,
+        SHARPEN_TOOL_ID,
+        SPOT_HEAL_TOOL_ID,
+        PATCH_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host

@@ -893,6 +893,26 @@ export function brush_stroke_set_source(x, y, aligned) {
 }
 
 /**
+ * Set the IN-FLIGHT dodge / burn / sponge stroke's options:
+ * `range` ∈ `shadows | midtones | highlights` and `exposure` 0–1 for
+ * dodge and burn; `saturate` picks the sponge's direction (false =
+ * desaturate). Call between `brush_stroke_begin` and the first
+ * extend — the options are frozen with the stroke. An error for any
+ * other tool, so a caller cannot believe a brush is dodging.
+ * @param {string} range
+ * @param {number} exposure
+ * @param {boolean} saturate
+ */
+export function brush_stroke_set_tone(range, exposure, saturate) {
+    const ptr0 = passStringToWasm0(range, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.brush_stroke_set_tone(ptr0, len0, exposure, saturate);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * The in-flight stroke's readout for the panel:
  * `[dabs, x, y, w, h]` — the dab count and the stroke's bounding
  * box in image px. Empty when no stroke is in progress or nothing
@@ -1535,6 +1555,22 @@ export function layers_add_adjustment(name, exposure_ev, brightness, contrast, s
 }
 
 /**
+ * ADD LAYER MASK — REVEAL ALL (`reveal_all`, an all-white mask that
+ * changes nothing until painted) or HIDE ALL (all-black, the layer
+ * vanishes until painted back in). One undo step. The new mask
+ * becomes the EDIT TARGET, as Photoshop does, so the next stroke
+ * paints it. Refused when the layer already has a mask.
+ * @param {number} index
+ * @param {boolean} reveal_all
+ */
+export function layers_add_mask(index, reveal_all) {
+    const ret = wasm.layers_add_mask(index, reveal_all);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
  * per-layer adjustment (the panel's chain is otherwise a re-runnable
  * PREVIEW of the composite and mutates nothing). Journaled over the
@@ -1939,6 +1975,21 @@ export function layers_set_clipped(index, clipped) {
 }
 
 /**
+ * Make `index` active and choose what the paint tools write on it:
+ * its pixels, or (`mask`) its layer MASK. Selecting the mask of a
+ * layer with none is an error. Not an undo step — choosing a target
+ * changes nothing in the document.
+ * @param {number} index
+ * @param {boolean} mask
+ */
+export function layers_set_edit_target(index, mask) {
+    const ret = wasm.layers_set_edit_target(index, mask);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * @param {number} id
  * @param {string} blend
  */
@@ -2083,6 +2134,24 @@ export function layers_ungroup(id) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * PATCH: replace the SELECTION with the region `(dx, dy)` image px
+ * away from it, healed so it blends (`retouch::patch_rgba8`: the
+ * shifted source plus the membrane tone correction, composited
+ * through the selection's coverage on the GPU). Lands in the active
+ * layer as one journaled undo step ("Patch"). Needs a selection; a
+ * zero offset is refused rather than spending an undo step on the
+ * identity.
+ * @param {number} handle
+ * @param {number} dx
+ * @param {number} dy
+ * @returns {Promise<DecodedHandle>}
+ */
+export function patch_selection(handle, dx, dy) {
+    const ret = wasm.patch_selection(handle, dx, dy);
+    return ret;
 }
 
 /**
@@ -3347,12 +3416,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 791, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 795, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 807, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 811, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },

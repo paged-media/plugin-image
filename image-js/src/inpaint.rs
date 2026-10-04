@@ -126,6 +126,51 @@ pub fn fill(
     fill_pass(rgba, width, height, &mask, bias.as_deref()).map(|(px, _)| px)
 }
 
+/// The SPOT-HEALING search: where should a hole be healed FROM?
+///
+/// Runs the exemplar fill over `hole` (one byte per pixel, non-zero =
+/// hole) and reads back the shift map it used — where each filled pixel
+/// was copied from. The answer is the MOST FREQUENT shift (ties broken
+/// toward the nearer source, then by value, so the result is
+/// deterministic) whose translated hole lies wholly inside the window
+/// and wholly outside the hole itself: a single offset the healing
+/// brush can then copy and tone-match from, as if the user had
+/// Alt-clicked there. `None` when the fill finds nothing to copy from,
+/// or no candidate offset clears the hole.
+///
+/// Why an offset and not the synthesized pixels: the healing correction
+/// interpolates the source−destination mismatch AROUND the hole, and a
+/// synthesis that already equals the destination outside the hole has
+/// no mismatch to interpolate — the heal step would do nothing. A
+/// shifted copy carries its own surroundings, so the membrane solve
+/// genuinely matches its tone to the destination's.
+pub fn spot_source_offset(rgba: &[u8], width: u32, height: u32, hole: &[u8]) -> Option<(i32, i32)> {
+    let (_, shifts) = fill_pass(rgba, width, height, hole, None)?;
+    let (w, h) = (width as i32, height as i32);
+    let mut counts: std::collections::HashMap<(i32, i32), usize> = Default::default();
+    for (i, &m) in hole.iter().enumerate() {
+        if m != 0 && shifts[i] != (0, 0) {
+            *counts.entry(shifts[i]).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<((i32, i32), usize)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then((a.0 .0.pow(2) + a.0 .1.pow(2)).cmp(&(b.0 .0.pow(2) + b.0 .1.pow(2))))
+            .then(a.0.cmp(&b.0))
+    });
+    let clears = |(dx, dy): (i32, i32)| {
+        hole.iter().enumerate().all(|(i, &m)| {
+            if m == 0 {
+                return true;
+            }
+            let (x, y) = (i as i32 % w + dx, i as i32 / w + dy);
+            x >= 0 && y >= 0 && x < w && y < h && hole[(y * w + x) as usize] == 0
+        })
+    };
+    ranked.into_iter().map(|(d, _)| d).find(|&d| clears(d))
+}
+
 /// The coverage as one byte per pixel: non-zero where the hole is.
 fn coverage_bytes(coverage: &SelectionCoverage, width: u32, height: u32, threshold: u8) -> Vec<u8> {
     let mut v = vec![0u8; (width as usize) * (height as usize)];

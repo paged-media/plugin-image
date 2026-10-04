@@ -31,11 +31,20 @@ landed. How the parts fit is in
 - **Colour.** Foreground and background colour, swap, black and white, a picker; Alt-click
   with a paint tool samples the image.
 - **Paint, retouch, type.** Brush, pencil, eraser, clone stamp and healing brush on the
-  active layer, with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
+  active layer; dodge and burn by tonal range (shadows, midtones, highlights) with an
+  exposure, and the sponge (saturate or desaturate at the brush's flow) — filter strokes
+  through the `adjust.dodge_burn` kernel, masked by the dabs' coverage; blur and sharpen
+  brushes (the Gaussian/unsharp chain under the dabs, strength = flow); the spot healing
+  brush (on release an exemplar search around the stroke picks a source offset, and the
+  heal composite — source plus membrane tone correction — lands under the stroke); the patch
+  tool (drag the selection onto the source; the selection is replaced by the region at that
+  offset and healed to its surroundings); with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
   presets from an `.abr` brush library. The type tool paints a shaped run of text into the
   active layer with font bytes the host serves for the document's fonts.
 - **Layers.** Add, duplicate, remove, reorder; visibility, lock, opacity and 26 blend modes;
-  a mask from the selection; groups; clipping; editable adjustment layers; smart objects
+  a mask from the selection, Add layer mask (reveal all or hide all) and painting on a mask
+  (a Pixels/Mask edit target: the brush and pencil paint the foreground's grey, the eraser
+  reveals; each mask stroke is one undo step); groups; clipping; editable adjustment layers; smart objects
   (convert, re-render at a scale); bake the chain into a layer. One undo list covers pixel
   edits and every change to the stack ([ADR 463](adr/463-one-undo-list.md)); in the
   `rasterImage` context, entered by double-clicking an ingested frame, the host's undo

@@ -72,6 +72,7 @@ pub mod layers;
 pub mod mip;
 pub mod paths;
 pub mod pixels;
+pub mod retouch;
 pub mod saveback;
 pub mod selection;
 pub mod stroke;
@@ -1492,6 +1493,17 @@ mod wasm {
         pixels: Vec<u8>,
         layered: bool,
     ) -> Result<DecodedHandle, JsValue> {
+        land_fill_as("Fill", width, height, pixels, layered).await
+    }
+
+    /// [`land_fill`] under an undo label of the caller's choosing.
+    async fn land_fill_as(
+        label: &'static str,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+        layered: bool,
+    ) -> Result<DecodedHandle, JsValue> {
         if !layered {
             return register(width, height, pixels);
         }
@@ -1505,7 +1517,7 @@ mod wasm {
         with_stack_async(|mut doc| async move {
             let result = async {
                 doc.stack
-                    .edit_active("Fill", damage, pixels.into())
+                    .edit_active(label, damage, pixels.into())
                     .map_err(ingest_err)?;
                 let rgba = doc
                     .stack
@@ -1849,6 +1861,36 @@ mod wasm {
                 )
             })?;
         land_fill(img.width, img.height, out, layered).await
+    }
+
+    /// PATCH: replace the SELECTION with the region `(dx, dy)` image px
+    /// away from it, healed so it blends (`retouch::patch_rgba8`: the
+    /// shifted source plus the membrane tone correction, composited
+    /// through the selection's coverage on the GPU). Lands in the active
+    /// layer as one journaled undo step ("Patch"). Needs a selection; a
+    /// zero offset is refused rather than spending an undo step on the
+    /// identity.
+    #[wasm_bindgen]
+    pub async fn patch_selection(handle: u32, dx: f32, dy: f32) -> Result<DecodedHandle, JsValue> {
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        let coverage = sel.ok_or_else(|| {
+            JsValue::from_str("patch needs a selection — select the area to replace first")
+        })?;
+        let out = crate::retouch::patch_rgba8(
+            &ctx,
+            &img.rgba.to_rgba8(),
+            img.width,
+            img.height,
+            &coverage,
+            dx.round() as i32,
+            dy.round() as i32,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+        .ok_or_else(|| {
+            JsValue::from_str("nothing to patch — an empty selection, or a zero offset")
+        })?;
+        land_fill_as("Patch", img.width, img.height, out, layered).await
     }
 
     /// APPLY a gradient map — luminance through a two-stop colour ramp.
@@ -2996,8 +3038,13 @@ mod wasm {
                 })
                 .collect();
             format!(
-                "{{\"active\":{},\"layers\":[{}],\"groups\":[{}]}}",
+                "{{\"active\":{},\"editTarget\":\"{}\",\"layers\":[{}],\"groups\":[{}]}}",
                 doc.stack.active_index(),
+                if doc.stack.edit_target_is_mask() {
+                    "mask"
+                } else {
+                    "pixels"
+                },
                 rows.join(","),
                 groups.join(",")
             )
@@ -3132,6 +3179,31 @@ mod wasm {
                 JsValue::from_str("no selection to make a mask from — select an area first")
             })?;
         recorded_edit("Layer mask", None, |st| st.set_mask(index, coverage))
+    }
+
+    /// ADD LAYER MASK — REVEAL ALL (`reveal_all`, an all-white mask that
+    /// changes nothing until painted) or HIDE ALL (all-black, the layer
+    /// vanishes until painted back in). One undo step. The new mask
+    /// becomes the EDIT TARGET, as Photoshop does, so the next stroke
+    /// paints it. Refused when the layer already has a mask.
+    #[wasm_bindgen]
+    pub fn layers_add_mask(index: usize, reveal_all: bool) -> Result<(), JsValue> {
+        let label = if reveal_all {
+            "Add layer mask (reveal all)"
+        } else {
+            "Add layer mask (hide all)"
+        };
+        recorded_edit(label, None, |st| st.add_mask(index, reveal_all))?;
+        with_stack(|d| d.stack.set_edit_target(index, true).map_err(ingest_err))
+    }
+
+    /// Make `index` active and choose what the paint tools write on it:
+    /// its pixels, or (`mask`) its layer MASK. Selecting the mask of a
+    /// layer with none is an error. Not an undo step — choosing a target
+    /// changes nothing in the document.
+    #[wasm_bindgen]
+    pub fn layers_set_edit_target(index: usize, mask: bool) -> Result<(), JsValue> {
+        with_stack(|d| d.stack.set_edit_target(index, mask).map_err(ingest_err))
     }
 
     /// DELETE the mask (the coverage is gone), as distinct from
@@ -3725,6 +3797,9 @@ mod wasm {
     thread_local! {
         // The single in-flight stroke (one per realm, like the selection).
         static STROKE: RefCell<Option<StrokeSession>> = const { RefCell::new(None) };
+        // Whether the in-flight stroke paints the active layer's MASK
+        // (fixed at begin, like every other stroke parameter).
+        static STROKE_ON_MASK: Cell<bool> = const { Cell::new(false) };
     }
 
     /// BEGIN a stroke on the engine-held image `handle`.
@@ -3762,7 +3837,7 @@ mod wasm {
         let tool = StrokeTool::from_wire(tool).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "unknown paint tool \"{tool}\" \
-                 (brush | pencil | eraser | clone | heal)"
+                 (brush | pencil | eraser | clone | heal | dodge | burn | sponge | blur | sharpen | spot-heal)"
             ))
         })?;
         let blend_kernel = blend_kernel(blend).ok_or_else(|| {
@@ -3809,23 +3884,40 @@ mod wasm {
         // layers below and above are untouched. Without a stack it opens
         // on the engine-held image (the pre-layer behaviour, kept so the
         // doors stay usable on their own).
+        //
+        // THE EDIT TARGET: when the active layer's MASK is the target the
+        // stroke opens on the mask as an opaque grey plate instead, with
+        // its paint re-aimed at a mask (`StrokeParams::for_mask_target`),
+        // and the commit writes the result back into the mask.
         let base = LAYERS.with(|l| {
             let b = l.borrow();
             match b.as_ref() {
                 Some(d) if d.handle == handle => {
                     d.stack.active_is_editable()?;
-                    Ok(Some(d.stack.active().rgba.raw_arc()))
+                    if d.stack.edit_target_is_mask() {
+                        Ok(d.stack.active_mask_as_grey().map(|g| (g, true)))
+                    } else {
+                        Ok(Some((d.stack.active().rgba.raw_arc(), false)))
+                    }
                 }
                 _ => Ok(None),
             }
         });
-        let base: Option<Arc<[u8]>> = base.map_err(ingest_err)?;
+        let base: Option<(Arc<[u8]>, bool)> = base.map_err(ingest_err)?;
+        let on_mask = base.as_ref().is_some_and(|(_, m)| *m);
+        let params = if on_mask {
+            params.for_mask_target()
+        } else {
+            params
+        };
+        let base = base.map(|(px, _)| px);
         let session = match base {
             Some(px) => StrokeSession::begin_on(handle, img.width, img.height, px, params, sel),
             None => StrokeSession::begin(handle, &img, params, sel),
         }
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
         STROKE.with(|s| *s.borrow_mut() = Some(session));
+        STROKE_ON_MASK.with(|m| m.set(on_mask));
         Ok(())
     }
 
@@ -3865,8 +3957,31 @@ mod wasm {
         // stack is NOT mutated; nothing is committed until release.
         // A one-layer document takes the trivial fold, which returns the
         // painted pixels themselves — the pre-layer latency, unchanged.
-        let preview = preview_through_stack(handle, painted).await?;
+        let preview = if STROKE_ON_MASK.with(Cell::get) {
+            preview_mask_through_stack(painted).await?
+        } else {
+            preview_through_stack(handle, painted).await?
+        };
         Ok(preview.to_vec())
+    }
+
+    /// The preview of a MASK stroke: the stack folded with the painted
+    /// grey plate standing in for the active layer's mask.
+    async fn preview_mask_through_stack(painted: Arc<[u8]>) -> Result<Arc<[u8]>, JsValue> {
+        let ctx = GPU.with(|g| g.borrow().clone());
+        with_stack_async(|mut doc| async move {
+            let (w, h) = (doc.stack.width(), doc.stack.height());
+            let out = match crate::layers::mask_from_grey(w, h, &painted) {
+                Some(mask) => doc
+                    .stack
+                    .composite_with_active_mask(ctx.as_deref(), Arc::new(mask))
+                    .await
+                    .map_err(ingest_err),
+                None => Err(JsValue::from_str("internal: mask stroke is mis-sized")),
+            };
+            (doc, out)
+        })
+        .await
     }
 
     /// Fold the bound stack with `painted` overriding the active layer.
@@ -3933,9 +4048,10 @@ mod wasm {
             let session = slot
                 .as_mut()
                 .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
-            if !session.params().tool.samples_image() {
+            if !session.params().tool.takes_source() {
                 return Err(JsValue::from_str(
-                    "only the clone and heal tools read from a source",
+                    "only the clone and heal tools read from a source (the spot \
+                     healing brush finds its own)",
                 ));
             }
             session.set_clone_source(crate::stroke::CloneSource { x, y, aligned });
@@ -3943,11 +4059,58 @@ mod wasm {
         })
     }
 
+    /// Set the IN-FLIGHT dodge / burn / sponge stroke's options:
+    /// `range` ∈ `shadows | midtones | highlights` and `exposure` 0–1 for
+    /// dodge and burn; `saturate` picks the sponge's direction (false =
+    /// desaturate). Call between `brush_stroke_begin` and the first
+    /// extend — the options are frozen with the stroke. An error for any
+    /// other tool, so a caller cannot believe a brush is dodging.
+    #[wasm_bindgen]
+    pub fn brush_stroke_set_tone(
+        range: &str,
+        exposure: f32,
+        saturate: bool,
+    ) -> Result<(), JsValue> {
+        let range = crate::stroke::ToneRange::from_wire(range).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown tonal range \"{range}\" (shadows | midtones | highlights)"
+            ))
+        })?;
+        STROKE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let session = slot
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
+            if !session.params().tool.takes_tone() {
+                return Err(JsValue::from_str(
+                    "only the dodge, burn and sponge tools take tone options",
+                ));
+            }
+            session.set_tone(crate::stroke::ToneOptions {
+                range,
+                exposure,
+                saturate,
+            });
+            Ok(())
+        })
+    }
+
     #[wasm_bindgen]
     pub async fn brush_stroke_commit() -> Result<DecodedHandle, JsValue> {
-        let session = STROKE
+        let mut session = STROKE
             .with(|s| s.borrow_mut().take())
             .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
+        // The SPOT HEALING BRUSH deposits nothing while it is dragged; its
+        // source is found and its heal composited here, on release.
+        if session.params().tool == StrokeTool::SpotHeal {
+            let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
+                JsValue::from_str("the spot healing brush is GPU-only — call init_gpu first")
+            })?;
+            session
+                .resolve_spot_heal(&ctx)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
         let (w, h) = (session.width(), session.height());
         let handle = session.handle();
         let bounds = session.stroke_bounds();
@@ -3970,9 +4133,14 @@ mod wasm {
             });
         };
         let ctx = GPU.with(|g| g.borrow().clone());
+        let on_mask = STROKE_ON_MASK.with(|m| m.replace(false));
         let pixels: Arc<[u8]> = Arc::from(painted.into_boxed_slice());
         with_stack_async(|mut doc| async move {
-            let result = commit_stroke_into_active(&mut doc, ctx.as_deref(), damage, pixels).await;
+            let result = if on_mask {
+                commit_mask_stroke(&mut doc, ctx.as_deref(), damage, &pixels).await
+            } else {
+                commit_stroke_into_active(&mut doc, ctx.as_deref(), damage, pixels).await
+            };
             (doc, result)
         })
         .await
@@ -4000,11 +4168,38 @@ mod wasm {
         })
     }
 
+    /// [`commit_stroke_into_active`] for a MASK stroke: the painted grey
+    /// plate becomes the active layer's mask, journaled under the mask's
+    /// scope (one undo step, on the same undo list as everything else).
+    async fn commit_mask_stroke(
+        doc: &mut LayerDoc,
+        ctx: Option<&GpuContext>,
+        damage: image_core::Region,
+        grey: &[u8],
+    ) -> Result<DecodedHandle, JsValue> {
+        let (w, h) = (doc.stack.width(), doc.stack.height());
+        let mask = crate::layers::mask_from_grey(w, h, grey)
+            .ok_or_else(|| JsValue::from_str("internal: mask stroke is mis-sized"))?;
+        doc.stack
+            .edit_active_mask("Paint mask", damage, mask)
+            .map_err(ingest_err)?;
+        let rgba = doc.stack.composite(ctx, None).await.map_err(ingest_err)?;
+        set_image_pixels(doc.handle, rgba)?;
+        Ok(DecodedHandle {
+            handle: doc.handle,
+            width: w,
+            height: h,
+            display: read_display(doc.handle),
+            depth_reduced: read_depth_reduced(doc.handle),
+        })
+    }
+
     /// CANCEL the stroke: throw the painted pixels away. The engine-held
     /// source was never mutated, so this restores it exactly.
     #[wasm_bindgen]
     pub fn brush_stroke_cancel() {
         STROKE.with(|s| *s.borrow_mut() = None);
+        STROKE_ON_MASK.with(|m| m.set(false));
     }
 
     /// Is a stroke in progress?

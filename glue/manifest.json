@@ -61,6 +61,8 @@
       "media.paged.image.command.invertSelection",
       "media.paged.image.command.featherSelection",
       "media.paged.image.command.addLayer",
+      "media.paged.image.command.addLayerMask",
+      "media.paged.image.command.addLayerMaskHideAll",
       "media.paged.image.command.bakeAdjustToLayer",
       "media.paged.image.command.undo",
       "media.paged.image.command.redo",
@@ -96,6 +98,13 @@
       "media.paged.image.tool.eraser",
       "media.paged.image.tool.clone",
       "media.paged.image.tool.heal",
+      "media.paged.image.tool.dodge",
+      "media.paged.image.tool.burn",
+      "media.paged.image.tool.sponge",
+      "media.paged.image.tool.blur",
+      "media.paged.image.tool.sharpen",
+      "media.paged.image.tool.spotHeal",
+      "media.paged.image.tool.patch",
       "media.paged.image.tool.type"
     ],
     "importers": [

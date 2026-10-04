@@ -107,6 +107,27 @@ pub enum StrokeTool {
     /// the follow-up, and pretending it is already here would be the one
     /// unrecoverable mistake.
     Heal,
+    /// DODGE: a FILTER STROKE that lightens the chosen tonal range by the
+    /// EXPOSURE (`adjust.dodge_burn` mode 0) wherever the dabs land.
+    Dodge,
+    /// BURN: the darkening twin (`adjust.dodge_burn` mode 1).
+    Burn,
+    /// SPONGE: saturates or desaturates under the dabs (modes 2 / 3);
+    /// the brush's FLOW is its strength.
+    Sponge,
+    /// BLUR brush: a Gaussian of the layer under the dabs (the unsharp
+    /// chain at amount −1). The FLOW is its strength — how much of the
+    /// blur each dab deposits; the radius follows the tip size.
+    Blur,
+    /// SHARPEN brush: unsharp masking under the dabs, strength = flow.
+    Sharpen,
+    /// SPOT HEALING BRUSH: a healing brush that finds its own source. The
+    /// stroke marks the hole; on release the exemplar search
+    /// (`inpaint::spot_source_offset`, run on a window around the stroke)
+    /// picks the offset to copy from, and the heal composite — source
+    /// window + membrane tone correction — lands under the coverage. No
+    /// Alt-click; nothing is deposited until the stroke is resolved.
+    SpotHeal,
 }
 
 impl StrokeTool {
@@ -118,6 +139,12 @@ impl StrokeTool {
             "eraser" => StrokeTool::Eraser,
             "clone" => StrokeTool::Clone,
             "heal" => StrokeTool::Heal,
+            "dodge" => StrokeTool::Dodge,
+            "burn" => StrokeTool::Burn,
+            "sponge" => StrokeTool::Sponge,
+            "blur" => StrokeTool::Blur,
+            "sharpen" => StrokeTool::Sharpen,
+            "spot-heal" => StrokeTool::SpotHeal,
             _ => return None,
         })
     }
@@ -129,17 +156,53 @@ impl StrokeTool {
             StrokeTool::Eraser => "eraser",
             StrokeTool::Clone => "clone",
             StrokeTool::Heal => "heal",
+            StrokeTool::Dodge => "dodge",
+            StrokeTool::Burn => "burn",
+            StrokeTool::Sponge => "sponge",
+            StrokeTool::Blur => "blur",
+            StrokeTool::Sharpen => "sharpen",
+            StrokeTool::SpotHeal => "spot-heal",
         }
+    }
+
+    /// Is this a FILTER STROKE — one that deposits no paint and instead
+    /// masks a kernel's effect by its coverage?
+    pub fn filters(self) -> bool {
+        matches!(
+            self,
+            StrokeTool::Dodge
+                | StrokeTool::Burn
+                | StrokeTool::Sponge
+                | StrokeTool::Blur
+                | StrokeTool::Sharpen
+        )
+    }
+
+    /// Does this tool take the dodge / burn / sponge options?
+    pub fn takes_tone(self) -> bool {
+        matches!(
+            self,
+            StrokeTool::Dodge | StrokeTool::Burn | StrokeTool::Sponge
+        )
     }
 
     /// Does this tool paint from a SAMPLED window rather than a colour?
     pub fn samples_image(self) -> bool {
+        matches!(
+            self,
+            StrokeTool::Clone | StrokeTool::Heal | StrokeTool::SpotHeal
+        )
+    }
+
+    /// Does the tool take a user-set source anchor (Alt-click)? The spot
+    /// healing brush samples the image too, but finds its source itself.
+    pub fn takes_source(self) -> bool {
         matches!(self, StrokeTool::Clone | StrokeTool::Heal)
     }
 
     /// Does it tone-match the sample to its destination?
     pub fn tone_matches(self) -> bool {
-        matches!(self, StrokeTool::Heal)
+        matches!(self, StrokeTool::Heal | StrokeTool::SpotHeal)
     }
 
     /// The pencil is aliased; brush and eraser antialias their rim.
@@ -244,6 +307,54 @@ impl StrokeParams {
         self
     }
 
+    /// The same stroke, re-aimed at a LAYER MASK.
+    ///
+    /// A mask stroke paints an opaque grey plate (see
+    /// `layers::mask_to_grey`), so the paint colour becomes a GREY: the
+    /// foreground's luma (Rec. 601 weights, the conventional
+    /// colour-to-grey conversion), fully opaque — the stroke's own
+    /// opacity and flow still decide how much of it lands. The ERASER on
+    /// a mask paints WHITE, i.e. it REVEALS, which is what erasing a
+    /// mask means; it becomes a brush stroke in white with the eraser's
+    /// own (antialiased) tip, flow and opacity. Every other tool is
+    /// unchanged — clone, heal and the filter strokes work on the grey
+    /// plate exactly as on any other image.
+    pub fn for_mask_target(mut self) -> StrokeParams {
+        match self.tool {
+            StrokeTool::Eraser => {
+                self.tool = StrokeTool::Brush;
+                self.color = [1.0, 1.0, 1.0, 1.0];
+            }
+            StrokeTool::Brush | StrokeTool::Pencil => {
+                let [r, g, b, _] = self.color;
+                let l = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 1.0);
+                self.color = [l, l, l, 1.0];
+            }
+            _ => {}
+        }
+        self
+    }
+
+    /// The blur / sharpen brushes' unsharp chain.
+    ///
+    /// BLUR is the chain at amount −1 (`a − (a − blur) = blur`) with a
+    /// Gaussian whose σ follows the tip — a tenth of the diameter, held
+    /// to `1..=8` px so the window stays inside the kernel's 24 px reach
+    /// at 3σ. SHARPEN is a fixed small-radius unsharp mask (σ 1, amount
+    /// 1), the detail scale a sharpening brush is for. In both the
+    /// brush's FLOW is the strength: it decides how much of the filtered
+    /// image each dab deposits, building up over overlapping dabs.
+    ///
+    /// Returns `(sigma, radius, amount)`.
+    pub fn unsharp_settings(&self) -> (f32, u32, f32) {
+        if self.tool == StrokeTool::Blur {
+            let sigma = (self.size * 0.1).clamp(1.0, 8.0);
+            (sigma, (sigma * 3.0).ceil() as u32, -1.0)
+        } else {
+            (1.0, 3, 1.0)
+        }
+    }
+
     /// The tip for a dab at `pressure` (the size half of the pressure
     /// mapping; the flow half is [`Self::flow_at`]).
     pub fn tip_at(&self, pressure: f32) -> BrushTip {
@@ -284,7 +395,89 @@ impl StrokeParams {
                 color: self.color,
             }),
             StrokeTool::Clone | StrokeTool::Heal => None,
+            StrokeTool::Dodge | StrokeTool::Burn | StrokeTool::Sponge => None,
+            StrokeTool::Blur | StrokeTool::Sharpen => None,
+            StrokeTool::SpotHeal => None,
         }
+    }
+}
+
+/// The dodge / burn / sponge options (Photoshop's options bar). Frozen at
+/// the stroke's first sample like every other stroke parameter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneOptions {
+    /// Which tonal range dodge and burn act on.
+    pub range: ToneRange,
+    /// Dodge / burn strength, `0..1` (Photoshop's "Exposure").
+    pub exposure: f32,
+    /// Sponge mode: saturate (`true`) or desaturate.
+    pub saturate: bool,
+}
+
+impl Default for ToneOptions {
+    /// Midtones at 50% exposure; the sponge desaturates — the tools'
+    /// customary defaults.
+    fn default() -> Self {
+        ToneOptions {
+            range: ToneRange::Midtones,
+            exposure: 0.5,
+            saturate: false,
+        }
+    }
+}
+
+/// The tonal range dodge and burn weight their effect by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneRange {
+    Shadows,
+    Midtones,
+    Highlights,
+}
+
+impl ToneRange {
+    pub fn from_wire(s: &str) -> Option<ToneRange> {
+        Some(match s {
+            "shadows" => ToneRange::Shadows,
+            "midtones" => ToneRange::Midtones,
+            "highlights" => ToneRange::Highlights,
+            _ => return None,
+        })
+    }
+
+    fn code(self) -> u32 {
+        match self {
+            ToneRange::Shadows => 0,
+            ToneRange::Midtones => 1,
+            ToneRange::Highlights => 2,
+        }
+    }
+}
+
+impl ToneOptions {
+    /// The `adjust.dodge_burn` parameter block for `tool`, or `None` for a
+    /// tool that is not one of the three.
+    pub fn kernel_params(
+        &self,
+        tool: StrokeTool,
+    ) -> Option<image_kernels::families::adjust::AdjustDodgeBurnParams> {
+        use image_kernels::families::adjust::AdjustDodgeBurnParams as P;
+        let exposure = self.exposure.clamp(0.0, 1.0);
+        Some(match tool {
+            StrokeTool::Dodge => P::new(P::DODGE, self.range.code(), exposure),
+            StrokeTool::Burn => P::new(P::BURN, self.range.code(), exposure),
+            // The sponge's strength is the brush FLOW (the dabs' deposit),
+            // so the kernel runs at full strength under full coverage.
+            StrokeTool::Sponge => P::new(
+                if self.saturate {
+                    P::SPONGE_SATURATE
+                } else {
+                    P::SPONGE_DESATURATE
+                },
+                0,
+                1.0,
+            ),
+            _ => return None,
+        })
     }
 }
 
@@ -368,6 +561,8 @@ pub struct StrokeSession {
     /// aligned clone track the brush rigidly; recomputing per dab would
     /// let the offset drift with the cursor and smear the copy.
     clone_offset: Option<(f32, f32)>,
+    /// The dodge / burn / sponge options.
+    tone: ToneOptions,
 }
 
 impl StrokeSession {
@@ -432,6 +627,7 @@ impl StrokeSession {
             walk: image_gpu::StrokeWalk::new(),
             clone_source: None,
             clone_offset: None,
+            tone: ToneOptions::default(),
         })
     }
 
@@ -461,6 +657,16 @@ impl StrokeSession {
 
     pub fn clone_source(&self) -> Option<CloneSource> {
         self.clone_source
+    }
+
+    /// Set the dodge / burn / sponge options. Call before the first
+    /// sample: a stroke whose exposure changed halfway would not replay.
+    pub fn set_tone(&mut self, tone: ToneOptions) {
+        self.tone = tone;
+    }
+
+    pub fn tone(&self) -> ToneOptions {
+        self.tone
     }
 
     pub fn dab_count(&self) -> u64 {
@@ -571,6 +777,9 @@ impl StrokeSession {
             return Ok(());
         };
         self.last_dirty = Some(region);
+        if self.params.tool.filters() {
+            return self.composite_filter(ctx, region).await;
+        }
         let (w, h) = (region.w, region.h);
         let base_window = self.window_rgba8(region);
         let base_f16 = rgba8_to_f16(&base_window);
@@ -621,6 +830,76 @@ impl StrokeSession {
         let out = f16_to_rgba8(&out_f16);
         self.splice(region, &out);
         Ok(())
+    }
+
+    /// A FILTER STROKE's composite: the tool's kernel over the base window,
+    /// masked by the coverage, spliced back into `region`.
+    ///
+    /// The blur / sharpen chain's Gaussian is a WINDOWED kernel, so it
+    /// also gets the base window PADDED by its reach (edge-clamped,
+    /// [`Self::padded_window_rgba8`]); the padding feeds the kernel and
+    /// never lands — the output is exactly `region`.
+    async fn composite_filter(
+        &mut self,
+        ctx: &GpuContext,
+        region: Region,
+    ) -> Result<(), IngestError> {
+        let base_f16 = rgba8_to_f16(&self.window_rgba8(region));
+        let mask = self.accumulator.mask_window_f16(
+            region,
+            self.params.opacity,
+            self.selection.as_deref(),
+        );
+        let params = self.tone.kernel_params(self.params.tool);
+        let padded;
+        let mode = match (&params, self.params.tool) {
+            (Some(p), _) => PaintMode::Filter {
+                kernel: &image_kernels::families::adjust::ADJUST_DODGE_BURN,
+                params: p.as_bytes(),
+            },
+            (None, StrokeTool::Blur | StrokeTool::Sharpen) => {
+                let (sigma, radius, amount) = self.params.unsharp_settings();
+                let probe = PaintMode::Unsharp {
+                    sigma,
+                    radius,
+                    amount,
+                    padded_f16: &[],
+                };
+                padded = rgba8_to_f16(&self.padded_window_rgba8(region, probe.halo()));
+                PaintMode::Unsharp {
+                    sigma,
+                    radius,
+                    amount,
+                    padded_f16: &padded,
+                }
+            }
+            (None, _) => return Ok(()),
+        };
+        let out_f16 = composite_stroke_window(ctx, &mode, &base_f16, &mask, region.w, region.h)
+            .await
+            .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+        let out = f16_to_rgba8(&out_f16);
+        self.splice(region, &out);
+        Ok(())
+    }
+
+    /// `region` grown by `pad` on every side, read from the BASE with
+    /// coordinates CLAMPED to the canvas — the windowed Gaussian's input.
+    /// Clamping (rather than transparency) is the edge rule a blur wants:
+    /// a blur near the border must not darken toward an invented black.
+    fn padded_window_rgba8(&self, region: Region, pad: u32) -> Vec<u8> {
+        let (pw, ph) = (region.w + 2 * pad, region.h + 2 * pad);
+        let mut out = Vec::with_capacity((pw as usize) * (ph as usize) * 4);
+        for y in 0..ph as i64 {
+            let sy = (region.y as i64 + y - pad as i64).clamp(0, self.height as i64 - 1) as usize;
+            for x in 0..pw as i64 {
+                let sx =
+                    (region.x as i64 + x - pad as i64).clamp(0, self.width as i64 - 1) as usize;
+                let i = (sy * self.width as usize + sx) * 4;
+                out.extend_from_slice(&self.base[i..i + 4]);
+            }
+        }
+        out
     }
 
     /// The healing correction for `region`, solved on an EXPANDED window
@@ -767,6 +1046,64 @@ impl StrokeSession {
         }
     }
 
+    /// RESOLVE a spot-healing stroke: find its source and composite it.
+    ///
+    /// The search runs on the BASE in a window around the stroke (twice
+    /// the stroke's extent on every side, at least 32 px — the exemplar
+    /// search's own reach is bounded too), with the hole = every texel
+    /// the stroke's effective coverage touches. The offset it returns is
+    /// fixed as the stroke's clone offset and the whole stroke is
+    /// re-composited through the HEAL path: source window, membrane
+    /// correction, the coverage as the mask. Returns `false` (and paints
+    /// nothing) when the stroke is empty, the tool is not the spot
+    /// healing brush, or the search finds no source that clears the hole.
+    pub async fn resolve_spot_heal(&mut self, ctx: &GpuContext) -> Result<bool, IngestError> {
+        if self.params.tool != StrokeTool::SpotHeal {
+            return Ok(false);
+        }
+        let Some(bounds) = self.stroke_bounds() else {
+            return Ok(false);
+        };
+        let margin = (bounds.w.max(bounds.h) as i32 * 2).max(32);
+        let Some(win) = Region::new(
+            bounds.x - margin,
+            bounds.y - margin,
+            bounds.w + 2 * margin as u32,
+            bounds.h + 2 * margin as u32,
+        )
+        .intersect(Region::new(0, 0, self.width, self.height)) else {
+            return Ok(false);
+        };
+        let crop = self.window_rgba8(win);
+        let hole: Vec<u8> = (0..win.h)
+            .flat_map(|y| (0..win.w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let cov = self.accumulator.effective_at(
+                    (win.x as u32) + x,
+                    (win.y as u32) + y,
+                    1.0,
+                    self.selection.as_deref(),
+                );
+                if cov > 0.0 {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let Some((dx, dy)) = crate::inpaint::spot_source_offset(&crop, win.w, win.h, &hole) else {
+            return Ok(false);
+        };
+        self.clone_offset = Some((dx as f32, dy as f32));
+        self.composite(ctx, bounds).await?;
+        Ok(true)
+    }
+
+    /// The offset a resolved spot-healing stroke copied from.
+    pub fn resolved_offset(&self) -> Option<(f32, f32)> {
+        self.clone_offset
+    }
+
     /// Finish: hand back the painted pixels. The caller writes them into
     /// the ACTIVE LAYER — journaling the tiles [`Self::stroke_bounds`]
     /// covers — and re-composites the stack.
@@ -804,6 +1141,12 @@ mod tests {
             StrokeTool::Eraser,
             StrokeTool::Clone,
             StrokeTool::Heal,
+            StrokeTool::Dodge,
+            StrokeTool::Burn,
+            StrokeTool::Sponge,
+            StrokeTool::Blur,
+            StrokeTool::Sharpen,
+            StrokeTool::SpotHeal,
         ] {
             assert_eq!(StrokeTool::from_wire(t.as_wire()), Some(t));
         }
@@ -1643,5 +1986,387 @@ mod tests {
             at(r),
             want(r)
         );
+    }
+
+    // ── dodge / burn / sponge: filter strokes ────────────────────────
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_tone_options_build_the_kernel_block_per_tool__feat__image_editor_dodge_burn() {
+        use image_kernels::families::adjust::AdjustDodgeBurnParams as P;
+        let t = ToneOptions {
+            range: ToneRange::Highlights,
+            exposure: 1.7,
+            saturate: true,
+        };
+        assert_eq!(t.kernel_params(StrokeTool::Dodge), Some(P::new(0, 2, 1.0)));
+        assert_eq!(t.kernel_params(StrokeTool::Burn), Some(P::new(1, 2, 1.0)));
+        assert_eq!(t.kernel_params(StrokeTool::Sponge), Some(P::new(2, 0, 1.0)));
+        let d = ToneOptions::default();
+        assert_eq!(d.kernel_params(StrokeTool::Sponge), Some(P::new(3, 0, 1.0)));
+        assert_eq!(d.kernel_params(StrokeTool::Dodge), Some(P::new(0, 1, 0.5)));
+        assert_eq!(d.kernel_params(StrokeTool::Brush), None);
+        assert!(StrokeTool::Dodge.filters() && !StrokeTool::Heal.filters());
+        assert!(params(StrokeTool::Burn).solid_paint_mode().is_none());
+        assert_eq!(ToneRange::from_wire("shadows"), Some(ToneRange::Shadows));
+        assert_eq!(ToneRange::from_wire("darks"), None);
+    }
+
+    /// Run a filter stroke across the middle of `image`.
+    fn filter_stroke(
+        ctx: &GpuContext,
+        image: &DecodedImage,
+        tool: StrokeTool,
+        tone: ToneOptions,
+        selection: Option<Arc<SelectionCoverage>>,
+    ) -> Vec<u8> {
+        let mut p = params(tool);
+        p.size = 10.0;
+        p.hardness = 1.0;
+        let mut s = StrokeSession::begin(1, image, p, selection).expect("begin");
+        s.set_tone(tone);
+        for x in [10.0f32, 20.0, 30.0, 40.0, 50.0] {
+            pollster::block_on(s.extend(ctx, StrokeSample::new(x, 16.0, 1.0))).expect("extend");
+        }
+        s.commit()
+    }
+
+    fn luma_at(px: &[u8], w: u32, x: u32, y: u32) -> f32 {
+        let i = ((y * w + x) * 4) as usize;
+        0.299 * px[i] as f32 + 0.587 * px[i + 1] as f32 + 0.114 * px[i + 2] as f32
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn dodge_lightens_and_burn_darkens_only_under_the_stroke__feat__image_editor_dodge_burn() {
+        let Some(ctx) = device() else { return };
+        let image = ramp(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let tone = ToneOptions::default();
+        let dodged = filter_stroke(ctx, &image, StrokeTool::Dodge, tone, None);
+        let burned = filter_stroke(ctx, &image, StrokeTool::Burn, tone, None);
+        assert!(luma_at(&dodged, 64, 30, 16) > luma_at(&base, 64, 30, 16) + 2.0);
+        assert!(luma_at(&burned, 64, 30, 16) < luma_at(&base, 64, 30, 16) - 2.0);
+        // Away from the stroke, the bytes are the base's bytes.
+        for (x, y) in [(2u32, 2u32), (62, 30), (30, 2)] {
+            let i = ((y * 64 + x) * 4) as usize;
+            assert_eq!(dodged[i..i + 4], base[i..i + 4], "({x},{y}) untouched");
+            assert_eq!(burned[i..i + 4], base[i..i + 4], "({x},{y}) untouched");
+        }
+        // Zero exposure is the identity even under the stroke.
+        let none = filter_stroke(
+            ctx,
+            &image,
+            StrokeTool::Dodge,
+            ToneOptions {
+                exposure: 0.0,
+                ..tone
+            },
+            None,
+        );
+        let i = ((16 * 64 + 30) * 4) as usize;
+        for c in 0..3 {
+            assert!((none[i + c] as i32 - base[i + c] as i32).abs() <= 1);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_tonal_range_decides_where_dodge_acts__feat__image_editor_dodge_burn() {
+        // A dark half and a light half; a stroke across both. "Shadows"
+        // moves the dark half more than the light half, "highlights" the
+        // reverse.
+        let Some(ctx) = device() else { return };
+        let image = two_tone(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let lift = |px: &[u8], x| luma_at(px, 64, x, 16) - luma_at(&base, 64, x, 16);
+        let run = |range| {
+            filter_stroke(
+                ctx,
+                &image,
+                StrokeTool::Dodge,
+                ToneOptions {
+                    range,
+                    exposure: 0.8,
+                    saturate: false,
+                },
+                None,
+            )
+        };
+        let sh = run(ToneRange::Shadows);
+        let hi = run(ToneRange::Highlights);
+        assert!(
+            lift(&sh, 20) > lift(&sh, 44),
+            "shadows lifts the dark side more"
+        );
+        assert!(
+            lift(&hi, 44) > lift(&hi, 20),
+            "highlights lifts the light side more"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_sponge_desaturates_and_a_selection_clips_it__feat__image_editor_dodge_burn() {
+        let Some(ctx) = device() else { return };
+        let image = ramp(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let sel = Arc::new(SelectionCoverage::rasterize_rect(
+            64, 32, 0.0, 0.0, 32.0, 32.0,
+        ));
+        let out = filter_stroke(
+            ctx,
+            &image,
+            StrokeTool::Sponge,
+            ToneOptions::default(),
+            Some(sel),
+        );
+        let spread = |px: &[u8], x: u32| {
+            let i = ((16 * 64 + x) * 4) as usize;
+            let (r, g, b) = (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32);
+            r.max(g).max(b) - r.min(g).min(b)
+        };
+        assert!(spread(&out, 20) < spread(&base, 20), "desaturated inside");
+        for y in 0..32u32 {
+            for x in 32..64u32 {
+                let i = ((y * 64 + x) * 4) as usize;
+                assert_eq!(
+                    out[i..i + 4],
+                    base[i..i + 4],
+                    "({x},{y}) outside the selection"
+                );
+            }
+        }
+    }
+
+    // ── blur / sharpen brushes ───────────────────────────────────────
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn blur_follows_the_tip_and_sharpen_is_a_fixed_unsharp__feat__image_editor_blur_sharpen_brush()
+    {
+        let mut p = params(StrokeTool::Blur);
+        p.size = 40.0;
+        assert_eq!(p.unsharp_settings(), (4.0, 12, -1.0));
+        p.size = 1000.0;
+        assert_eq!(
+            p.unsharp_settings().1,
+            24,
+            "held inside the Gaussian's reach"
+        );
+        let (_, _, amount) = params(StrokeTool::Sharpen).unsharp_settings();
+        assert!(amount > 0.0, "sharpen is a positive unsharp amount");
+        assert!(StrokeTool::Blur.filters() && !StrokeTool::Blur.takes_tone());
+        assert!(StrokeTool::Sponge.takes_tone());
+    }
+
+    /// The step across the two-tone edge at row `y`.
+    fn edge_step(px: &[u8], w: u32, y: u32) -> i32 {
+        let at = |x: u32| px[((y * w + x) * 4) as usize] as i32;
+        at(w / 2) - at(w / 2 - 1)
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_blur_brush_softens_an_edge_under_the_stroke_only__feat__image_editor_blur_sharpen_brush()
+    {
+        let Some(ctx) = device() else { return };
+        let image = two_tone(64, 48);
+        let base = image.rgba.to_rgba8().into_owned();
+        let mut p = params(StrokeTool::Blur);
+        p.size = 16.0;
+        p.hardness = 1.0;
+        let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+        // A vertical stroke down the edge, top part only.
+        for y in [4.0f32, 10.0, 16.0] {
+            pollster::block_on(s.extend(ctx, StrokeSample::new(32.0, y, 1.0))).expect("extend");
+        }
+        let out = s.commit();
+        assert!(
+            edge_step(&out, 64, 10) < edge_step(&base, 64, 10) / 2,
+            "the edge under the stroke is soft: {} vs {}",
+            edge_step(&out, 64, 10),
+            edge_step(&base, 64, 10)
+        );
+        for y in 30..48u32 {
+            let i = ((y * 64) * 4) as usize;
+            assert_eq!(out[i..i + 64 * 4], base[i..i + 64 * 4], "row {y} untouched");
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn flow_is_the_blur_brushs_strength__feat__image_editor_blur_sharpen_brush() {
+        let Some(ctx) = device() else { return };
+        let image = two_tone(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let run = |flow: f32| {
+            let mut p = params(StrokeTool::Blur);
+            p.size = 16.0;
+            p.hardness = 1.0;
+            p.flow = flow;
+            p.pressure = PressureTarget::None;
+            let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+            pollster::block_on(s.extend(ctx, StrokeSample::new(32.0, 16.0, 1.0))).expect("extend");
+            s.commit()
+        };
+        let weak = edge_step(&run(0.25), 64, 16);
+        let strong = edge_step(&run(1.0), 64, 16);
+        assert!(
+            strong < weak && weak < edge_step(&base, 64, 16),
+            "{strong} < {weak}"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_sharpen_brush_steepens_an_edge__feat__image_editor_blur_sharpen_brush() {
+        let Some(ctx) = device() else { return };
+        // A soft ramp edge, so sharpening has something to steepen.
+        let (w, h) = (64u32, 32u32);
+        let mut rgba = Vec::new();
+        for _y in 0..h {
+            for x in 0..w {
+                let v = (60 + ((x as i32 - 28).clamp(0, 8) * 15)) as u8;
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let image = DecodedImage::from_rgba8(w, h, rgba).expect("valid");
+        let base = image.rgba.to_rgba8().into_owned();
+        let mut p = params(StrokeTool::Sharpen);
+        p.size = 20.0;
+        p.hardness = 1.0;
+        let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+        pollster::block_on(s.extend(ctx, StrokeSample::new(32.0, 16.0, 1.0))).expect("extend");
+        let out = s.commit();
+        let at = |px: &[u8], x: u32| px[((16 * w + x) * 4) as usize] as i32;
+        // Unsharp masking overshoots at the foot and the shoulder.
+        assert!(
+            at(&out, 28) < at(&base, 28),
+            "the foot darkens: {}",
+            at(&out, 28)
+        );
+        assert!(
+            at(&out, 36) > at(&base, 36),
+            "the shoulder lightens: {}",
+            at(&out, 36)
+        );
+    }
+
+    // ── spot healing brush ───────────────────────────────────────────
+
+    /// A smooth horizontal ramp with fine vertical stripes (texture), and
+    /// a dark BLEMISH disc of radius 3 at (cx, cy).
+    fn blemished(w: u32, h: u32, cx: f32, cy: f32) -> DecodedImage {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                let v = if d <= 3.0 {
+                    20u8
+                } else {
+                    (100 + x + if x % 4 < 2 { 6 } else { 0 }) as u8
+                };
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        DecodedImage::from_rgba8(w, h, rgba).expect("valid")
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn spot_heal_is_a_sampling_tool_that_takes_no_anchor__feat__image_editor_spot_heal() {
+        assert!(StrokeTool::SpotHeal.samples_image());
+        assert!(StrokeTool::SpotHeal.tone_matches());
+        assert!(!StrokeTool::SpotHeal.takes_source());
+        assert!(StrokeTool::Clone.takes_source() && StrokeTool::Heal.takes_source());
+        assert!(params(StrokeTool::SpotHeal).solid_paint_mode().is_none());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_spot_source_search_picks_an_offset_that_clears_the_hole__feat__image_editor_spot_heal() {
+        let image = blemished(64, 48, 32.0, 24.0);
+        let rgba = image.rgba.to_rgba8().into_owned();
+        let hole: Vec<u8> = (0..48u32)
+            .flat_map(|y| (0..64u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let d = ((x as f32 - 32.0).powi(2) + (y as f32 - 24.0).powi(2)).sqrt();
+                if d <= 5.0 {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let (dx, dy) =
+            crate::inpaint::spot_source_offset(&rgba, 64, 48, &hole).expect("a source exists");
+        assert!(dx * dx + dy * dy > 0);
+        for (i, &m) in hole.iter().enumerate() {
+            if m != 0 {
+                let (x, y) = ((i % 64) as i32 + dx, (i / 64) as i32 + dy);
+                assert!((0..64).contains(&x) && (0..48).contains(&y));
+                assert_eq!(hole[(y * 64 + x) as usize], 0, "the source clears the hole");
+            }
+        }
+        // Deterministic: the same hole twice, the same answer.
+        assert_eq!(
+            crate::inpaint::spot_source_offset(&rgba, 64, 48, &hole),
+            Some((dx, dy))
+        );
+        // Nothing to copy from: everything is the hole.
+        assert_eq!(
+            crate::inpaint::spot_source_offset(&rgba, 8, 8, &[255u8; 64]),
+            None
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_spot_heal_stroke_removes_the_blemish_and_touches_nothing_else__feat__image_editor_spot_heal(
+    ) {
+        let Some(ctx) = device() else { return };
+        let (w, h) = (96u32, 64u32);
+        let image = blemished(w, h, 48.0, 32.0);
+        let base = image.rgba.to_rgba8().into_owned();
+        let mut p = params(StrokeTool::SpotHeal);
+        p.size = 12.0;
+        p.hardness = 0.8;
+        let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+        pollster::block_on(s.extend(ctx, StrokeSample::new(48.0, 32.0, 1.0))).expect("extend");
+        assert_eq!(
+            s.pixels(),
+            &base[..],
+            "nothing lands before the stroke is resolved"
+        );
+        assert!(pollster::block_on(s.resolve_spot_heal(ctx)).expect("resolve"));
+        assert!(s.resolved_offset().is_some());
+        let out = s.commit();
+        let at = |px: &[u8], x: u32, y: u32| px[((y * w + x) * 4) as usize] as i32;
+        // The blemish centre now sits near the ramp around it (~148).
+        let want = 100 + 48;
+        assert!(
+            (at(&out, 48, 32) - want).abs() < 20,
+            "healed centre {} vs surrounding {want} (blemish was {})",
+            at(&out, 48, 32),
+            at(&base, 48, 32)
+        );
+        // Far from the stroke, the bytes are the base's.
+        for (x, y) in [(2u32, 2u32), (90, 60), (48, 2), (10, 32)] {
+            let i = ((y * w + x) * 4) as usize;
+            assert_eq!(out[i..i + 4], base[i..i + 4], "({x},{y}) untouched");
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn resolving_is_a_no_op_for_other_tools_and_empty_strokes__feat__image_editor_spot_heal() {
+        let Some(ctx) = device() else { return };
+        let image = blemished(48, 48, 24.0, 24.0);
+        let mut brush = StrokeSession::begin(1, &image, params(StrokeTool::Brush), None).unwrap();
+        assert!(!pollster::block_on(brush.resolve_spot_heal(ctx)).unwrap());
+        let mut empty =
+            StrokeSession::begin(1, &image, params(StrokeTool::SpotHeal), None).unwrap();
+        assert!(!pollster::block_on(empty.resolve_spot_heal(ctx)).unwrap());
     }
 }

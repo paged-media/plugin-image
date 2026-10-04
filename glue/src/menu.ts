@@ -42,6 +42,8 @@ const ENTRIES: [path: string, suffix: string, group: string][] = [
   ["Image/Flip vertical", "flipVertical", "canvas"],
 
   ["Image/Layer/Add", "addLayer", "layer"],
+  ["Image/Layer/Add mask (reveal all)", "addLayerMask", "layer-mask"],
+  ["Image/Layer/Add mask (hide all)", "addLayerMaskHideAll", "layer-mask"],
   ["Image/Layer/Convert to smart object", "convertLayerToSmart", "layer-smart"],
 
   ["Image/Selection/Select all", "selectAll", "sel"],

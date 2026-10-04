@@ -579,7 +579,23 @@ export type StrokeTool =
   /** A clone whose source is TONE-MATCHED to its destination, by a
    *  gradient-domain (membrane) solve over the dab's boundary — so it
    *  follows a ramp rather than shifting the patch by one number. */
-  | "heal";
+  | "heal"
+  /** FILTER STROKES: no paint — the dabs' coverage masks a kernel's
+   *  effect (`adjust.dodge_burn`). Dodge lightens and burn darkens the
+   *  chosen tonal range by the exposure; the sponge (de)saturates at the
+   *  brush's flow. */
+  | "dodge"
+  | "burn"
+  | "sponge"
+  /** FILTER STROKES through the unsharp chain: blur (a Gaussian whose
+   *  radius follows the tip) and sharpen (unsharp masking). The brush's
+   *  FLOW is their strength. */
+  | "blur"
+  | "sharpen"
+  /** SPOT HEALING BRUSH: paint over a blemish; on release the engine
+   *  finds a source itself (an exemplar search around the stroke) and
+   *  heals from it. No Alt-click, and nothing lands until release. */
+  | "spot-heal";
 
 export const STROKE_TOOLS: StrokeTool[] = [
   "brush",
@@ -587,7 +603,36 @@ export const STROKE_TOOLS: StrokeTool[] = [
   "eraser",
   "clone",
   "heal",
+  "dodge",
+  "burn",
+  "sponge",
+  "blur",
+  "sharpen",
+  "spot-heal",
 ];
+
+/** The filter strokes that take tone options (`brush_stroke_set_tone`). */
+export const TONE_TOOLS: readonly StrokeTool[] = ["dodge", "burn", "sponge"];
+
+/** The tonal range dodge and burn act on. */
+export type ToneRange = "shadows" | "midtones" | "highlights";
+export const TONE_RANGES: readonly ToneRange[] = ["shadows", "midtones", "highlights"];
+
+/** The dodge / burn / sponge options, frozen into each stroke. */
+export interface ToneOptions {
+  range: ToneRange;
+  /** Dodge / burn strength, 0..1 ("Exposure"). */
+  exposure: number;
+  /** Sponge direction: saturate (true) or desaturate. */
+  saturate: boolean;
+}
+
+/** Midtones at 50%, the sponge desaturating — the engine's defaults. */
+export const DEFAULT_TONE: ToneOptions = {
+  range: "midtones",
+  exposure: 0.5,
+  saturate: false,
+};
 
 /** The tools that read their paint from the image rather than from a
  *  colour, and therefore need a source anchor before they deposit
@@ -693,9 +738,16 @@ export interface LayerInfo {
   group: number | null;
 }
 
+/** What the paint tools write on the active layer (`layers_list`'s
+ *  `editTarget`): its pixels, or its layer MASK. */
+export type EditTarget = "pixels" | "mask";
+
 export interface LayerStackInfo {
   /** Index of the layer edits land in; -1 when no stack is open. */
   active: number;
+  /** Where paint lands on the active layer. "mask" only while that layer
+   *  has a mask (the engine resets it otherwise). */
+  editTarget: EditTarget;
   layers: LayerInfo[];
   /** Groups, keyed by the `group` field on each layer. */
   groups: LayerGroupInfo[];
@@ -752,6 +804,7 @@ export interface LayerGroupInfo {
 
 export const EMPTY_LAYER_STACK: LayerStackInfo = {
   active: -1,
+  editTarget: "pixels",
   layers: [],
   groups: [],
 };
@@ -1157,6 +1210,9 @@ export interface ImageEngine {
    *  THROWS for a non-sampling tool rather than no-op'ing, so a caller
    *  cannot believe the brush is cloning when it is not. */
   brushSetSource(x: number, y: number, aligned: boolean): void;
+  /** Set the in-flight dodge / burn / sponge stroke's options (between
+   *  `brushBegin` and the first extend). THROWS for any other tool. */
+  brushSetTone(tone: ToneOptions): void;
   brushExtend(x: number, y: number, pressure: number): Promise<Uint8Array>;
   /** CLOSE the stroke. With a layer stack bound the painted pixels go
    *  into the ACTIVE LAYER (journaled — undoable), the stack is
@@ -1276,6 +1332,9 @@ export interface ImageEngine {
     ry: number,
     darken: number,
   ): Promise<DecodedInfo>;
+  /** PATCH: replace the selection with the region (dx, dy) image px away,
+   *  healed to its surroundings. THROWS with no selection or a zero offset. */
+  patchSelection(handle: number, dx: number, dy: number): Promise<DecodedInfo>;
   /** NOISE — Median, 3×3 (the kernel's fixed comparator network). */
   applyMedian(handle: number): Promise<DecodedInfo>;
   /** OTHER — Maximum ("max") or Minimum ("min"), 3×3. */
@@ -1418,6 +1477,13 @@ export interface ImageEngine {
   layerMaskFromSelection(index: number): void;
   /** DELETE the mask; distinct from disabling it. */
   layerClearMask(index: number): void;
+  /** ADD LAYER MASK: reveal all (white) or hide all (black). One undo
+   *  step; the new mask becomes the edit target. THROWS when the layer
+   *  already has a mask. */
+  layerAddMask(index: number, revealAll: boolean): void;
+  /** Make `index` active and point the paint tools at its pixels or its
+   *  MASK. THROWS for the mask of a layer that has none. */
+  layerSetEditTarget(index: number, target: EditTarget): void;
   /** Toggle whether the mask applies, retaining the coverage. */
   layerSetMaskEnabled(index: number, enabled: boolean): void;
   /** Clip a layer to the one beneath it — the mechanism smart filters
@@ -1704,6 +1770,7 @@ export interface ImageWasmModule {
     pressure: number,
   ): Promise<Uint8Array>;
   brush_stroke_set_source(x: number, y: number, aligned: boolean): void;
+  brush_stroke_set_tone(range: string, exposure: number, saturate: boolean): void;
   brush_stroke_commit(): Promise<DecodedHandleWasm>;
   brush_stroke_cancel(): void;
   brush_stroke_active(): boolean;
@@ -1805,6 +1872,7 @@ export interface ImageWasmModule {
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
   apply_median(handle: number): Promise<DecodedHandleWasm>;
+  patch_selection(handle: number, dx: number, dy: number): Promise<DecodedHandleWasm>;
   apply_red_eye(
     handle: number,
     cx: number,
@@ -1923,6 +1991,8 @@ export interface ImageWasmModule {
   layers_render_smart(index: number, scale: number): Promise<void>;
   layers_mask_from_selection(index: number): void;
   layers_clear_mask(index: number): void;
+  layers_add_mask(index: number, reveal_all: boolean): void;
+  layers_set_edit_target(index: number, mask: boolean): void;
   layers_set_mask_enabled(index: number, enabled: boolean): void;
   layers_set_clipped(index: number, clipped: boolean): void;
   layers_group(from: number, to: number, name: string): number;
@@ -2325,6 +2395,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       ),
     brushSetSource: (x, y, aligned) =>
       wasm.brush_stroke_set_source(x, y, aligned),
+    brushSetTone: (t) => wasm.brush_stroke_set_tone(t.range, t.exposure, t.saturate),
     brushExtend: (x, y, pressure) => wasm.brush_stroke_extend(x, y, pressure),
     async brushCommit() {
       const h = await wasm.brush_stroke_commit();
@@ -2364,7 +2435,9 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layersBound: () => wasm.layers_bound(),
     layers() {
       const parsed = JSON.parse(wasm.layers_list()) as LayerStackInfo;
-      return parsed.layers.length > 0 ? parsed : EMPTY_LAYER_STACK;
+      if (parsed.layers.length === 0) return EMPTY_LAYER_STACK;
+      // An engine older than the edit target has no field: pixels.
+      return { ...parsed, editTarget: parsed.editTarget === "mask" ? "mask" : "pixels" };
     },
     layersHistory() {
       // The engine answers the JSON literal `null` when no stack is open.
@@ -2431,6 +2504,9 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyRedEye(handle, cx, cy, rx, ry, darken) {
       return decodedInfoOf(await wasm.apply_red_eye(handle, cx, cy, rx, ry, darken));
+    },
+    async patchSelection(handle, dx, dy) {
+      return decodedInfoOf(await wasm.patch_selection(handle, dx, dy));
     },
     async applyMedian(handle) {
       return decodedInfoOf(await wasm.apply_median(handle));
@@ -2604,6 +2680,9 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layerRenderSmart: (index, scale) => wasm.layers_render_smart(index, scale),
     layerMaskFromSelection: (index) => wasm.layers_mask_from_selection(index),
     layerClearMask: (index) => wasm.layers_clear_mask(index),
+    layerAddMask: (index, revealAll) => wasm.layers_add_mask(index, revealAll),
+    layerSetEditTarget: (index, target) =>
+      wasm.layers_set_edit_target(index, target === "mask"),
     layerSetMaskEnabled: (index, enabled) =>
       wasm.layers_set_mask_enabled(index, enabled),
     layerSetClipped: (index, clipped) => wasm.layers_set_clipped(index, clipped),

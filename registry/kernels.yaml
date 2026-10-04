@@ -1088,6 +1088,23 @@
   tests:
     rust: ["image-conformance/tests/family_adjust.rs", "image-conformance/tests/gpu_module_kernels.rs"]
 
+- id: adjust.dodge_burn
+  rust_path: families::adjust::ADJUST_DODGE_BURN
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 4 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "dodge/burn: darkroom exposure terms; the brush masks the effect by its coverage (image-js stroke.rs FILTER STROKE)"
+    - "tonal-range weights are the quadratic Bernstein basis of Rec. 601 luma: shadows (1-y)^2, midtones 4y(1-y), highlights y^2"
+    - "dodge c + k(1-c) and burn c(1-k): screen / multiply against a constant grey k = exposure * weight (standard compositing algebra)"
+    - "sponge: linear saturation about the luma, y + (c-y)(1 +/- amount) (Haeberli, Matrix Operations for Image Processing, 1993)"
+    - "semantics from the published descriptions of the tools; no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs", "image-conformance/tests/gpu_module_kernels.rs"]
+
 - id: adjust.color_balance
   rust_path: families::adjust::ADJUST_COLOR_BALANCE
   state_row: image.kernel.family-t2

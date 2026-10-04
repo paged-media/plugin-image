@@ -395,6 +395,16 @@ export function brush_stroke_extend(x: number, y: number, pressure: number): Pro
 export function brush_stroke_set_source(x: number, y: number, aligned: boolean): void;
 
 /**
+ * Set the IN-FLIGHT dodge / burn / sponge stroke's options:
+ * `range` ∈ `shadows | midtones | highlights` and `exposure` 0–1 for
+ * dodge and burn; `saturate` picks the sponge's direction (false =
+ * desaturate). Call between `brush_stroke_begin` and the first
+ * extend — the options are frozen with the stroke. An error for any
+ * other tool, so a caller cannot believe a brush is dodging.
+ */
+export function brush_stroke_set_tone(range: string, exposure: number, saturate: boolean): void;
+
+/**
  * The in-flight stroke's readout for the panel:
  * `[dabs, x, y, w, h]` — the dab count and the stroke's bounding
  * box in image px. Empty when no stroke is in progress or nothing
@@ -688,6 +698,15 @@ export function layers_add(name: string): number;
 export function layers_add_adjustment(name: string, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean, ext: Float32Array): number;
 
 /**
+ * ADD LAYER MASK — REVEAL ALL (`reveal_all`, an all-white mask that
+ * changes nothing until painted) or HIDE ALL (all-black, the layer
+ * vanishes until painted back in). One undo step. The new mask
+ * becomes the EDIT TARGET, as Photoshop does, so the next stroke
+ * paints it. Refused when the layer already has a mask.
+ */
+export function layers_add_mask(index: number, reveal_all: boolean): void;
+
+/**
  * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
  * per-layer adjustment (the panel's chain is otherwise a re-runnable
  * PREVIEW of the composite and mutates nothing). Journaled over the
@@ -877,6 +896,14 @@ export function layers_set_blend(index: number, blend: string): void;
 
 export function layers_set_clipped(index: number, clipped: boolean): void;
 
+/**
+ * Make `index` active and choose what the paint tools write on it:
+ * its pixels, or (`mask`) its layer MASK. Selecting the mask of a
+ * layer with none is an error. Not an undo step — choosing a target
+ * changes nothing in the document.
+ */
+export function layers_set_edit_target(index: number, mask: boolean): void;
+
 export function layers_set_group_blend(id: number, blend: string): void;
 
 export function layers_set_group_name(id: number, name: string): void;
@@ -923,6 +950,17 @@ export function layers_undo(): Promise<string>;
  * Dissolve a group. Its layers stay, in place and unchanged.
  */
 export function layers_ungroup(id: number): void;
+
+/**
+ * PATCH: replace the SELECTION with the region `(dx, dy)` image px
+ * away from it, healed so it blends (`retouch::patch_rgba8`: the
+ * shifted source plus the membrane tone correction, composited
+ * through the selection's coverage on the GPU). Lands in the active
+ * layer as one journaled undo step ("Patch"). Needs a selection; a
+ * zero offset is refused rather than spending an undo step on the
+ * identity.
+ */
+export function patch_selection(handle: number, dx: number, dy: number): Promise<DecodedHandle>;
 
 /**
  * The hash of the sources this wasm was built from
@@ -1240,6 +1278,7 @@ export interface InitOutput {
     readonly brush_stroke_dirty_rect: () => [number, number];
     readonly brush_stroke_extend: (a: number, b: number, c: number) => any;
     readonly brush_stroke_set_source: (a: number, b: number, c: number) => [number, number];
+    readonly brush_stroke_set_tone: (a: number, b: number, c: number, d: number) => [number, number];
     readonly brush_stroke_stats: () => [number, number];
     readonly bucket_fill: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly crop_apply_drag: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
@@ -1271,6 +1310,7 @@ export interface InitOutput {
     readonly kernel_count: () => number;
     readonly layers_add: (a: number, b: number) => [number, number, number];
     readonly layers_add_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number) => [number, number, number];
+    readonly layers_add_mask: (a: number, b: number) => [number, number];
     readonly layers_bake_adjust: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => any;
     readonly layers_bound: () => number;
     readonly layers_canvas_op: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
@@ -1295,6 +1335,7 @@ export interface InitOutput {
     readonly layers_set_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => [number, number];
     readonly layers_set_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_clipped: (a: number, b: number) => [number, number];
+    readonly layers_set_edit_target: (a: number, b: number) => [number, number];
     readonly layers_set_group_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_group_name: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_group_opacity: (a: number, b: number) => [number, number];
@@ -1307,6 +1348,7 @@ export interface InitOutput {
     readonly layers_set_visible: (a: number, b: number) => [number, number];
     readonly layers_undo: () => any;
     readonly layers_ungroup: (a: number) => [number, number];
+    readonly patch_selection: (a: number, b: number, c: number) => any;
     readonly perf_counters: () => [number, number];
     readonly perf_counters_reset: () => void;
     readonly psd_apply_adjusted: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

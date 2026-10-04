@@ -64,6 +64,9 @@ describe("imageBundle.activate", () => {
       // The LAYER GRAPH's command-palette reach (the panel carries the
       // full palette).
       "media.paged.image.command.addLayer",
+      // Add Layer Mask, reveal-all and hide-all.
+      "media.paged.image.command.addLayerMask",
+      "media.paged.image.command.addLayerMaskHideAll",
       "media.paged.image.command.bakeAdjustToLayer",
       "media.paged.image.command.undo",
       "media.paged.image.command.redo",
@@ -125,6 +128,14 @@ describe("imageBundle.activate", () => {
       // The retouching pair — the brush with a sampled paint layer.
       "media.paged.image.tool.clone",
       "media.paged.image.tool.heal",
+      // The toning tools share the clone stamp's slot.
+      "media.paged.image.tool.dodge",
+      "media.paged.image.tool.burn",
+      "media.paged.image.tool.sponge",
+      "media.paged.image.tool.blur",
+      "media.paged.image.tool.sharpen",
+      "media.paged.image.tool.spotHeal",
+      "media.paged.image.tool.patch",
       "media.paged.image.tool.type",
     ]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);
