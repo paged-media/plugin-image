@@ -1,0 +1,30 @@
+{
+  "id": "rel.eq",
+  "oracle": "libvips",
+  "vips_version": "vips-8.18.6",
+  "recorded_at": "2026-10-04T10:37:31.373Z",
+  "runner": "scripts/vips/record.mjs",
+  "stimulus": {
+    "size": [
+      64,
+      64
+    ],
+    "bands": 4,
+    "formula": "h = (7x + 13y + 29c + 31*seed + 17*((x*y) mod 11)) mod 257; inputs use seed 1, 2",
+    "kinds": [
+      "quarter",
+      "quarter"
+    ]
+  },
+  "params": {},
+  "out": [
+    64,
+    64
+  ],
+  "region": null,
+  "commands": [
+    "vips relational -- A.v B.v T1.v equal",
+    "vips linear <out> <out> 0.00392156862745098 0"
+  ],
+  "note": "vips answers 255/0 in uchar; scaled to 1/0"
+}

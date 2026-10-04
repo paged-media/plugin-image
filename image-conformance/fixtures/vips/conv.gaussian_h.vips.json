@@ -1,0 +1,33 @@
+{
+  "id": "conv.gaussian_h",
+  "oracle": "libvips",
+  "vips_version": "vips-8.18.6",
+  "recorded_at": "2026-10-04T10:41:50.579Z",
+  "runner": "scripts/vips/record.mjs",
+  "stimulus": {
+    "size": [
+      64,
+      64
+    ],
+    "bands": 4,
+    "formula": "h = (7x + 13y + 29c + 31*seed + 17*((x*y) mod 11)) mod 257; inputs use seed 1, 2",
+    "kinds": [
+      "unit"
+    ]
+  },
+  "params": {
+    "sigma": 1.5,
+    "radius": 5
+  },
+  "out": [
+    16,
+    64
+  ],
+  "region": null,
+  "commands": [
+    "vips gaussmat --separable --precision=float -- G.v 1.5 0.001",
+    "vips conv --precision=float -- A.v T1.v G.v",
+    "vips extract_area -- T1.v O.v 24 0 16 64"
+  ],
+  "note": "vips gaussmat (min_ampl 0.001 gives the same 11 taps, normalised). The kernel's window halo is its MAX radius (24), so a 64-wide window yields 16 columns centred at 24..40"
+}

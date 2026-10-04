@@ -49,6 +49,7 @@ pub mod delta_e;
 pub mod device;
 pub mod harness;
 pub mod psd_builder;
+pub mod psd_corpus;
 pub mod psd_render;
 pub mod quantize;
 

@@ -1,0 +1,102 @@
+{
+  "fixture": "layer-stacks",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/layer-stacks.jsx",
+    "script_sha256": "80f917b728a421adf8898812be2ce84272354c736d81223d446c1a6bb2646b06",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-04T09:30:50.111Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "transparent-soft",
+      "params": {
+        "what": "one layer, feathered ellipse over transparency"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-stacks/transparent-soft.psd",
+        "layer-stacks/transparent-soft.png"
+      ]
+    },
+    {
+      "id": "opacity-blend-stack",
+      "params": {
+        "what": "background + multiply 70% + screen 100% (feathered)"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-stacks/opacity-blend-stack.psd",
+        "layer-stacks/opacity-blend-stack.png"
+      ]
+    },
+    {
+      "id": "clip-base-100",
+      "params": {
+        "what": "clip base 100% + clipped multiply"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-stacks/clip-base-100.psd",
+        "layer-stacks/clip-base-100.png"
+      ]
+    },
+    {
+      "id": "clip-base-50",
+      "params": {
+        "what": "clip base 50% + clipped multiply"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-stacks/clip-base-50.psd",
+        "layer-stacks/clip-base-50.png"
+      ]
+    },
+    {
+      "id": "layer-mask",
+      "params": {
+        "what": "full layer with a feathered rectangular layer mask"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-stacks/layer-mask.psd",
+        "layer-stacks/layer-mask.png"
+      ]
+    },
+    {
+      "id": "group-pass-through",
+      "params": {
+        "what": "pass-through group holding a multiply layer"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-stacks/group-pass-through.psd",
+        "layer-stacks/group-pass-through.png"
+      ]
+    },
+    {
+      "id": "group-isolated-50",
+      "params": {
+        "what": "normal group at 50% holding two overlapping layers"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-stacks/group-isolated-50.psd",
+        "layer-stacks/group-isolated-50.png"
+      ]
+    }
+  ]
+}

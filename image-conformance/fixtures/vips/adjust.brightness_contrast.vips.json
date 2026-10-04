@@ -1,0 +1,31 @@
+{
+  "id": "adjust.brightness_contrast",
+  "oracle": "libvips",
+  "vips_version": "vips-8.18.6",
+  "recorded_at": "2026-10-04T10:37:42.249Z",
+  "runner": "scripts/vips/record.mjs",
+  "stimulus": {
+    "size": [
+      64,
+      64
+    ],
+    "bands": 4,
+    "formula": "h = (7x + 13y + 29c + 31*seed + 17*((x*y) mod 11)) mod 257; inputs use seed 1, 2",
+    "kinds": [
+      "opaque"
+    ]
+  },
+  "params": {
+    "brightness": 0.1,
+    "contrast": 1.3
+  },
+  "out": [
+    64,
+    64
+  ],
+  "region": null,
+  "commands": [
+    "vips linear -- A.v O.v \"1.3 1.3 1.3 1\" \"-0.05000000000000002 -0.05000000000000002 -0.05000000000000002 0\""
+  ],
+  "note": null
+}
