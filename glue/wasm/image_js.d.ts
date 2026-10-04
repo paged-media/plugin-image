@@ -345,21 +345,6 @@ export function brush_stroke_cancel(): void;
 export function brush_stroke_commit(): Promise<DecodedHandle>;
 
 /**
- * EXTEND the stroke with one pointer sample (image px + normalized
- * pressure) and return the resulting straight RGBA8 for the WHOLE
- * image — the C-1 Stage-A preview payload.
- *
- * Dabs are interpolated from the previous sample at
- * `spacing · diameter` px of arc length (the residual carries across
- * samples), so a fast drag paints a continuous stroke rather than
- * one dot per pointer event. Only the dirty rectangle is
- * re-composited, always FROM the base pixels, so extending is
- * idempotent and the incremental result equals a from-scratch
- * composite of the same samples.
- */
-export function brush_stroke_extend(x: number, y: number, pressure: number): Promise<Uint8Array>;
-
-/**
  * COMMIT the stroke.
  *
  * * **With a layer stack bound** (the normal case): the painted
@@ -375,6 +360,28 @@ export function brush_stroke_extend(x: number, y: number, pressure: number): Pro
  *
  * Either way the result is the same size, so the caller may carry
  * the selection over with `selection_transfer`.
+ * The rectangle the last `brush_stroke_extend` changed, as
+ * `[x, y, w, h]` in image px (empty when it painted nothing) — what a
+ * host that takes tiles needs to resend instead of the whole preview.
+ */
+export function brush_stroke_dirty_rect(): Uint32Array;
+
+/**
+ * EXTEND the stroke with one pointer sample (image px + normalized
+ * pressure) and return the resulting straight RGBA8 for the WHOLE
+ * image — the C-1 Stage-A preview payload.
+ *
+ * Dabs are interpolated from the previous sample at
+ * `spacing · diameter` px of arc length (the residual carries across
+ * samples), so a fast drag paints a continuous stroke rather than
+ * one dot per pointer event. Only the dirty rectangle is
+ * re-composited, always FROM the base pixels, so extending is
+ * idempotent and the incremental result equals a from-scratch
+ * composite of the same samples.
+ */
+export function brush_stroke_extend(x: number, y: number, pressure: number): Promise<Uint8Array>;
+
+/**
  * Point the IN-FLIGHT clone/heal stroke at its source (the
  * alt-click anchor), in image px.
  *
@@ -1222,6 +1229,7 @@ export interface InitOutput {
     readonly brush_stroke_begin: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
     readonly brush_stroke_cancel: () => void;
     readonly brush_stroke_commit: () => any;
+    readonly brush_stroke_dirty_rect: () => [number, number];
     readonly brush_stroke_extend: (a: number, b: number, c: number) => any;
     readonly brush_stroke_set_source: (a: number, b: number, c: number) => [number, number];
     readonly brush_stroke_stats: () => [number, number];

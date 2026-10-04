@@ -103,7 +103,7 @@ use image_kernels::families::compose::ComposeParams;
 use image_kernels::families::gen::{GenSolidParams, GEN_SOLID};
 use image_kernels::KernelDef;
 
-use crate::execute::{execute_tile_once_async, TileInput};
+use crate::resident::{GpuBatch, Resident, TexFormat};
 use crate::{GpuContext, GpuError};
 
 /// What a stroke deposits.
@@ -275,21 +275,31 @@ pub async fn composite_stroke_window(
         return Ok(Vec::new());
     }
 
-    match *mode {
+    // Every dispatch below is recorded into ONE batch: the inputs are
+    // uploaded once, intermediates stay on the device, and only the
+    // result comes back — one submit, one readback per sample instead of
+    // one per dispatch. Every bracket decision reads the INPUT bytes
+    // (known on the CPU), never an intermediate, so the recorded chain
+    // is exactly the chain the per-dispatch path ran.
+    let mut b = GpuBatch::new(ctx);
+    let base = b.upload(w, h, TexFormat::Rgba16Float, base_f16);
+    let mask = b.upload(w, h, TexFormat::R16Float, mask_f16);
+    let unary = |b: &mut GpuBatch<'_>, def, params: &[u8], src: &Resident| {
+        let out = b.target(w, h);
+        b.dispatch(def, &[src], params, None, &out).map(|()| out)
+    };
+    let result = match *mode {
         // ── erase: one dispatch, straight space, RGB preserved ───────
         PaintMode::Erase => {
-            execute_tile_once_async(
-                ctx,
+            let out = b.target(w, h);
+            b.dispatch(
                 &BAND_SET_ALPHA,
-                &[TileInput {
-                    f16_bytes: base_f16,
-                }],
+                &[&base],
                 BandSetAlphaParams::new(0.0).as_bytes(),
-                Some(mask_f16),
-                w,
-                h,
-            )
-            .await
+                Some(&mask),
+                &out,
+            )?;
+            out
         }
 
         // ── clone / heal: a WINDOW is the paint layer ────────────────
@@ -297,7 +307,7 @@ pub async fn composite_stroke_window(
         // Structurally identical to `Paint` — the only change is where
         // the paint layer comes from, which is the whole reason the
         // clone stamp needed no new kernel. The correction (zero for
-        // clone) runs first, so heal and clone differ by two dispatches
+        // clone) runs first, so heal and clone differ by one dispatch
         // and nothing else.
         PaintMode::Sample {
             blend,
@@ -314,7 +324,11 @@ pub async fn composite_stroke_window(
                     ),
                 });
             }
-            let corrected = match correction_f16 {
+            let src = b.upload(w, h, TexFormat::Rgba16Float, source_f16);
+            // The opacity test reads the CORRECTED source when there is
+            // a correction — that one is an intermediate, so heal reads
+            // it back first, exactly as it always did.
+            let (source, opaque) = match correction_f16 {
                 Some(field) => {
                     if field.len() != texels * 8 {
                         return Err(GpuError::Kernel {
@@ -326,178 +340,106 @@ pub async fn composite_stroke_window(
                             ),
                         });
                     }
-                    Some(
-                        execute_tile_once_async(
-                            ctx,
-                            &MATH_ADD,
-                            &[
-                                TileInput {
-                                    f16_bytes: source_f16,
-                                },
-                                TileInput { f16_bytes: field },
-                            ],
-                            MathAddParams::new().as_bytes(),
-                            None,
-                            w,
-                            h,
-                        )
-                        .await?,
-                    )
+                    let f = b.upload(w, h, TexFormat::Rgba16Float, field);
+                    let sum = b.target(w, h);
+                    b.dispatch(
+                        &MATH_ADD,
+                        &[&src, &f],
+                        MathAddParams::new().as_bytes(),
+                        None,
+                        &sum,
+                    )?;
+                    let t = b.read(&sum);
+                    let corrected = std::mem::replace(&mut b, GpuBatch::new(ctx))
+                        .finish_async()
+                        .await?
+                        .swap_remove(t.0);
+                    let opaque = window_is_opaque(base_f16) && window_is_opaque(&corrected);
+                    (b.upload(w, h, TexFormat::Rgba16Float, &corrected), opaque)
                 }
-                None => None,
+                None => (
+                    src,
+                    window_is_opaque(base_f16) && window_is_opaque(source_f16),
+                ),
             };
-            let source = corrected.as_deref().unwrap_or(source_f16);
-
-            // Both windows come from the SAME image, so they are opaque
-            // together or not at all — one test, two brackets skipped.
-            let opaque = window_is_opaque(base_f16) && window_is_opaque(source);
-            let (base_premul, source_premul) = if opaque {
-                (None, None)
+            let premul = CastPremultiplyParams::new();
+            let (bp, sp) = if opaque {
+                (base.clone(), source.clone())
             } else {
                 (
-                    Some(
-                        execute_tile_once_async(
-                            ctx,
-                            &CAST_PREMULTIPLY,
-                            &[TileInput {
-                                f16_bytes: base_f16,
-                            }],
-                            CastPremultiplyParams::new().as_bytes(),
-                            None,
-                            w,
-                            h,
-                        )
-                        .await?,
-                    ),
-                    Some(
-                        execute_tile_once_async(
-                            ctx,
-                            &CAST_PREMULTIPLY,
-                            &[TileInput { f16_bytes: source }],
-                            CastPremultiplyParams::new().as_bytes(),
-                            None,
-                            w,
-                            h,
-                        )
-                        .await?,
-                    ),
+                    unary(&mut b, &CAST_PREMULTIPLY, premul.as_bytes(), &base)?,
+                    unary(&mut b, &CAST_PREMULTIPLY, premul.as_bytes(), &source)?,
                 )
             };
-
-            let composed = execute_tile_once_async(
-                ctx,
+            let composed = b.target(w, h);
+            b.dispatch(
                 blend,
-                &[
-                    TileInput {
-                        f16_bytes: base_premul.as_deref().unwrap_or(base_f16),
-                    },
-                    TileInput {
-                        f16_bytes: source_premul.as_deref().unwrap_or(source),
-                    },
-                ],
+                &[&bp, &sp],
                 ComposeParams::new(1.0).as_bytes(),
-                Some(mask_f16),
-                w,
-                h,
-            )
-            .await?;
-
+                Some(&mask),
+                &composed,
+            )?;
             if opaque {
-                return Ok(composed);
+                composed
+            } else {
+                unary(
+                    &mut b,
+                    &CAST_UNPREMULTIPLY,
+                    CastUnpremultiplyParams::new().as_bytes(),
+                    &composed,
+                )?
             }
-            execute_tile_once_async(
-                ctx,
-                &CAST_UNPREMULTIPLY,
-                &[TileInput {
-                    f16_bytes: &composed,
-                }],
-                CastUnpremultiplyParams::new().as_bytes(),
-                None,
-                w,
-                h,
-            )
-            .await
         }
 
         // ── paint: solid → premultiply → blend under the mask → back ─
         PaintMode::Paint { blend, color } => {
             let c = premul(color);
-            let paint = execute_tile_once_async(
-                ctx,
+            let paint = unary(
+                &mut b,
                 &GEN_SOLID,
-                &[TileInput {
-                    f16_bytes: base_f16,
-                }],
                 GenSolidParams::new(0, 0, c[0], c[1], c[2], c[3]).as_bytes(),
-                None,
-                w,
-                h,
-            )
-            .await?;
-
+                &base,
+            )?;
             // The bracket is skipped over an opaque window, where it is
-            // provably the identity — two fewer round-trips in the case
-            // that dominates (see the module docs).
+            // provably the identity (see the module docs).
             let opaque = window_is_opaque(base_f16);
-            let base_premul = if opaque {
-                None
+            let bp = if opaque {
+                base.clone()
             } else {
-                Some(
-                    execute_tile_once_async(
-                        ctx,
-                        &CAST_PREMULTIPLY,
-                        &[TileInput {
-                            f16_bytes: base_f16,
-                        }],
-                        CastPremultiplyParams::new().as_bytes(),
-                        None,
-                        w,
-                        h,
-                    )
-                    .await?,
-                )
+                unary(
+                    &mut b,
+                    &CAST_PREMULTIPLY,
+                    CastPremultiplyParams::new().as_bytes(),
+                    &base,
+                )?
             };
-
-            let composed = execute_tile_once_async(
-                ctx,
+            let composed = b.target(w, h);
+            // Opacity rides the MASK (coverage · opacity), never this
+            // param — one rule for paint and erase alike.
+            b.dispatch(
                 blend,
-                &[
-                    TileInput {
-                        f16_bytes: base_premul.as_deref().unwrap_or(base_f16),
-                    },
-                    TileInput { f16_bytes: &paint },
-                ],
-                // Opacity rides the MASK (coverage · opacity), never this
-                // param — one rule for paint and erase alike.
+                &[&bp, &paint],
                 ComposeParams::new(1.0).as_bytes(),
-                Some(mask_f16),
-                w,
-                h,
-            )
-            .await?;
-
+                Some(&mask),
+                &composed,
+            )?;
             if opaque {
-                // The composite of an opaque backdrop with an opaque
-                // paint colour is opaque, so unpremultiplying would be
-                // the identity too. (A colour with alpha < 1 still
-                // composites to alpha 1 over an opaque backdrop — the
-                // source-over `αo = αs + αb(1 − αs)` with `αb = 1`.)
-                return Ok(composed);
+                // The composite of an opaque backdrop with any paint
+                // colour is opaque (`αo = αs + αb(1 − αs)` with `αb = 1`),
+                // so unpremultiplying would be the identity too.
+                composed
+            } else {
+                unary(
+                    &mut b,
+                    &CAST_UNPREMULTIPLY,
+                    CastUnpremultiplyParams::new().as_bytes(),
+                    &composed,
+                )?
             }
-            execute_tile_once_async(
-                ctx,
-                &CAST_UNPREMULTIPLY,
-                &[TileInput {
-                    f16_bytes: &composed,
-                }],
-                CastUnpremultiplyParams::new().as_bytes(),
-                None,
-                w,
-                h,
-            )
-            .await
         }
-    }
+    };
+    let t = b.read(&result);
+    Ok(b.finish_async().await?.swap_remove(t.0))
 }
 
 #[cfg(test)]

@@ -822,6 +822,34 @@ export function brush_stroke_commit() {
 }
 
 /**
+ * COMMIT the stroke.
+ *
+ * * **With a layer stack bound** (the normal case): the painted
+ *   pixels are written into the ACTIVE LAYER, the tiles the stroke's
+ *   bounding box covers are journaled first (so the stroke is
+ *   undoable, tile-granularly, within the journal's stated bound),
+ *   and the stack is re-composited into the SAME engine-held image.
+ *   The returned handle is therefore the handle you started with —
+ *   the caller must NOT free it.
+ * * **Without one**: the pre-layer behaviour — the painted pixels
+ *   are registered as a NEW engine-held image and the caller swaps
+ *   handles and frees the old one.
+ *
+ * Either way the result is the same size, so the caller may carry
+ * the selection over with `selection_transfer`.
+ * The rectangle the last `brush_stroke_extend` changed, as
+ * `[x, y, w, h]` in image px (empty when it painted nothing) — what a
+ * host that takes tiles needs to resend instead of the whole preview.
+ * @returns {Uint32Array}
+ */
+export function brush_stroke_dirty_rect() {
+    const ret = wasm.brush_stroke_dirty_rect();
+    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v1;
+}
+
+/**
  * EXTEND the stroke with one pointer sample (image px + normalized
  * pressure) and return the resulting straight RGBA8 for the WHOLE
  * image — the C-1 Stage-A preview payload.
@@ -844,21 +872,6 @@ export function brush_stroke_extend(x, y, pressure) {
 }
 
 /**
- * COMMIT the stroke.
- *
- * * **With a layer stack bound** (the normal case): the painted
- *   pixels are written into the ACTIVE LAYER, the tiles the stroke's
- *   bounding box covers are journaled first (so the stroke is
- *   undoable, tile-granularly, within the journal's stated bound),
- *   and the stack is re-composited into the SAME engine-held image.
- *   The returned handle is therefore the handle you started with —
- *   the caller must NOT free it.
- * * **Without one**: the pre-layer behaviour — the painted pixels
- *   are registered as a NEW engine-held image and the caller swaps
- *   handles and frees the old one.
- *
- * Either way the result is the same size, so the caller may carry
- * the selection over with `selection_transfer`.
  * Point the IN-FLIGHT clone/heal stroke at its source (the
  * alt-click anchor), in image px.
  *
@@ -2644,6 +2657,9 @@ function __wbg_get_imports() {
         __wbg_copyTextureToBuffer_4186c16aef1922a5: function() { return handleError(function (arg0, arg1, arg2, arg3) {
             arg0.copyTextureToBuffer(arg1, arg2, arg3);
         }, arguments); },
+        __wbg_copyTextureToTexture_1be188df1e535c0a: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+            arg0.copyTextureToTexture(arg1, arg2, arg3);
+        }, arguments); },
         __wbg_createBindGroupLayout_9ea1a44942aaf13e: function() { return handleError(function (arg0, arg1) {
             const ret = arg0.createBindGroupLayout(arg1);
             return ret;
@@ -3304,12 +3320,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 778, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 785, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 794, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 801, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },

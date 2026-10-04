@@ -52,6 +52,15 @@ use image_js::ingest::{adjust_rgba8, AdjustParams, DecodedImage};
 use image_js::layers::LayerStack;
 use image_js::pixels::Pixels;
 
+/// Budget tests run one at a time: the device's texture pool and
+/// pipeline cache are shared, so a test running alongside another can
+/// find the pool emptied (or filled) by it and count a different number
+/// of textures for the same work.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn device() -> Option<&'static GpuContext> {
     image_gpu::test_support::device_or_skip("perf_budgets")
 }
@@ -128,6 +137,7 @@ const TILE16_NARROWED_BYTES: u64 = 0;
 
 #[test]
 fn a_16bit_tile_cut__feat__image_editor_tile_provider() {
+    let _serial = serial();
     let (w, h) = (256u32, 256u32);
     let samples: Vec<u16> = ramp(w, h, 7)
         .iter()
@@ -156,20 +166,24 @@ fn a_16bit_tile_cut__feat__image_editor_tile_provider() {
 
 // ── layer composite ──────────────────────────────────────────────────
 
-/// Measured 2026-10-04 on Metal: one pipeline build, submit and readback per
-/// dispatch, and the accumulator re-uploaded for every layer.
+/// Recompositing an UNCHANGED 3-layer 512² stack. Measured 2026-10-04 on
+/// Metal: 7 dispatches, submits and readbacks, 24 textures, 24.6 MB up —
+/// the whole fold again, the accumulator re-uploaded per layer. The
+/// resident fold hands back its last result: nothing changed, nothing
+/// to fold.
 const COMPOSITE3: [(&str, u64); 6] = [
-    ("pipelines_built", 0), // was 7: the per-device pipeline cache
-    ("dispatches", 7),
-    ("submits", 7),
-    ("textures_created", 24),
-    ("readbacks", 7),
-    ("bytes_uploaded", 24641576),
+    ("pipelines_built", 0),  // was 7: the per-device pipeline cache
+    ("dispatches", 0),       // was 7: the resident fold's last-result cache
+    ("submits", 0),          // was 7
+    ("textures_created", 0), // was 24
+    ("readbacks", 0),        // was 7
+    ("bytes_uploaded", 0),   // was 24641576
 ];
 
-/// One composite of a 3-layer 512² stack.
+/// One composite of an unchanged 3-layer 512² stack.
 #[test]
 fn a_three_layer_composite__feat__image_editor_layers() {
+    let _serial = serial();
     let Some(ctx) = device() else { return };
     let s = stack(512, 512, 3);
     pollster::block_on(s.composite(Some(ctx), None)).expect("warm-up");
@@ -178,7 +192,7 @@ fn a_three_layer_composite__feat__image_editor_layers() {
     out.expect("composite");
     let mut rows = vec![
         ("composites", e.composites, 1),
-        ("layers_folded", e.layers_folded, 3),
+        ("layers_folded", e.layers_folded, 0), // was 3
     ];
     for ((name, v), (_, b)) in gpu_rows(&g).into_iter().zip(COMPOSITE3) {
         rows.push((name, v, b));
@@ -186,20 +200,89 @@ fn a_three_layer_composite__feat__image_editor_layers() {
     check("3-layer composite 512²", &rows);
 }
 
-/// A 20-step opacity drag on the top layer: today every step is a full
-/// composite.
-/// Measured 2026-10-04 on Metal: 20 × the composite above.
+/// The FIRST composite of a freshly opened 3-layer 512² stack (the
+/// device already warm): every plate uploaded once, the whole fold in
+/// one submit with one readback. Before the resident fold this was the
+/// 7/7/7/24/24.6 MB of `COMPOSITE3`.
+const COMPOSITE3_COLD: [(&str, u64); 6] = [
+    ("pipelines_built", 0),
+    ("dispatches", 7),
+    ("submits", 1),
+    ("textures_created", 0),
+    ("readbacks", 1),
+    ("bytes_uploaded", 6291496),
+];
+
+#[test]
+fn a_fresh_stacks_first_composite__feat__image_editor_layers() {
+    let _serial = serial();
+    let Some(ctx) = device() else { return };
+    // Warm the device (pipelines, scratch textures) on another stack.
+    let warm = stack(512, 512, 3);
+    pollster::block_on(warm.composite(Some(ctx), None)).expect("warm-up");
+    drop(warm);
+    let s = stack(512, 512, 3);
+    counters::reset();
+    let (out, e, g) = counters::measure(|| pollster::block_on(s.composite(Some(ctx), None)));
+    out.expect("composite");
+    let mut rows = vec![
+        ("composites", e.composites, 1),
+        ("layers_folded", e.layers_folded, 3),
+    ];
+    for ((name, v), (_, b)) in gpu_rows(&g).into_iter().zip(COMPOSITE3_COLD) {
+        rows.push((name, v, b));
+    }
+    check("fresh 3-layer composite 512²", &rows);
+}
+
+/// An opacity change on the BOTTOM layer: below the checkpoint, so the
+/// whole stack re-folds — from plates already on the device.
+const COMPOSITE3_BOTTOM: [(&str, u64); 6] = [
+    ("pipelines_built", 0),
+    ("dispatches", 4),
+    ("submits", 1),
+    ("textures_created", 0),
+    ("readbacks", 1),
+    ("bytes_uploaded", 28),
+];
+
+#[test]
+fn a_bottom_layer_opacity_change__feat__image_editor_layers() {
+    let _serial = serial();
+    let Some(ctx) = device() else { return };
+    let mut s = stack(512, 512, 3);
+    pollster::block_on(s.composite(Some(ctx), None)).expect("warm-up");
+    s.set_opacity(0, 0.5).expect("opacity");
+    counters::reset();
+    let (out, e, g) = counters::measure(|| pollster::block_on(s.composite(Some(ctx), None)));
+    out.expect("composite");
+    let mut rows = vec![
+        ("composites", e.composites, 1),
+        ("layers_folded", e.layers_folded, 3),
+    ];
+    for ((name, v), (_, b)) in gpu_rows(&g).into_iter().zip(COMPOSITE3_BOTTOM) {
+        rows.push((name, v, b));
+    }
+    check("bottom-layer opacity change 512²", &rows);
+}
+
+/// A 20-step opacity drag on the top (active) layer. Measured 2026-10-04
+/// on Metal: 20 × the whole fold. Now each step re-folds from the
+/// checkpoint below the active layer — one blend and the unpremultiply,
+/// one submit, one readback — and the first step (opacity 1.0, which it
+/// already had) is the unchanged stack.
 const DRAG20: [(&str, u64); 6] = [
-    ("pipelines_built", 0), // was 140: the per-device pipeline cache
-    ("dispatches", 140),
-    ("submits", 140),
-    ("textures_created", 480),
-    ("readbacks", 140),
-    ("bytes_uploaded", 492831520),
+    ("pipelines_built", 0),  // was 140: the per-device pipeline cache
+    ("dispatches", 38),      // was 140: the resident fold
+    ("submits", 19),         // was 140
+    ("textures_created", 0), // was 480
+    ("readbacks", 19),       // was 140
+    ("bytes_uploaded", 228), // was 492831520: params only
 ];
 
 #[test]
 fn a_twenty_step_opacity_drag__feat__image_editor_layers() {
+    let _serial = serial();
     let Some(ctx) = device() else { return };
     let mut s = stack(512, 512, 3);
     pollster::block_on(s.composite(Some(ctx), None)).expect("warm-up");
@@ -212,7 +295,7 @@ fn a_twenty_step_opacity_drag__feat__image_editor_layers() {
     });
     let mut rows = vec![
         ("composites", e.composites, 20),
-        ("layers_folded", e.layers_folded, 60),
+        ("layers_folded", e.layers_folded, 19), // was 60
     ];
     for ((name, v), (_, b)) in gpu_rows(&g).into_iter().zip(DRAG20) {
         rows.push((name, v, b));
@@ -223,14 +306,16 @@ fn a_twenty_step_opacity_drag__feat__image_editor_layers() {
 // ── Apply (the adjust chain) ─────────────────────────────────────────
 
 /// Measured 2026-10-04 on Metal: every stage, every tile, its own pipeline
-/// build, upload, submit and readback.
+/// build, upload, submit and readback. Now each node's tiles go out in
+/// one submit, and a run of point stages chains on the device per tile
+/// (one upload in, one readback out); the dispatches are the same ones.
 const APPLY6: [(&str, u64); 6] = [
-    ("pipelines_built", 0), // was 276: the per-device pipeline cache
-    ("dispatches", 276),
-    ("submits", 276),
-    ("textures_created", 832),
-    ("readbacks", 276),
-    ("bytes_uploaded", 54978224),
+    ("pipelines_built", 0),       // was 276: the per-device pipeline cache
+    ("dispatches", 276),          // unchanged: the same dispatches
+    ("submits", 18),              // was 276: resident chains
+    ("textures_created", 0),      // was 832: scratch pool + constant mask
+    ("readbacks", 18),            // was 276
+    ("bytes_uploaded", 26098352), // was 54978224: no intermediate re-uploads
 ];
 
 /// Apply with six stages on (exposure, contrast, saturation, hue, blur,
@@ -238,6 +323,7 @@ const APPLY6: [(&str, u64); 6] = [
 /// nothing today.
 #[test]
 fn apply_with_six_stages__feat__image_editor_adjust_breadth() {
+    let _serial = serial();
     let Some(ctx) = device() else { return };
     let img = DecodedImage::from_rgba8(512, 512, ramp(512, 512, 3)).expect("img");
     let p = AdjustParams {
@@ -259,4 +345,76 @@ fn apply_with_six_stages__feat__image_editor_adjust_breadth() {
         .map(|((n, v), (_, b))| (n, v, b))
         .collect();
     check("Apply, 6 stages, 512²", &rows);
+}
+
+// ── brush (60 samples) ───────────────────────────────────────────────
+
+/// One stroke the way the `brush_stroke_extend` door runs it, sample
+/// by sample: extend the session, copy its pixels out, composite the
+/// stack with them standing in for the active layer, copy the preview
+/// out. Returns the number of samples that painted.
+fn brush_stroke(ctx: &GpuContext, s: &LayerStack, samples: usize) -> usize {
+    use image_js::stroke::{StrokeParams, StrokeSession, StrokeTool};
+    let mut params = StrokeParams::defaults(StrokeTool::Brush);
+    params.color = [0.9, 0.2, 0.1, 1.0];
+    let mut session = StrokeSession::begin_on(
+        1,
+        s.width(),
+        s.height(),
+        s.active().rgba.raw_arc(),
+        params,
+        None,
+    )
+    .expect("begin");
+    let mut painted = 0;
+    for i in 0..samples {
+        let sample =
+            image_gpu::StrokeSample::new(100.0 + i as f32 * 4.0, 200.0 + i as f32 * 2.0, 1.0);
+        if pollster::block_on(session.extend(ctx, sample)).expect("extend") {
+            painted += 1;
+        }
+        let px: Arc<[u8]> = Arc::from(session.pixels().to_vec().into_boxed_slice());
+        let preview = pollster::block_on(s.composite(Some(ctx), Some(&px))).expect("preview");
+        let _bytes = preview.to_vec();
+    }
+    painted
+}
+
+/// A 60-sample brush stroke on the top layer of a 3-layer 512² stack,
+/// previewed through the stack after every sample (the door's work).
+/// Measured 2026-10-04 on Metal with the resident fold, before the
+/// brush work: every painted sample re-uploaded the whole active plate
+/// and re-folded from the checkpoint at full size, and the stroke
+/// compositor submitted and read back every dispatch. Now the fold
+/// re-derives only the rectangle the sample changed (splicing it into
+/// the last result in place), the compositor runs as one batch, and a
+/// sample that painted nothing costs nothing.
+const BRUSH60: [(&str, u64); 6] = [
+    ("pipelines_built", 0),
+    ("dispatches", 308),        // was 356
+    ("submits", 88),            // was 236
+    ("textures_created", 6),    // was 572
+    ("readbacks", 88),          // was 236
+    ("bytes_uploaded", 848822), // was 127369120
+];
+
+#[test]
+fn a_sixty_sample_brush_stroke__feat__image_editor_paint() {
+    let _serial = serial();
+    let Some(ctx) = device() else { return };
+    let s = stack(512, 512, 3);
+    pollster::block_on(s.composite(Some(ctx), None)).expect("warm-up");
+    brush_stroke(ctx, &s, 60);
+    counters::reset();
+    let (painted, e, g) = counters::measure(|| brush_stroke(ctx, &s, 60));
+    let mut rows = vec![
+        ("painted_samples", painted as u64, 44),
+        ("composites", e.composites, 60),
+        ("layers_folded", e.layers_folded, 44), // was 60
+        ("whole_image_copies", e.whole_image_copies, 0),
+    ];
+    for ((name, v), (_, b)) in gpu_rows(&g).into_iter().zip(BRUSH60) {
+        rows.push((name, v, b));
+    }
+    check("60-sample brush 512²", &rows);
 }

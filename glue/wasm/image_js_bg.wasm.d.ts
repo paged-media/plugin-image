@@ -54,6 +54,7 @@ export const brush_stroke_active: () => number;
 export const brush_stroke_begin: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number];
 export const brush_stroke_cancel: () => void;
 export const brush_stroke_commit: () => any;
+export const brush_stroke_dirty_rect: () => [number, number];
 export const brush_stroke_extend: (a: number, b: number, c: number) => any;
 export const brush_stroke_set_source: (a: number, b: number, c: number) => [number, number];
 export const brush_stroke_stats: () => [number, number];

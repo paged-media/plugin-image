@@ -3837,7 +3837,9 @@ mod wasm {
             .extend(&ctx, StrokeSample::new(x, y, pressure))
             .await;
         let handle = session.handle();
-        let painted: Arc<[u8]> = Arc::from(session.pixels().to_vec().into_boxed_slice());
+        // Shared, not copied: the stroke copies on its next write only if
+        // the fold still holds this handle.
+        let painted = session.pixels_arc();
         STROKE.with(|s| *s.borrow_mut() = Some(session));
         result.map_err(|e| JsValue::from_str(&e.to_string()))?;
         // The preview is the WHOLE stack with the in-flight stroke
@@ -3884,6 +3886,20 @@ mod wasm {
     ///
     /// Either way the result is the same size, so the caller may carry
     /// the selection over with `selection_transfer`.
+    /// The rectangle the last `brush_stroke_extend` changed, as
+    /// `[x, y, w, h]` in image px (empty when it painted nothing) — what a
+    /// host that takes tiles needs to resend instead of the whole preview.
+    #[wasm_bindgen]
+    pub fn brush_stroke_dirty_rect() -> Vec<u32> {
+        STROKE.with(|s| {
+            s.borrow()
+                .as_ref()
+                .and_then(|session| session.last_dirty())
+                .map(|r| vec![r.x.max(0) as u32, r.y.max(0) as u32, r.w, r.h])
+                .unwrap_or_default()
+        })
+    }
+
     /// Point the IN-FLIGHT clone/heal stroke at its source (the
     /// alt-click anchor), in image px.
     ///

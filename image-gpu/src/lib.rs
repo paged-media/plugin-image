@@ -50,6 +50,10 @@ mod execute;
 mod pipeline;
 mod pool;
 mod residency;
+// Device-resident textures and the one-submit recording batch.
+mod resident;
+// Multi-stage per-tile chains through one batch.
+pub mod chain;
 
 // T2 reductions (spec §11): histogram + statistics. NOT KernelDefs —
 // they collapse a tile to a table/scalars, so they have no registry
@@ -113,6 +117,7 @@ pub use reduce::{
     RgbaLumaHistogram, Stats, AUTO_LEVELS_CLIP_HIGH, AUTO_LEVELS_CLIP_LOW,
 };
 pub use residency::{Acquired, ResidencyManager, Tier, HEAP_TILE_BYTES};
+pub use resident::{GpuBatch, ReadTicket, Resident, TexFormat};
 pub use selection::SelectionMask;
 pub use stroke::{composite_stroke_window, PaintMode};
 

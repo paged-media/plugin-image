@@ -1164,6 +1164,9 @@ export interface ImageEngine {
   brushActive(): boolean;
   /** The in-flight stroke's readout, or null before the first dab lands. */
   brushStats(): BrushStats | null;
+  /** The rectangle the last `brushExtend` changed, in image px; null
+   *  when it painted nothing. A host that takes tiles resends only this. */
+  brushDirtyRect(): { x: number; y: number; w: number; h: number } | null;
   /** Every blend mode a stroke can paint through, derived from the
    *  `compose.*` registry — so the panel's picker cannot drift from the
    *  kernels that actually exist. */
@@ -1700,6 +1703,7 @@ export interface ImageWasmModule {
   brush_stroke_cancel(): void;
   brush_stroke_active(): boolean;
   brush_stroke_stats(): Float64Array;
+  brush_stroke_dirty_rect(): Uint32Array;
   brush_blend_modes(): string;
   psd_open(bytes: Uint8Array): number;
   psd_layer_list(handle: number): string;
@@ -2321,6 +2325,11 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       const s = wasm.brush_stroke_stats();
       if (s.length < 5) return null;
       return { dabs: s[0], x: s[1], y: s[2], w: s[3], h: s[4] };
+    },
+    brushDirtyRect() {
+      const r = wasm.brush_stroke_dirty_rect();
+      if (r.length < 4) return null;
+      return { x: r[0], y: r[1], w: r[2], h: r[3] };
     },
     brushBlendModes: () =>
       wasm

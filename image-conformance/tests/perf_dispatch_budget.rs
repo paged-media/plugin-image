@@ -77,6 +77,10 @@ fn dispatch(ctx: &image_gpu::GpuContext, bytes: &[u8]) -> GpuCounters {
 /// One unary point kernel over one 64×64 tile, constant mask, warm.
 /// Until 2026-10-04 every dispatch also compiled a shader module and a
 /// pipeline (1 + 1 here); the per-device pipeline cache made them 0.
+/// It also created its input, mask and output textures (3) and uploaded
+/// a constant-1 mask: now they come from the scratch pool and the shared
+/// per-size constant, so a warm dispatch creates none and uploads only
+/// its input and params.
 #[test]
 fn one_dispatch_costs_exactly_this__feat__image_conformance_harness() {
     let Some(ctx) = test_device() else { return };
@@ -92,10 +96,10 @@ fn one_dispatch_costs_exactly_this__feat__image_conformance_harness() {
             dispatches: 1,
             dispatched_texels: texels,
             submits: 1,
-            // input + mask + output
-            textures_created: 3,
-            // rgba16f input + r16f constant mask + the param block
-            bytes_uploaded: texels * 8 + texels * 2 + MATH_ADD_CONST.params.size as u64,
+            // was 3 (input + mask + output): scratch pool + shared mask
+            textures_created: 0,
+            // rgba16f input + the param block (was + an r16f constant mask)
+            bytes_uploaded: texels * 8 + MATH_ADD_CONST.params.size as u64,
             readbacks: 1,
             // 64 texels × 8 bytes = 512 per row, already 256-aligned
             bytes_read_back: texels * 8,
