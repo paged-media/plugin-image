@@ -794,7 +794,7 @@ export function layers_redo(): Promise<string>;
 
 /**
  * Remove `index`. Removing the ONLY layer is refused (a document
- * keeps at least one). NOT journaled — see the section docs.
+ * keeps at least one). One undo step (`LayerStack::remove`).
  */
 export function layers_remove(index: number): void;
 

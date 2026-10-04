@@ -535,6 +535,52 @@ pub struct LayerStack {
     active: usize,
     next_id: u32,
     journal: TileJournal,
+    /// The UNDO list, oldest first: pixel steps (the journal holds their
+    /// tiles, in the same order) and structure steps (a snapshot).
+    steps: Vec<Step>,
+    /// The REDO list, next-to-replay last.
+    undone: Vec<Step>,
+    /// Steps dropped from the front by the bounds, all kinds.
+    dropped_steps: u64,
+    /// Bumped by every recorded or replayed structure step.
+    structure_generation: u64,
+}
+
+/// Most structure steps kept (the journal bounds the pixel ones).
+pub const MAX_STRUCTURE_STEPS: usize = 200;
+
+/// Everything but pixels-in-the-journal: what a structure step restores.
+/// Cheap — layer pixels are shared `Arc`s, so a snapshot copies pointers.
+#[derive(Debug, Clone)]
+struct Snapshot {
+    width: u32,
+    height: u32,
+    layers: Vec<Layer>,
+    groups: Vec<LayerGroup>,
+    active: usize,
+    next_id: u32,
+}
+
+/// One undo step.
+///
+/// Why one list works: undo is LIFO, so a pixel step is only ever replayed
+/// against the stack it was recorded on — every structure change made
+/// after it (a removed layer, a rotated canvas) has been undone first.
+/// That is what lets removing a layer or rotating the canvas stay in the
+/// history instead of wiping it.
+#[derive(Debug, Clone)]
+enum Step {
+    /// One journal entry (its label lives in the journal).
+    Pixels,
+    /// A structure change; `other` is the state on the far side of it
+    /// (before, on the undo list; after, on the redo list).
+    Structure {
+        label: String,
+        /// Consecutive steps with the same key merge into one (a slider
+        /// drag is one undo step, not twenty).
+        merge_key: Option<String>,
+        other: Box<Snapshot>,
+    },
 }
 
 impl LayerStack {
@@ -594,6 +640,10 @@ impl LayerStack {
             active: 0,
             next_id: 2,
             journal: TileJournal::new(),
+            steps: Vec::new(),
+            undone: Vec::new(),
+            dropped_steps: 0,
+            structure_generation: 0,
         })
     }
 
@@ -650,6 +700,10 @@ impl LayerStack {
             layers,
             next_id,
             journal: TileJournal::new(),
+            steps: Vec::new(),
+            undone: Vec::new(),
+            dropped_steps: 0,
+            structure_generation: 0,
         })
     }
 
@@ -743,11 +797,25 @@ impl LayerStack {
     /// every mask and every smart object's source move together, so the
     /// stack keeps its layers (a crop, by contrast, flattens).
     ///
-    /// The undo journal is CLEARED: its tiles address the old extent and
-    /// could not be replayed onto the new one. Canvas Size is refused
-    /// while a smart object is in the stack (its render would no longer
-    /// line up with its source).
+    /// One undo step; the history before it stays (undoing the op first
+    /// restores the extent older pixel steps were recorded against).
+    /// Canvas Size is refused while a smart object is in the stack (its
+    /// render would no longer line up with its source).
     pub fn transform_canvas(&mut self, op: CanvasOp) -> Result<(), IngestError> {
+        let label = match op {
+            CanvasOp::RotateCw => "Rotate 90° clockwise",
+            CanvasOp::RotateCcw => "Rotate 90° counter-clockwise",
+            CanvasOp::Rotate180 => "Rotate 180°",
+            CanvasOp::FlipHorizontal => "Flip horizontal",
+            CanvasOp::FlipVertical => "Flip vertical",
+            CanvasOp::Resize { .. } => "Canvas size",
+        };
+        // Always recorded, for the reason `remove` is: older pixel steps
+        // address the old extent and must not be reachable across it.
+        self.recorded(label, None, |s| s.transform_canvas_unrecorded(op))
+    }
+
+    fn transform_canvas_unrecorded(&mut self, op: CanvasOp) -> Result<(), IngestError> {
         let (w, h) = (self.width, self.height);
         let (ow, oh) = op.output_size(w, h);
         if ow == 0 || oh == 0 {
@@ -788,7 +856,6 @@ impl LayerStack {
         }
         self.width = ow;
         self.height = oh;
-        self.journal = TileJournal::new();
         Ok(())
     }
 
@@ -938,7 +1005,14 @@ impl LayerStack {
 
     /// Remove `index`. Refused for the LAST layer — a document with no
     /// pixels at all is not a state this offers by one click.
+    /// Remove a layer, as ONE undo step (always recorded: the journal's
+    /// entries for the removed layer stay valid only because undo has to
+    /// bring the layer back before it can reach them).
     pub fn remove(&mut self, index: usize) -> Result<(), IngestError> {
+        self.recorded("Delete layer", None, |s| s.remove_unrecorded(index))
+    }
+
+    fn remove_unrecorded(&mut self, index: usize) -> Result<(), IngestError> {
         if index >= self.layers.len() {
             return Err(IngestError::Unsupported(format!("no layer {index}")));
         }
@@ -951,12 +1025,9 @@ impl LayerStack {
         if self.active >= self.layers.len() {
             self.active = self.layers.len() - 1;
         }
-        // The journal's entries are keyed by LAYER ID, and this one's
-        // pixels are gone — an entry that can never be applied is worse
-        // than no entry, so the whole history goes. That is the price of
-        // a linear journal and it is stated in the panel rather than
-        // discovered when Undo does nothing.
-        self.journal.clear();
+        // The journal's entries for this layer stay: undo is LIFO, so they
+        // can only be replayed after the removal itself has been undone
+        // (when recorded through `recorded`), which brings the layer back.
         Ok(())
     }
 
@@ -1359,6 +1430,11 @@ impl LayerStack {
             self.journal.record(label, active.id as u64, &view, clipped)
         };
         self.layers[self.active].rgba = pixels;
+        if matches!(outcome, RecordOutcome::Recorded { .. }) {
+            self.steps.push(Step::Pixels);
+            self.undone.clear();
+        }
+        self.sync_with_journal();
         Ok(outcome)
     }
 
@@ -1377,18 +1453,154 @@ impl LayerStack {
 
     // ──────────────────────────── undo ──────────────────────────────
 
-    /// Revert the newest journaled pixel edit. Returns its label, or
+    /// Run a STRUCTURE change (anything but painting pixels) as one undo
+    /// step labelled `label`. Consecutive steps with the same `merge_key`
+    /// merge — a slider drag is one step. Nothing is recorded when `f`
+    /// fails.
+    pub fn recorded<T>(
+        &mut self,
+        label: &str,
+        merge_key: Option<&str>,
+        f: impl FnOnce(&mut Self) -> Result<T, IngestError>,
+    ) -> Result<T, IngestError> {
+        let before = self.snapshot();
+        let out = f(self)?;
+        let merges = matches!(
+            (self.steps.last(), merge_key),
+            (Some(Step::Structure { merge_key: Some(k), .. }), Some(m)) if k == m
+        );
+        if !merges {
+            self.steps.push(Step::Structure {
+                label: label.to_string(),
+                merge_key: merge_key.map(str::to_string),
+                other: Box::new(before),
+            });
+        }
+        self.undone.clear();
+        self.structure_generation += 1;
+        self.enforce_step_bound();
+        Ok(out)
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            width: self.width,
+            height: self.height,
+            layers: self.layers.clone(),
+            groups: self.groups.clone(),
+            active: self.active,
+            next_id: self.next_id,
+        }
+    }
+
+    fn restore(&mut self, s: Snapshot) {
+        self.width = s.width;
+        self.height = s.height;
+        self.layers = s.layers;
+        self.groups = s.groups;
+        self.active = s.active;
+        self.next_id = s.next_id;
+    }
+
+    /// The journal bounds its own entries (and clears itself when one
+    /// edit is too large). Every pixel step it no longer holds — and every
+    /// step older than that, which could only be reached through it — is
+    /// dropped here, so the two lists never disagree.
+    fn sync_with_journal(&mut self) {
+        let held = self.journal.depth();
+        let mut pixel_steps = self
+            .steps
+            .iter()
+            .filter(|s| matches!(s, Step::Pixels))
+            .count();
+        while pixel_steps > held {
+            match self.steps.remove(0) {
+                Step::Pixels => pixel_steps -= 1,
+                Step::Structure { .. } => {}
+            }
+            self.dropped_steps += 1;
+        }
+    }
+
+    /// At most [`MAX_STRUCTURE_STEPS`] structure steps; the oldest steps
+    /// go first (pixel ones included, which the journal then still holds
+    /// unreachably until its own bound evicts them).
+    fn enforce_step_bound(&mut self) {
+        while self
+            .steps
+            .iter()
+            .filter(|s| matches!(s, Step::Structure { .. }))
+            .count()
+            > MAX_STRUCTURE_STEPS
+        {
+            self.steps.remove(0);
+            self.dropped_steps += 1;
+        }
+    }
+
+    /// Undo the newest step, pixels or structure. Returns its label, or
     /// `None` when there is nothing to undo.
     pub fn undo(&mut self) -> Option<String> {
-        self.apply_history(true)
+        let step = self.steps.pop()?;
+        match step {
+            Step::Pixels => match self.apply_pixels(true) {
+                Some(label) => {
+                    self.undone.push(Step::Pixels);
+                    Some(label)
+                }
+                None => {
+                    // Cannot happen while the lists are synced; if it did,
+                    // the step is unreplayable and is dropped.
+                    self.sync_with_journal();
+                    None
+                }
+            },
+            Step::Structure {
+                label,
+                merge_key,
+                other,
+            } => {
+                let now = self.snapshot();
+                self.restore(*other);
+                self.structure_generation += 1;
+                self.undone.push(Step::Structure {
+                    label: label.clone(),
+                    merge_key,
+                    other: Box::new(now),
+                });
+                Some(label)
+            }
+        }
     }
 
-    /// Replay the newest undone pixel edit.
+    /// Replay the newest undone step.
     pub fn redo(&mut self) -> Option<String> {
-        self.apply_history(false)
+        let step = self.undone.pop()?;
+        match step {
+            Step::Pixels => {
+                let label = self.apply_pixels(false)?;
+                self.steps.push(Step::Pixels);
+                Some(label)
+            }
+            Step::Structure {
+                label,
+                merge_key,
+                other,
+            } => {
+                let now = self.snapshot();
+                self.restore(*other);
+                self.structure_generation += 1;
+                self.steps.push(Step::Structure {
+                    label: label.clone(),
+                    merge_key,
+                    other: Box::new(now),
+                });
+                Some(label)
+            }
+        }
     }
 
-    /// Undo/redo share everything but direction.
+    /// Replay one journal entry, either way.
     ///
     /// The entry's SCOPE says which layer it belongs to — the newest
     /// edit is not necessarily on the layer that happens to be active —
@@ -1396,15 +1608,12 @@ impl LayerStack {
     /// there, and that layer becomes active so the change is visibly
     /// where it happened. The layer's shared pixels are materialized
     /// once (the journal splices into a mutable buffer) and re-shared.
-    fn apply_history(&mut self, undo: bool) -> Option<String> {
+    fn apply_pixels(&mut self, undo: bool) -> Option<String> {
         let scope = if undo {
             self.journal.undo_scope()
         } else {
             self.journal.redo_scope()
         }?;
-        // A scope with no layer cannot happen — `remove` clears the
-        // journal precisely so a removed layer leaves no orphan entries
-        // — but if it ever did, doing nothing is the only safe answer.
         let idx = self.layers.iter().position(|l| l.id as u64 == scope)?;
         let (w, h) = (self.width, self.height);
         // The layer's OWN bytes, at its own depth — narrowing here
@@ -1429,42 +1638,58 @@ impl LayerStack {
     pub fn history(&self) -> HistoryStats {
         let b = self.journal.budget();
         HistoryStats {
-            can_undo: self.journal.can_undo(),
-            can_redo: self.journal.can_redo(),
-            depth: self.journal.depth(),
-            redo_depth: self.journal.redo_depth(),
+            can_undo: !self.steps.is_empty(),
+            can_redo: !self.undone.is_empty(),
+            depth: self.steps.len(),
+            redo_depth: self.undone.len(),
             bytes: self.journal.bytes(),
             max_bytes: b.max_bytes,
             max_entries: b.max_entries,
-            dropped: self.journal.dropped(),
-            generation: self.journal.generation(),
+            dropped: self.journal.dropped() + self.dropped_steps,
+            generation: self.journal.generation() + self.structure_generation,
         }
     }
 
     pub fn undo_label(&self) -> Option<&str> {
-        self.journal.undo_label()
+        self.undo_labels().pop()
     }
 
     pub fn redo_label(&self) -> Option<&str> {
-        self.journal.redo_label()
+        self.redo_labels().first().copied()
     }
 
     /// Every retained undo step, oldest first — what a History panel
-    /// lists. See `TileJournal::undo_labels` on why this is the RETAINED
-    /// history and not the whole session.
+    /// lists (pixel labels come from the journal, in the same order).
     pub fn undo_labels(&self) -> Vec<&str> {
-        self.journal.undo_labels()
+        let mut pixel = self.journal.undo_labels().into_iter();
+        self.steps
+            .iter()
+            .map(|s| match s {
+                Step::Pixels => pixel.next().unwrap_or("Edit"),
+                Step::Structure { label, .. } => label.as_str(),
+            })
+            .collect()
     }
 
     /// Every redo step, next-to-replay first.
     pub fn redo_labels(&self) -> Vec<&str> {
-        self.journal.redo_labels()
+        let mut pixel = self.journal.redo_labels().into_iter();
+        self.undone
+            .iter()
+            .rev()
+            .map(|s| match s {
+                Step::Pixels => pixel.next().unwrap_or("Edit"),
+                Step::Structure { label, .. } => label.as_str(),
+            })
+            .collect()
     }
 
-    /// Drop the history (a resolution change makes every tile snapshot
-    /// meaningless — better to say "no history" than to restore garbage).
+    /// Drop the history.
     pub fn clear_history(&mut self) {
         self.journal.clear();
+        self.dropped_steps += self.steps.len() as u64;
+        self.steps.clear();
+        self.undone.clear();
     }
 
     // ───────────────────────── the composite ────────────────────────
@@ -1521,17 +1746,6 @@ impl LayerStack {
     /// GPU-only whenever there is anything to blend (every step is a
     /// registered `compose.*`/`cast.*` dispatch, spec §6); the trivial
     /// stack short-circuits before touching the device.
-    /// Does folding this stack need a GPU? (False for the empty stack and
-    /// the one-plain-layer fast path, which `composite` answers without
-    /// a device.)
-    pub fn composite_needs_gpu(&self) -> bool {
-        match self.plates(None).as_slice() {
-            [] => false,
-            [(l, _)] => !l.is_plain(),
-            _ => true,
-        }
-    }
-
     pub async fn composite(
         &self,
         ctx: Option<&GpuContext>,
@@ -1890,6 +2104,49 @@ mod tests {
         assert!(s.set_adjustment(a, p).is_err(), "locked");
     }
 
+    #[test]
+    #[allow(non_snake_case)]
+    fn structure_and_pixel_steps_share_one_list_and_drags_merge__feat__image_editor_undo_journal() {
+        let mut s = stack(4, 4);
+        s.recorded("New layer", None, |st| Ok(st.add("B")))
+            .expect("add");
+        s.edit_active("Paint", Region::new(0, 0, 4, 4), px(4, 4, 7).into())
+            .expect("paint");
+        // A twenty-step opacity drag is ONE step.
+        for k in 0..20 {
+            s.recorded("Layer opacity", Some("opacity:1"), |st| {
+                st.set_opacity(1, 1.0 - k as f32 / 40.0)
+            })
+            .expect("opacity");
+        }
+        assert_eq!(s.undo_labels(), vec!["New layer", "Paint", "Layer opacity"]);
+        assert!((s.layers[1].opacity - (1.0 - 19.0 / 40.0)).abs() < 1e-6);
+        // Undo walks back through both kinds, in order.
+        assert_eq!(s.undo().as_deref(), Some("Layer opacity"));
+        assert_eq!(s.layers[1].opacity, 1.0, "the drag's START value");
+        assert_eq!(s.undo().as_deref(), Some("Paint"));
+        assert_eq!(s.undo().as_deref(), Some("New layer"));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.undo(), None);
+        assert_eq!(s.redo_labels(), vec!["New layer", "Paint", "Layer opacity"]);
+        // A new step clears the redo list.
+        s.redo().expect("redo");
+        s.recorded("Rename layer", None, |st| st.set_name(1, "C"))
+            .expect("rename");
+        assert_eq!(s.redo(), None);
+        assert!(s.history().generation > 0);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_failing_structure_edit_records_nothing__feat__image_editor_undo_journal() {
+        let mut s = stack(2, 2);
+        assert!(s
+            .recorded("Opacity", None, |st| st.set_opacity(9, 0.5))
+            .is_err());
+        assert!(!s.history().can_undo);
+    }
+
     // ── canvas operations ────────────────────────────────────────────
 
     /// A 3×2 canvas whose pixel at (x, y) has red = 10·y + x.
@@ -1983,17 +2240,22 @@ mod tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn canvas_ops_clear_the_history_and_refuse_resize_over_a_smart_object__feat__image_editor_layers(
-    ) {
+    fn canvas_ops_are_undoable_and_refuse_resize_over_a_smart_object__feat__image_editor_layers() {
         let mut s = numbered();
         s.edit_active("paint", Region::new(0, 0, 3, 2), px(3, 2, 9).into())
             .expect("edit");
-        assert!(s.history().can_undo);
         s.transform_canvas(CanvasOp::RotateCw).expect("rotate");
-        assert!(
-            !s.history().can_undo,
-            "the journal's tiles addressed the old extent"
-        );
+        assert_eq!((s.width, s.height), (2, 3));
+        assert_eq!(s.undo_labels(), vec!["paint", "Rotate 90° clockwise"]);
+        // Undo the rotation, then the paint — each on the extent it knew.
+        assert_eq!(s.undo().as_deref(), Some("Rotate 90° clockwise"));
+        assert_eq!((s.width, s.height), (3, 2));
+        assert_eq!(reds(&s), vec![9; 6]);
+        assert_eq!(s.undo().as_deref(), Some("paint"));
+        assert_eq!(reds(&s), reds(&numbered()));
+        assert_eq!(s.redo().as_deref(), Some("paint"));
+        assert_eq!(s.redo().as_deref(), Some("Rotate 90° clockwise"));
+        assert_eq!((s.width, s.height), (2, 3));
         s.make_smart(0).expect("smart");
         let err = s
             .transform_canvas(CanvasOp::Resize {
@@ -2004,6 +2266,11 @@ mod tests {
             })
             .expect_err("refused");
         assert!(err.to_string().contains("smart object"));
+        assert_eq!(
+            s.undo_labels().last().copied(),
+            Some("Rotate 90° clockwise"),
+            "a refused op records nothing"
+        );
         // Rotation is fine: the source rotates with the render.
         s.transform_canvas(CanvasOp::Rotate180)
             .expect("rotate smart");
@@ -2902,18 +3169,34 @@ mod tests {
     }
 
     #[test]
-    fn image_editor_undo_removing_a_layer_clears_the_history() {
-        // The journal is keyed by layer id; a removed layer's entries
-        // could never be applied, so the whole (linear) history goes —
-        // stated, not discovered when Undo silently does nothing.
+    #[allow(non_snake_case)]
+    fn image_editor_undo_removing_a_layer_is_one_step_and_its_paint_stays_reachable__feat__image_editor_undo_journal(
+    ) {
+        // Undo is LIFO: the paint on the removed layer can only be undone
+        // after the removal is, which brings the layer back first.
         let mut s = stack(32, 32);
         s.add("B");
         s.edit_active("Paint", Region::new(0, 0, 32, 32), px(32, 32, 9).into())
             .expect("unlocked");
-        assert!(s.history().can_undo);
         s.remove(1).expect("not the last layer");
-        assert!(!s.history().can_undo);
-        assert_eq!(s.history().bytes, 0);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.undo_labels(), vec!["Paint", "Delete layer"]);
+        assert_eq!(s.undo().as_deref(), Some("Delete layer"));
+        assert_eq!(s.len(), 2);
+        assert_eq!(
+            s.layers[1].rgba.to_rgba8()[0],
+            9,
+            "the layer comes back painted"
+        );
+        assert_eq!(s.undo().as_deref(), Some("Paint"));
+        assert_eq!(
+            s.layers[1].rgba.to_rgba8()[3],
+            0,
+            "and the paint undoes on it"
+        );
+        assert_eq!(s.redo().as_deref(), Some("Paint"));
+        assert_eq!(s.redo().as_deref(), Some("Delete layer"));
+        assert_eq!(s.len(), 1);
     }
 
     #[test]

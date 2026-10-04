@@ -1876,7 +1876,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       refreshSourceReadout();
       setStatus(
         `${op === "canvas" ? "Canvas size" : "Canvas"} → ${wh.width}×${wh.height}. ` +
-          "Undo history cleared (it addressed the old canvas).",
+          "One undo step.",
       );
       if (src.elementId) await api.apply();
       else emit();
@@ -3255,11 +3255,7 @@ export function createImageSession(host: BundleHost): ImageSession {
         engine!.layerRemove(index),
       );
       if (ok) {
-        setStatus(
-          `Removed “${name}”. Layer structure is not journaled, and a removed ` +
-            "layer's history could never be replayed — so the undo history was " +
-            "CLEARED. Nothing before this point can be undone.",
-        );
+        setStatus(`Removed “${name}” — Undo brings it back.`);
       }
       return ok;
     },

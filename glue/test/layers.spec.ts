@@ -227,15 +227,16 @@ describe("the layer session (real engine wasm, no GPU in Node)", () => {
     handle.dispose();
   });
 
-  it("the last layer cannot be removed, and a removal says it is not undoable", async () => {
+  it("the last layer cannot be removed, and a removal is one undo step", async () => {
     const { handle, session } = await ingest();
     expect(await session.removeLayer(0)).toBe(false);
     expect(session.state().status).toContain("only layer");
     await session.addLayer("Paint");
     expect(await session.removeLayer(1)).toBe(true);
     expect(session.state().layers.layers).toHaveLength(1);
-    expect(session.state().status).toContain("undo history was CLEARED");
-    expect(session.state().history).toMatchObject({ canUndo: false, depth: 0 });
+    expect(session.state().status).toContain("Undo brings it back");
+    expect(session.state().history).toMatchObject({ canUndo: true });
+    expect(session.state().history?.undoLabel).toBe("Delete layer");
     handle.dispose();
   });
 
@@ -456,17 +457,17 @@ describe("the panel's Layers section", () => {
     expect(render()).toContain(LAYERS_SCOPE_NOTE);
   });
 
-  it("the scope note names every thing a layer here is NOT", () => {
-    expect(LAYERS_SCOPE_NOTE).toContain("canvas-extent PIXEL layers");
+  it("the scope note says what a layer can be and what undo covers", () => {
+    expect(LAYERS_SCOPE_NOTE).toContain("canvas-extent layers");
     expect(LAYERS_SCOPE_NOTE).toContain("compose.* kernels");
-    // The four modeling gaps, named.
-    expect(LAYERS_SCOPE_NOTE).toContain("no groups");
-    expect(LAYERS_SCOPE_NOTE).toContain("no clipping masks");
-    expect(LAYERS_SCOPE_NOTE).toContain("no per-layer masks");
-    expect(LAYERS_SCOPE_NOTE).toContain("no adjustment layers");
-    // What undo does and does NOT cover.
-    expect(LAYERS_SCOPE_NOTE).toContain("Undo covers PIXEL edits only");
-    expect(LAYERS_SCOPE_NOTE).toContain("removing a layer clears the history");
+    // What a layer can be — the old "no groups / no masks" note was
+    // left standing long after those shipped.
+    expect(LAYERS_SCOPE_NOTE).toContain("grouped, clipped and masked");
+    expect(LAYERS_SCOPE_NOTE).toContain("an adjustment");
+    // What undo covers, and its bound.
+    expect(LAYERS_SCOPE_NOTE).toContain("Undo is ONE list");
+    expect(LAYERS_SCOPE_NOTE).toContain("removing");
+    expect(LAYERS_SCOPE_NOTE).toContain("bounded");
     // The consequences people would otherwise discover by losing work.
     expect(LAYERS_SCOPE_NOTE).toContain("FLATTENS");
     expect(LAYERS_SCOPE_NOTE).toContain("undo history goes with it");
@@ -474,7 +475,7 @@ describe("the panel's Layers section", () => {
       "Export and save-back write the FLATTENED composite, not the layers",
     );
     // The PSD lane's exact condition.
-    expect(LAYERS_SCOPE_NOTE).toContain("flat, unclipped, unmasked, 8-bit RGB");
+    expect(LAYERS_SCOPE_NOTE).toContain("8- or 16-bit RGB, with no groups and no layer masks");
     expect(LAYERS_SCOPE_NOTE).toContain("says why");
   });
 });

@@ -45,7 +45,7 @@ describe("Image ▸ Rotate / Flip / Canvas Size", () => {
     expect(await session.importBytes("r.psd", psdBytes())).toBe(true);
     expect(await session.canvasOp("rotate-cw")).toBe(true);
     expect(session.state().source).toMatchObject({ width: 1, height: 2 });
-    expect(session.state().status).toMatch(/history cleared/);
+    expect(session.state().status).toMatch(/One undo step/);
     // psdBytes(): left (10,30,50), right (20,40,60); clockwise puts left on top.
     expect(session.sampleColor([0, 0])!.map((v) => Math.round(v * 255))).toEqual([10, 30, 50, 255]);
     expect(session.sampleColor([0, 1])!.map((v) => Math.round(v * 255))).toEqual([20, 40, 60, 255]);

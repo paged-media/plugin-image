@@ -2675,6 +2675,20 @@ mod wasm {
 
     /// Take the bound stack out of the `RefCell` (no borrow across an
     /// `await`), run `f`, put it back — restored even when `f` fails.
+    /// A STRUCTURE edit as one undo step (`LayerStack::recorded`); edits
+    /// sharing a `merge_key` in a row merge (a slider drag is one step).
+    fn recorded_edit<T>(
+        label: &str,
+        merge_key: Option<String>,
+        f: impl FnOnce(&mut LayerStack) -> Result<T, IngestError>,
+    ) -> Result<T, JsValue> {
+        with_stack(|d| {
+            d.stack
+                .recorded(label, merge_key.as_deref(), f)
+                .map_err(ingest_err)
+        })
+    }
+
     async fn with_stack_async<T, F, Fut>(f: F) -> Result<T, JsValue>
     where
         F: FnOnce(LayerDoc) -> Fut,
@@ -2916,21 +2930,20 @@ mod wasm {
     /// active). Returns its index.
     #[wasm_bindgen]
     pub fn layers_add(name: &str) -> Result<usize, JsValue> {
-        with_stack(|d| Ok(d.stack.add(name)))
+        recorded_edit("New layer", None, |st| Ok(st.add(name)))
     }
 
     /// Duplicate `index` above itself (the copy becomes active).
     #[wasm_bindgen]
     pub fn layers_duplicate(index: usize) -> Result<usize, JsValue> {
-        with_stack(|d| {
-            d.stack
-                .duplicate(index)
-                .ok_or_else(|| JsValue::from_str(&format!("no layer {index}")))
+        recorded_edit("Duplicate layer", None, |st| {
+            st.duplicate(index)
+                .ok_or_else(|| IngestError::Unsupported(format!("no layer {index}")))
         })
     }
 
     /// Remove `index`. Removing the ONLY layer is refused (a document
-    /// keeps at least one). NOT journaled — see the section docs.
+    /// keeps at least one). One undo step (`LayerStack::remove`).
     #[wasm_bindgen]
     pub fn layers_remove(index: usize) -> Result<(), JsValue> {
         with_stack(|d| d.stack.remove(index).map_err(ingest_err))
@@ -2939,7 +2952,7 @@ mod wasm {
     /// Move a layer in stack order (0 = bottom).
     #[wasm_bindgen]
     pub fn layers_reorder(from: usize, to: usize) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.reorder(from, to).map_err(ingest_err))
+        recorded_edit("Move layer", None, |st| st.reorder(from, to))
     }
 
     #[wasm_bindgen]
@@ -2949,32 +2962,38 @@ mod wasm {
 
     #[wasm_bindgen]
     pub fn layers_set_visible(index: usize, visible: bool) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_visible(index, visible).map_err(ingest_err))
+        recorded_edit("Layer visibility", None, |st| {
+            st.set_visible(index, visible)
+        })
     }
 
     /// Lock a layer's PIXELS: paint / fill / bake refuse on it. Its
     /// properties stay editable — that is what the lock means.
     #[wasm_bindgen]
     pub fn layers_set_locked(index: usize, locked: bool) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_locked(index, locked).map_err(ingest_err))
+        recorded_edit("Lock layer", None, |st| st.set_locked(index, locked))
     }
 
     /// Set a layer's opacity (0–1, clamped).
     #[wasm_bindgen]
     pub fn layers_set_opacity(index: usize, opacity: f32) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_opacity(index, opacity).map_err(ingest_err))
+        recorded_edit("Layer opacity", Some(format!("opacity:{index}")), |st| {
+            st.set_opacity(index, opacity)
+        })
     }
 
     #[wasm_bindgen]
     pub fn layers_set_name(index: usize, name: &str) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_name(index, name).map_err(ingest_err))
+        recorded_edit("Rename layer", Some(format!("name:{index}")), |st| {
+            st.set_name(index, name)
+        })
     }
 
     /// Set a layer's blend by `compose.*` wire name (prefix optional).
     /// An unregistered name is a clean error, never a silent normal.
     #[wasm_bindgen]
     pub fn layers_set_blend(index: usize, blend: &str) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_blend(index, blend).map_err(ingest_err))
+        recorded_edit("Blend mode", None, |st| st.set_blend(index, blend))
     }
 
     /// Make the CURRENT SELECTION this layer's mask. The natural
@@ -2990,14 +3009,14 @@ mod wasm {
             .ok_or_else(|| {
                 JsValue::from_str("no selection to make a mask from — select an area first")
             })?;
-        with_stack(|d| d.stack.set_mask(index, coverage).map_err(ingest_err))
+        recorded_edit("Layer mask", None, |st| st.set_mask(index, coverage))
     }
 
     /// DELETE the mask (the coverage is gone), as distinct from
     /// disabling it.
     #[wasm_bindgen]
     pub fn layers_clear_mask(index: usize) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.clear_mask(index).map_err(ingest_err))
+        recorded_edit("Delete layer mask", None, |st| st.clear_mask(index))
     }
 
     /// Toggle whether the attached mask applies, RETAINING it either way
@@ -3011,34 +3030,34 @@ mod wasm {
     /// nesting needs a tree and this stack is a list.
     #[wasm_bindgen]
     pub fn layers_group(from: usize, to: usize, name: &str) -> Result<u32, JsValue> {
-        LAYERS.with(|l| {
-            let mut b = l.borrow_mut();
-            let doc = b
-                .as_mut()
-                .ok_or_else(|| JsValue::from_str("no layer stack is open"))?;
-            doc.stack.group_range(from, to, name).map_err(ingest_err)
-        })
+        recorded_edit("Group layers", None, |st| st.group_range(from, to, name))
     }
 
     /// Dissolve a group. Its layers stay, in place and unchanged.
     #[wasm_bindgen]
     pub fn layers_ungroup(id: u32) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.ungroup(id).map_err(ingest_err))
+        recorded_edit("Ungroup", None, |st| st.ungroup(id))
     }
 
     #[wasm_bindgen]
     pub fn layers_set_group_visible(id: u32, visible: bool) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_group_visible(id, visible).map_err(ingest_err))
+        recorded_edit("Group visibility", None, |st| {
+            st.set_group_visible(id, visible)
+        })
     }
 
     #[wasm_bindgen]
     pub fn layers_set_group_opacity(id: u32, opacity: f32) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_group_opacity(id, opacity).map_err(ingest_err))
+        recorded_edit("Group opacity", Some(format!("group-opacity:{id}")), |st| {
+            st.set_group_opacity(id, opacity)
+        })
     }
 
     #[wasm_bindgen]
     pub fn layers_set_group_name(id: u32, name: &str) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_group_name(id, name).map_err(ingest_err))
+        recorded_edit("Rename group", Some(format!("group-name:{id}")), |st| {
+            st.set_group_name(id, name)
+        })
     }
 
     /// Switch a group between PASS THROUGH (the default: members reach
@@ -3048,26 +3067,26 @@ mod wasm {
     /// mode, `passThrough` the declared one.
     #[wasm_bindgen]
     pub fn layers_set_group_pass_through(id: u32, pass_through: bool) -> Result<(), JsValue> {
-        with_stack(|d| {
-            d.stack
-                .set_group_pass_through(id, pass_through)
-                .map_err(ingest_err)
+        recorded_edit("Group mode", None, |st| {
+            st.set_group_pass_through(id, pass_through)
         })
     }
 
     #[wasm_bindgen]
     pub fn layers_set_group_blend(id: u32, blend: &str) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_group_blend(id, blend).map_err(ingest_err))
+        recorded_edit("Group blend", None, |st| st.set_group_blend(id, blend))
     }
 
     #[wasm_bindgen]
     pub fn layers_set_clipped(index: usize, clipped: bool) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_clipped(index, clipped).map_err(ingest_err))
+        recorded_edit("Clipping mask", None, |st| st.set_clipped(index, clipped))
     }
 
     #[wasm_bindgen]
     pub fn layers_set_mask_enabled(index: usize, enabled: bool) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.set_mask_enabled(index, enabled).map_err(ingest_err))
+        recorded_edit("Enable layer mask", None, |st| {
+            st.set_mask_enabled(index, enabled)
+        })
     }
 
     /// COMPOSITE the stack bottom-up and write the result back into the
@@ -3133,7 +3152,7 @@ mod wasm {
                 // Refuse BEFORE changing anything when the new composite
                 // could not be computed: a transformed stack over an
                 // untransformed image is the state this must never leave.
-                if ctx.is_none() && doc.stack.composite_needs_gpu() {
+                if ctx.is_none() && !doc.stack.composite_is_trivial() {
                     return Err(JsValue::from_str(
                         "rotating or resizing a layered image is GPU-only \
                          (the composite is a kernel dispatch) — call init_gpu first",
@@ -3171,7 +3190,7 @@ mod wasm {
     /// source, which is the destructive move this exists to prevent.
     #[wasm_bindgen]
     pub fn layers_make_smart(index: usize) -> Result<(), JsValue> {
-        with_stack(|d| d.stack.make_smart(index).map_err(ingest_err))
+        recorded_edit("Convert to smart object", None, |st| st.make_smart(index))
     }
 
     /// RE-RENDER a smart object at `scale` — from its preserved SOURCE,
@@ -3246,10 +3265,8 @@ mod wasm {
             canvas[drow..drow + n].copy_from_slice(&small[srow..srow + n]);
         }
 
-        with_stack(|d| {
-            d.stack
-                .set_smart_render(index, Arc::from(canvas.into_boxed_slice()), scale)
-                .map_err(ingest_err)
+        recorded_edit("Scale smart object", None, |st| {
+            st.set_smart_render(index, Arc::from(canvas.into_boxed_slice()), scale)
         })
     }
 
@@ -3310,7 +3327,9 @@ mod wasm {
                 "nothing to stack — the adjustment chain is at identity",
             ));
         }
-        with_stack(|d| Ok(d.stack.add_adjustment(name, params)))
+        recorded_edit("New adjustment layer", None, |st| {
+            Ok(st.add_adjustment(name, params))
+        })
     }
 
     /// EDIT an adjustment layer's chain in place (same arguments as
@@ -3357,7 +3376,9 @@ mod wasm {
             invert,
             ext,
         )?;
-        with_stack(|d| d.stack.set_adjustment(index, params).map_err(ingest_err))
+        recorded_edit("Adjustment", Some(format!("adjust:{index}")), |st| {
+            st.set_adjustment(index, params)
+        })
     }
 
     /// BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE

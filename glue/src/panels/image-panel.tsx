@@ -450,23 +450,21 @@ export const BRUSH_SCOPE_NOTE =
  * reason as [`BRUSH_SCOPE_NOTE`].
  */
 export const LAYERS_SCOPE_NOTE =
-  "Layers are canvas-extent PIXEL layers composited bottom-up through the " +
+  "Layers are canvas-extent layers composited bottom-up through the " +
   "engine's own compose.* kernels — the same 26 blend modes the brush " +
-  "paints through, so nothing here is a second implementation. There are " +
-  "no groups, no clipping masks, no per-layer masks and no adjustment " +
-  "layers: an adjustment is either the panel's re-runnable preview over " +
-  "the whole composite, or a one-way bake into the active layer. Undo " +
-  "covers PIXEL edits only — paint, fills and bakes; adding, removing, " +
-  "reordering and re-blending are not journaled, and removing a layer " +
-  "clears the history outright (its entries could never be replayed). A " +
-  "crop, resize or straighten changes the canvas extent and therefore " +
-  "FLATTENS the stack, and the undo history goes with it. Export and " +
-  "save-back write the FLATTENED composite, not the layers — this stack " +
-  "lives in the session, and a PSD saved back is still one layer or a " +
-  "flatten, exactly as it was before. A PSD opens as its own layers only " +
-  "when this model reproduces it exactly — flat, unclipped, unmasked, " +
-  "8-bit RGB; anything else keeps Photoshop's merged composite as a " +
-  "single layer and says why.";
+  "paints through, so nothing here is a second implementation. A layer " +
+  "holds pixels, an adjustment (it transforms everything beneath it) or " +
+  "a smart object (rescaling re-renders from the original); layers can " +
+  "be grouped, clipped and masked. Undo is ONE list for paint, fills and " +
+  "bakes AND every change to the stack — adding, removing, reordering, " +
+  "opacity, blend, masks, groups, rotate, flip and canvas size; it is " +
+  "bounded, and the panel says when old steps fall off. A crop, resize " +
+  "or straighten FLATTENS the stack, and the undo history goes with it. " +
+  "Export and save-back write the FLATTENED composite, not the layers — " +
+  "this stack lives in the session. A PSD opens as its own layers only " +
+  "when this model reproduces it exactly — 8- or 16-bit RGB, with no " +
+  "groups and no layer masks; anything else keeps " +
+  "Photoshop's merged composite as a single layer and says why.";
 
 /** The paint parameters section — a PURE component (props in, elements
  *  out, no hooks) so a spec can render it without a DOM and assert what

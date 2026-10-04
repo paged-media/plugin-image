@@ -1142,7 +1142,7 @@ export interface ImageEngine {
   layerAdd(name: string): number;
   layerDuplicate(index: number): number;
   /** Remove a layer. THROWS on the last one (a document keeps at least
-   *  one) — and it is NOT journaled, so the pixels are gone. */
+   *  one). One undo step: Undo brings the layer back. */
   layerRemove(index: number): void;
   layerReorder(from: number, to: number): void;
   layerSetActive(index: number): void;
