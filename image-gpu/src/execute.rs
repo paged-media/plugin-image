@@ -52,6 +52,7 @@ use std::task::{Context, Poll, Waker};
 
 use image_kernels::{abi, KernelDef};
 
+use crate::resident::Resident;
 use crate::{GpuContext, GpuError, KernelPipeline};
 
 /// One input tile: rgba16float texel bytes (8 bytes/px, tightly packed
@@ -61,54 +62,6 @@ pub struct TileInput<'a> {
 }
 
 const BYTES_PER_PIXEL: u32 = 8; // rgba16float
-
-fn make_texture(
-    ctx: &GpuContext,
-    label: &str,
-    w: u32,
-    h: u32,
-    format: wgpu::TextureFormat,
-    usage: wgpu::TextureUsages,
-) -> wgpu::Texture {
-    crate::counters::bump(|c| c.textures_created += 1);
-    ctx.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage,
-        view_formats: &[],
-    })
-}
-
-fn upload_f16(ctx: &GpuContext, tex: &wgpu::Texture, w: u32, h: u32, bytes: &[u8]) {
-    crate::counters::bump(|c| c.bytes_uploaded += bytes.len() as u64);
-    ctx.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(w * BYTES_PER_PIXEL),
-            rows_per_image: Some(h),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-}
 
 /// Execute a `module: true` kernel whose input window differs from the
 /// output region (ABI v1.1: `Windowed` — input = out + 2·radius;
@@ -144,17 +97,10 @@ pub fn execute_windowed_once(
         });
     }
     let pipeline = ctx.pipeline(def);
-    let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-    let in_tex = make_texture(
-        ctx,
-        &format!("{} window", def.id),
-        win_w,
-        win_h,
-        wgpu::TextureFormat::Rgba16Float,
-        in_usage,
-    );
-    upload_f16(ctx, &in_tex, win_w, win_h, win_bytes);
-    let in_view = in_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    // Held until the dispatch is submitted, so the pool cannot hand the
+    // texture out again before the dispatch has read it.
+    let in_res = ctx.upload(win_w, win_h, crate::TexFormat::Rgba16Float, win_bytes);
+    let in_view = in_res.view().clone();
     run_common(ctx, &pipeline, &[&in_view], def, params, mask, out_w, out_h)
 }
 
@@ -191,17 +137,10 @@ pub async fn execute_windowed_once_async(
         });
     }
     let pipeline = ctx.pipeline(def);
-    let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-    let in_tex = make_texture(
-        ctx,
-        &format!("{} window", def.id),
-        win_w,
-        win_h,
-        wgpu::TextureFormat::Rgba16Float,
-        in_usage,
-    );
-    upload_f16(ctx, &in_tex, win_w, win_h, win_bytes);
-    let in_view = in_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    // Held until the dispatch is submitted, so the pool cannot hand the
+    // texture out again before the dispatch has read it.
+    let in_res = ctx.upload(win_w, win_h, crate::TexFormat::Rgba16Float, win_bytes);
+    let in_view = in_res.view().clone();
     record_common(ctx, &pipeline, &[&in_view], def, params, mask, out_w, out_h)?
         .finish_async(ctx)
         .await
@@ -221,7 +160,7 @@ pub fn execute_tile_once(
     w: u32,
     h: u32,
 ) -> Result<Vec<u8>, GpuError> {
-    let (pipeline, in_views) = prepare_tile(ctx, def, inputs, params, w, h)?;
+    let (pipeline, _inputs, in_views) = prepare_tile(ctx, def, inputs, params, w, h)?;
     run_common(ctx, &pipeline, &in_views, def, params, mask, w, h)
 }
 
@@ -238,11 +177,19 @@ pub async fn execute_tile_once_async(
     w: u32,
     h: u32,
 ) -> Result<Vec<u8>, GpuError> {
-    let (pipeline, in_views) = prepare_tile(ctx, def, inputs, params, w, h)?;
+    let (pipeline, _inputs, in_views) = prepare_tile(ctx, def, inputs, params, w, h)?;
     record_common(ctx, &pipeline, &in_views, def, params, mask, w, h)?
         .finish_async(ctx)
         .await
 }
+
+/// The pipeline, the uploaded input textures (held until submit) and
+/// their views.
+type TileInputs = (
+    std::sync::Arc<KernelPipeline>,
+    Vec<Resident>,
+    Vec<wgpu::TextureView>,
+);
 
 /// Shared head of the single-tile lanes: validate arity + param block,
 /// build the pipeline, upload the rgba16float inputs.
@@ -253,7 +200,7 @@ fn prepare_tile(
     params: &[u8],
     w: u32,
     h: u32,
-) -> Result<(std::sync::Arc<KernelPipeline>, Vec<wgpu::TextureView>), GpuError> {
+) -> Result<TileInputs, GpuError> {
     if inputs.len() != def.inputs as usize {
         return Err(GpuError::Kernel {
             kernel: def.id,
@@ -273,30 +220,15 @@ fn prepare_tile(
 
     let pipeline = ctx.pipeline(def);
 
-    // Inputs (rgba16float, sampled via textureLoad).
-    let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-    let in_textures: Vec<wgpu::Texture> = inputs
+    // Inputs (rgba16float, sampled via textureLoad), from the scratch
+    // pool. The caller holds the handles until the dispatch is submitted.
+    let in_res: Vec<Resident> = inputs
         .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let tex = make_texture(
-                ctx,
-                &format!("{} in{i}", def.id),
-                w,
-                h,
-                wgpu::TextureFormat::Rgba16Float,
-                in_usage,
-            );
-            upload_f16(ctx, &tex, w, h, t.f16_bytes);
-            tex
-        })
+        .map(|t| ctx.upload(w, h, crate::TexFormat::Rgba16Float, t.f16_bytes))
         .collect();
-    let in_views: Vec<wgpu::TextureView> = in_textures
-        .iter()
-        .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
-        .collect();
+    let in_views: Vec<wgpu::TextureView> = in_res.iter().map(|r| r.view().clone()).collect();
 
-    Ok((pipeline, in_views))
+    Ok((pipeline, in_res, in_views))
 }
 
 /// The shared dispatch tail: mask + params + output + bind groups +
@@ -424,51 +356,14 @@ fn record_common(
     w: u32,
     h: u32,
 ) -> Result<PendingReadback, GpuError> {
-    let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-    // Selection mask (r16float; constant-1 default).
-    let one_f16 = 0x3C00u16.to_le_bytes();
-    let constant_one: Vec<u8>;
-    let mask_bytes: &[u8] = match mask {
-        Some(m) => m,
-        None => {
-            constant_one = one_f16
-                .iter()
-                .copied()
-                .cycle()
-                .take((w * h * 2) as usize)
-                .collect();
-            &constant_one
-        }
+    // Selection mask (r16float). The constant-1 default is built once
+    // per size on the device and shared, rather than uploaded per
+    // dispatch.
+    let mask_res = match mask {
+        Some(m) => ctx.upload(w, h, crate::TexFormat::R16Float, m),
+        None => ctx.one_mask(w, h),
     };
-    let mask_tex = make_texture(
-        ctx,
-        &format!("{} mask", def.id),
-        w,
-        h,
-        wgpu::TextureFormat::R16Float,
-        in_usage,
-    );
-    ctx.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &mask_tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        mask_bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(w * 2),
-            rows_per_image: Some(h),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    crate::counters::bump(|c| c.bytes_uploaded += mask_bytes.len() as u64);
-    let mask_view = mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let mask_view = mask_res.view().clone();
 
     // Params uniform.
     let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -480,16 +375,11 @@ fn record_common(
     ctx.queue.write_buffer(&params_buf, 0, params);
     crate::counters::bump(|c| c.bytes_uploaded += params.len() as u64);
 
-    // Output (storage, write-only — the portable path, §9.2).
-    let out_tex = make_texture(
-        ctx,
-        &format!("{} out", def.id),
-        w,
-        h,
-        wgpu::TextureFormat::Rgba16Float,
-        wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-    );
-    let out_view = out_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    // Output (storage, write-only — the portable path, §9.2), from the
+    // scratch pool; held to the end of this function, past the submit.
+    let out_res = ctx.scratch(w, h, crate::TexFormat::Rgba16Float);
+    let out_tex = out_res.texture();
+    let out_view = out_res.view().clone();
 
     // Bind groups (the frozen ABI, §9.2).
     let g0_entries: Vec<wgpu::BindGroupEntry> = in_views
@@ -568,7 +458,7 @@ fn record_common(
     }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &out_tex,
+            texture: out_tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,

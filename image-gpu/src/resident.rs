@@ -193,11 +193,11 @@ impl Resident {
         texture_bytes(self.0.w, self.0.h, self.0.format)
     }
 
-    fn texture(&self) -> &wgpu::Texture {
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
         self.0.tex.as_ref().expect("live resident texture")
     }
 
-    fn view(&self) -> &wgpu::TextureView {
+    pub(crate) fn view(&self) -> &wgpu::TextureView {
         &self.0.view
     }
 }
