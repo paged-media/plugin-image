@@ -1393,6 +1393,7 @@ impl LayerStack {
     ) -> Result<Arc<[u8]>, IngestError> {
         let (w, h) = (self.width, self.height);
         let plates = self.plates(override_active);
+        crate::counters::bump(|c| c.composites += 1);
 
         match plates.as_slice() {
             // Nothing contributes: an honest transparent canvas.
@@ -1404,6 +1405,7 @@ impl LayerStack {
             _ => {}
         }
 
+        crate::counters::bump(|c| c.layers_folded += plates.len() as u64);
         let ctx = ctx.ok_or_else(|| {
             IngestError::Unsupported(
                 "compositing layers is GPU-only — call init_gpu first (the blend \

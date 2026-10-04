@@ -485,6 +485,7 @@ impl DecodedImage {
         }
         let tw = x1 - x0;
         let th = y1 - y0;
+        crate::counters::bump(|c| c.tiles_cut += 1);
         let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
         let stride = self.width as usize * 4;
         for row in 0..th as usize {
@@ -1113,7 +1114,9 @@ pub async fn adjust_rgba8(
     selection: Option<Arc<SelectionCoverage>>,
 ) -> Result<Vec<u8>, IngestError> {
     if params.is_identity() {
-        return Ok(image.rgba.to_rgba8().into_owned());
+        let out = image.rgba.to_rgba8().into_owned();
+        crate::counters::whole_copy(out.len());
+        return Ok(out);
     }
 
     // The GPU kernel chain (skipped wholesale when only a curve is set).
@@ -1131,7 +1134,9 @@ pub async fn adjust_rgba8(
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         target.into_pixels()
     } else {
-        image.rgba.to_rgba8().into_owned()
+        let out = image.rgba.to_rgba8().into_owned();
+        crate::counters::whole_copy(out.len());
+        out
     };
 
     // Curves: a 256-entry tone LUT over the RGB channels (alpha untouched).

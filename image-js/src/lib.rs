@@ -61,6 +61,8 @@
 pub mod brushes;
 pub mod channels;
 pub mod cmyk;
+// Engine work counters (thread-local, always on) — budgets count these.
+pub mod counters;
 pub mod display;
 pub mod fill;
 pub mod heal;
@@ -157,6 +159,20 @@ mod wasm {
     /// "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
     /// compares it with the checkout, so a stale committed wasm fails
     /// the suite instead of being tested in place of the code.
+    /// Engine + GPU work counters since the last reset, as JSON
+    /// (`{engine:{…}, gpu:{…}}`, see `counters::to_json`). What the
+    /// bundle's performance budgets count.
+    #[wasm_bindgen]
+    pub fn perf_counters() -> String {
+        crate::counters::to_json()
+    }
+
+    /// Zero the engine and GPU work counters.
+    #[wasm_bindgen]
+    pub fn perf_counters_reset() {
+        crate::counters::reset();
+    }
+
     #[wasm_bindgen]
     pub fn engine_source_hash() -> String {
         option_env!("IMAGE_JS_SOURCE_HASH")

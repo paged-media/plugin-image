@@ -117,12 +117,18 @@ impl Pixels {
     /// path allocates nothing.
     pub fn to_rgba8(&self) -> std::borrow::Cow<'_, [u8]> {
         match self.depth {
-            SampleDepth::U16 => std::borrow::Cow::Owned(
-                self.bytes
-                    .chunks_exact(2)
-                    .map(|p| u16::from_ne_bytes([p[0], p[1]]).to_be_bytes()[0])
-                    .collect(),
-            ),
+            SampleDepth::U16 => {
+                crate::counters::bump(|c| {
+                    c.depth_narrowings += 1;
+                    c.narrowed_bytes += (self.bytes.len() / 2) as u64;
+                });
+                std::borrow::Cow::Owned(
+                    self.bytes
+                        .chunks_exact(2)
+                        .map(|p| u16::from_ne_bytes([p[0], p[1]]).to_be_bytes()[0])
+                        .collect(),
+                )
+            }
             _ => std::borrow::Cow::Borrowed(&self.bytes),
         }
     }
