@@ -61,6 +61,8 @@ const RED_EYE_TOOL_ID = "media.paged.image.tool.redEye";
 const DODGE_TOOL_ID = "media.paged.image.tool.dodge";
 const BURN_TOOL_ID = "media.paged.image.tool.burn";
 const SPONGE_TOOL_ID = "media.paged.image.tool.sponge";
+const BLUR_TOOL_ID = "media.paged.image.tool.blur";
+const SHARPEN_TOOL_ID = "media.paged.image.tool.sharpen";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -432,6 +434,10 @@ export function activate(host: BundleHost): BundleHandle {
     [DODGE_TOOL_ID, "Dodge", "dodge"],
     [BURN_TOOL_ID, "Burn", "burn"],
     [SPONGE_TOOL_ID, "Sponge", "sponge"],
+    // Blur / sharpen: the same filter-stroke lane over the unsharp chain;
+    // the brush's flow is their strength.
+    [BLUR_TOOL_ID, "Blur (brush)", "blur"],
+    [SHARPEN_TOOL_ID, "Sharpen (brush)", "sharpen"],
   ] as const) {
     contributeTool(host, {
       id,
@@ -922,6 +928,8 @@ export function activate(host: BundleHost): BundleHandle {
         DODGE_TOOL_ID,
         BURN_TOOL_ID,
         SPONGE_TOOL_ID,
+        BLUR_TOOL_ID,
+        SHARPEN_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host

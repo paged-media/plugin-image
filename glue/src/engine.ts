@@ -586,7 +586,12 @@ export type StrokeTool =
    *  brush's flow. */
   | "dodge"
   | "burn"
-  | "sponge";
+  | "sponge"
+  /** FILTER STROKES through the unsharp chain: blur (a Gaussian whose
+   *  radius follows the tip) and sharpen (unsharp masking). The brush's
+   *  FLOW is their strength. */
+  | "blur"
+  | "sharpen";
 
 export const STROKE_TOOLS: StrokeTool[] = [
   "brush",
@@ -597,6 +602,8 @@ export const STROKE_TOOLS: StrokeTool[] = [
   "dodge",
   "burn",
   "sponge",
+  "blur",
+  "sharpen",
 ];
 
 /** The filter strokes that take tone options (`brush_stroke_set_tone`). */

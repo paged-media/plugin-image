@@ -132,6 +132,8 @@ describe("imageBundle.activate", () => {
       "media.paged.image.tool.dodge",
       "media.paged.image.tool.burn",
       "media.paged.image.tool.sponge",
+      "media.paged.image.tool.blur",
+      "media.paged.image.tool.sharpen",
       "media.paged.image.tool.type",
     ]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);

@@ -3778,7 +3778,7 @@ mod wasm {
         let tool = StrokeTool::from_wire(tool).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "unknown paint tool \"{tool}\" \
-                 (brush | pencil | eraser | clone | heal | dodge | burn | sponge)"
+                 (brush | pencil | eraser | clone | heal | dodge | burn | sponge | blur | sharpen)"
             ))
         })?;
         let blend_kernel = blend_kernel(blend).ok_or_else(|| {
@@ -4021,7 +4021,7 @@ mod wasm {
             let session = slot
                 .as_mut()
                 .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
-            if !session.params().tool.filters() {
+            if !session.params().tool.takes_tone() {
                 return Err(JsValue::from_str(
                     "only the dodge, burn and sponge tools take tone options",
                 ));

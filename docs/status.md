@@ -33,7 +33,8 @@ landed. How the parts fit is in
 - **Paint, retouch, type.** Brush, pencil, eraser, clone stamp and healing brush on the
   active layer; dodge and burn by tonal range (shadows, midtones, highlights) with an
   exposure, and the sponge (saturate or desaturate at the brush's flow) — filter strokes
-  through the `adjust.dodge_burn` kernel, masked by the dabs' coverage; with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
+  through the `adjust.dodge_burn` kernel, masked by the dabs' coverage; blur and sharpen
+  brushes (the Gaussian/unsharp chain under the dabs, strength = flow); with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
   presets from an `.abr` brush library. The type tool paints a shaped run of text into the
   active layer with font bytes the host serves for the document's fonts.
 - **Layers.** Add, duplicate, remove, reorder; visibility, lock, opacity and 26 blend modes;

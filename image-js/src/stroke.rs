@@ -115,6 +115,12 @@ pub enum StrokeTool {
     /// SPONGE: saturates or desaturates under the dabs (modes 2 / 3);
     /// the brush's FLOW is its strength.
     Sponge,
+    /// BLUR brush: a Gaussian of the layer under the dabs (the unsharp
+    /// chain at amount −1). The FLOW is its strength — how much of the
+    /// blur each dab deposits; the radius follows the tip size.
+    Blur,
+    /// SHARPEN brush: unsharp masking under the dabs, strength = flow.
+    Sharpen,
 }
 
 impl StrokeTool {
@@ -129,6 +135,8 @@ impl StrokeTool {
             "dodge" => StrokeTool::Dodge,
             "burn" => StrokeTool::Burn,
             "sponge" => StrokeTool::Sponge,
+            "blur" => StrokeTool::Blur,
+            "sharpen" => StrokeTool::Sharpen,
             _ => return None,
         })
     }
@@ -143,12 +151,26 @@ impl StrokeTool {
             StrokeTool::Dodge => "dodge",
             StrokeTool::Burn => "burn",
             StrokeTool::Sponge => "sponge",
+            StrokeTool::Blur => "blur",
+            StrokeTool::Sharpen => "sharpen",
         }
     }
 
     /// Is this a FILTER STROKE — one that deposits no paint and instead
     /// masks a kernel's effect by its coverage?
     pub fn filters(self) -> bool {
+        matches!(
+            self,
+            StrokeTool::Dodge
+                | StrokeTool::Burn
+                | StrokeTool::Sponge
+                | StrokeTool::Blur
+                | StrokeTool::Sharpen
+        )
+    }
+
+    /// Does this tool take the dodge / burn / sponge options?
+    pub fn takes_tone(self) -> bool {
         matches!(
             self,
             StrokeTool::Dodge | StrokeTool::Burn | StrokeTool::Sponge
@@ -295,6 +317,26 @@ impl StrokeParams {
         self
     }
 
+    /// The blur / sharpen brushes' unsharp chain.
+    ///
+    /// BLUR is the chain at amount −1 (`a − (a − blur) = blur`) with a
+    /// Gaussian whose σ follows the tip — a tenth of the diameter, held
+    /// to `1..=8` px so the window stays inside the kernel's 24 px reach
+    /// at 3σ. SHARPEN is a fixed small-radius unsharp mask (σ 1, amount
+    /// 1), the detail scale a sharpening brush is for. In both the
+    /// brush's FLOW is the strength: it decides how much of the filtered
+    /// image each dab deposits, building up over overlapping dabs.
+    ///
+    /// Returns `(sigma, radius, amount)`.
+    pub fn unsharp_settings(&self) -> (f32, u32, f32) {
+        if self.tool == StrokeTool::Blur {
+            let sigma = (self.size * 0.1).clamp(1.0, 8.0);
+            (sigma, (sigma * 3.0).ceil() as u32, -1.0)
+        } else {
+            (1.0, 3, 1.0)
+        }
+    }
+
     /// The tip for a dab at `pressure` (the size half of the pressure
     /// mapping; the flow half is [`Self::flow_at`]).
     pub fn tip_at(&self, pressure: f32) -> BrushTip {
@@ -336,6 +378,7 @@ impl StrokeParams {
             }),
             StrokeTool::Clone | StrokeTool::Heal => None,
             StrokeTool::Dodge | StrokeTool::Burn | StrokeTool::Sponge => None,
+            StrokeTool::Blur | StrokeTool::Sharpen => None,
         }
     }
 }
@@ -773,48 +816,71 @@ impl StrokeSession {
     /// A FILTER STROKE's composite: the tool's kernel over the base window,
     /// masked by the coverage, spliced back into `region`.
     ///
-    /// A windowed kernel needs real neighbours, so the window is EXPANDED
-    /// by the mode's halo (clipped to the canvas) and the result cropped
-    /// back to `region`; the coverage outside `region` is zero anyway, so
-    /// the halo only feeds the kernel and never lands.
+    /// The blur / sharpen chain's Gaussian is a WINDOWED kernel, so it
+    /// also gets the base window PADDED by its reach (edge-clamped,
+    /// [`Self::padded_window_rgba8`]); the padding feeds the kernel and
+    /// never lands — the output is exactly `region`.
     async fn composite_filter(
         &mut self,
         ctx: &GpuContext,
         region: Region,
     ) -> Result<(), IngestError> {
+        let base_f16 = rgba8_to_f16(&self.window_rgba8(region));
+        let mask = self.accumulator.mask_window_f16(
+            region,
+            self.params.opacity,
+            self.selection.as_deref(),
+        );
         let params = self.tone.kernel_params(self.params.tool);
-        let mode = match &params {
-            Some(p) => PaintMode::Filter {
+        let padded;
+        let mode = match (&params, self.params.tool) {
+            (Some(p), _) => PaintMode::Filter {
                 kernel: &image_kernels::families::adjust::ADJUST_DODGE_BURN,
                 params: p.as_bytes(),
             },
-            None => return Ok(()),
+            (None, StrokeTool::Blur | StrokeTool::Sharpen) => {
+                let (sigma, radius, amount) = self.params.unsharp_settings();
+                let probe = PaintMode::Unsharp {
+                    sigma,
+                    radius,
+                    amount,
+                    padded_f16: &[],
+                };
+                padded = rgba8_to_f16(&self.padded_window_rgba8(region, probe.halo()));
+                PaintMode::Unsharp {
+                    sigma,
+                    radius,
+                    amount,
+                    padded_f16: &padded,
+                }
+            }
+            (None, _) => return Ok(()),
         };
-        let halo = mode.halo() as i32;
-        let big = Region::new(
-            region.x - halo,
-            region.y - halo,
-            region.w + 2 * halo as u32,
-            region.h + 2 * halo as u32,
-        )
-        .intersect(Region::new(0, 0, self.width, self.height))
-        .unwrap_or(region);
-        let base_f16 = rgba8_to_f16(&self.window_rgba8(big));
-        let mask =
-            self.accumulator
-                .mask_window_f16(big, self.params.opacity, self.selection.as_deref());
-        let out_f16 = composite_stroke_window(ctx, &mode, &base_f16, &mask, big.w, big.h)
+        let out_f16 = composite_stroke_window(ctx, &mode, &base_f16, &mask, region.w, region.h)
             .await
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         let out = f16_to_rgba8(&out_f16);
-        let mut cropped = Vec::with_capacity((region.w as usize) * (region.h as usize) * 4);
-        for y in 0..region.h as i32 {
-            let row = (region.y - big.y + y) as usize;
-            let start = (row * big.w as usize + (region.x - big.x) as usize) * 4;
-            cropped.extend_from_slice(&out[start..start + region.w as usize * 4]);
-        }
-        self.splice(region, &cropped);
+        self.splice(region, &out);
         Ok(())
+    }
+
+    /// `region` grown by `pad` on every side, read from the BASE with
+    /// coordinates CLAMPED to the canvas — the windowed Gaussian's input.
+    /// Clamping (rather than transparency) is the edge rule a blur wants:
+    /// a blur near the border must not darken toward an invented black.
+    fn padded_window_rgba8(&self, region: Region, pad: u32) -> Vec<u8> {
+        let (pw, ph) = (region.w + 2 * pad, region.h + 2 * pad);
+        let mut out = Vec::with_capacity((pw as usize) * (ph as usize) * 4);
+        for y in 0..ph as i64 {
+            let sy = (region.y as i64 + y - pad as i64).clamp(0, self.height as i64 - 1) as usize;
+            for x in 0..pw as i64 {
+                let sx =
+                    (region.x as i64 + x - pad as i64).clamp(0, self.width as i64 - 1) as usize;
+                let i = (sy * self.width as usize + sx) * 4;
+                out.extend_from_slice(&self.base[i..i + 4]);
+            }
+        }
+        out
     }
 
     /// The healing correction for `region`, solved on an EXPANDED window
@@ -1001,6 +1067,8 @@ mod tests {
             StrokeTool::Dodge,
             StrokeTool::Burn,
             StrokeTool::Sponge,
+            StrokeTool::Blur,
+            StrokeTool::Sharpen,
         ] {
             assert_eq!(StrokeTool::from_wire(t.as_wire()), Some(t));
         }
@@ -1991,5 +2059,119 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── blur / sharpen brushes ───────────────────────────────────────
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn blur_follows_the_tip_and_sharpen_is_a_fixed_unsharp__feat__image_editor_blur_sharpen_brush()
+    {
+        let mut p = params(StrokeTool::Blur);
+        p.size = 40.0;
+        assert_eq!(p.unsharp_settings(), (4.0, 12, -1.0));
+        p.size = 1000.0;
+        assert_eq!(
+            p.unsharp_settings().1,
+            24,
+            "held inside the Gaussian's reach"
+        );
+        let (_, _, amount) = params(StrokeTool::Sharpen).unsharp_settings();
+        assert!(amount > 0.0, "sharpen is a positive unsharp amount");
+        assert!(StrokeTool::Blur.filters() && !StrokeTool::Blur.takes_tone());
+        assert!(StrokeTool::Sponge.takes_tone());
+    }
+
+    /// The step across the two-tone edge at row `y`.
+    fn edge_step(px: &[u8], w: u32, y: u32) -> i32 {
+        let at = |x: u32| px[((y * w + x) * 4) as usize] as i32;
+        at(w / 2) - at(w / 2 - 1)
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_blur_brush_softens_an_edge_under_the_stroke_only__feat__image_editor_blur_sharpen_brush()
+    {
+        let Some(ctx) = device() else { return };
+        let image = two_tone(64, 48);
+        let base = image.rgba.to_rgba8().into_owned();
+        let mut p = params(StrokeTool::Blur);
+        p.size = 16.0;
+        p.hardness = 1.0;
+        let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+        // A vertical stroke down the edge, top part only.
+        for y in [4.0f32, 10.0, 16.0] {
+            pollster::block_on(s.extend(ctx, StrokeSample::new(32.0, y, 1.0))).expect("extend");
+        }
+        let out = s.commit();
+        assert!(
+            edge_step(&out, 64, 10) < edge_step(&base, 64, 10) / 2,
+            "the edge under the stroke is soft: {} vs {}",
+            edge_step(&out, 64, 10),
+            edge_step(&base, 64, 10)
+        );
+        for y in 30..48u32 {
+            let i = ((y * 64) * 4) as usize;
+            assert_eq!(out[i..i + 64 * 4], base[i..i + 64 * 4], "row {y} untouched");
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn flow_is_the_blur_brushs_strength__feat__image_editor_blur_sharpen_brush() {
+        let Some(ctx) = device() else { return };
+        let image = two_tone(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let run = |flow: f32| {
+            let mut p = params(StrokeTool::Blur);
+            p.size = 16.0;
+            p.hardness = 1.0;
+            p.flow = flow;
+            p.pressure = PressureTarget::None;
+            let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+            pollster::block_on(s.extend(ctx, StrokeSample::new(32.0, 16.0, 1.0))).expect("extend");
+            s.commit()
+        };
+        let weak = edge_step(&run(0.25), 64, 16);
+        let strong = edge_step(&run(1.0), 64, 16);
+        assert!(
+            strong < weak && weak < edge_step(&base, 64, 16),
+            "{strong} < {weak}"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_sharpen_brush_steepens_an_edge__feat__image_editor_blur_sharpen_brush() {
+        let Some(ctx) = device() else { return };
+        // A soft ramp edge, so sharpening has something to steepen.
+        let (w, h) = (64u32, 32u32);
+        let mut rgba = Vec::new();
+        for _y in 0..h {
+            for x in 0..w {
+                let v = (60 + ((x as i32 - 28).clamp(0, 8) * 15)) as u8;
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let image = DecodedImage::from_rgba8(w, h, rgba).expect("valid");
+        let base = image.rgba.to_rgba8().into_owned();
+        let mut p = params(StrokeTool::Sharpen);
+        p.size = 20.0;
+        p.hardness = 1.0;
+        let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+        pollster::block_on(s.extend(ctx, StrokeSample::new(32.0, 16.0, 1.0))).expect("extend");
+        let out = s.commit();
+        let at = |px: &[u8], x: u32| px[((16 * w + x) * 4) as usize] as i32;
+        // Unsharp masking overshoots at the foot and the shoulder.
+        assert!(
+            at(&out, 28) < at(&base, 28),
+            "the foot darkens: {}",
+            at(&out, 28)
+        );
+        assert!(
+            at(&out, 36) > at(&base, 36),
+            "the shoulder lightens: {}",
+            at(&out, 36)
+        );
     }
 }

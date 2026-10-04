@@ -82,9 +82,12 @@
 //! the mask, so `mix(a, a + amount·(a − blur), m)`. A NEGATIVE amount of
 //! −1 is exactly the blur (`a − (a − blur) = blur`), which is why the blur
 //! brush needs no kernel of its own and why its mask lands on the
-//! ORIGINAL window rather than on an intermediate pass. The Gaussian is
-//! windowed, so the caller hands over a window with a halo of the blur's
-//! radius and crops the result.
+//! ORIGINAL window rather than on an intermediate pass. The Gaussian is a
+//! WINDOWED kernel under ABI v1.1 — its input is the output grown by its
+//! declared reach (`GAUSSIAN_MAX_RADIUS`, 24 px) on each side of its axis
+//! — so the caller also hands over the base window PADDED by that reach
+//! ([`PaintMode::halo`]); the horizontal pass shrinks it in x, the
+//! vertical pass in y, and the unsharp step meets the unpadded window.
 //!
 //! ## The premultiply bracket, and when it is skipped
 //!
@@ -117,6 +120,7 @@ use image_kernels::families::cast::{
 use image_kernels::families::compose::ComposeParams;
 use image_kernels::families::conv::{
     ConvGaussianParams, ConvUnsharpParams, CONV_GAUSSIAN_H, CONV_GAUSSIAN_V, CONV_UNSHARP,
+    GAUSSIAN_MAX_RADIUS,
 };
 use image_kernels::families::gen::{GenSolidParams, GEN_SOLID};
 use image_kernels::KernelDef;
@@ -174,12 +178,14 @@ pub enum PaintMode<'a> {
     },
     /// A FILTER STROKE through the unsharp chain: `amount` −1 is the
     /// BLUR brush, a positive amount the SHARPEN brush. `radius` is the
-    /// Gaussian's half-width, which is also the halo the caller's window
-    /// must carry.
+    /// Gaussian's half-width (≤ 24). `padded_f16` is the base window
+    /// grown by [`Self::halo`] on every side (edge-clamped by the
+    /// caller), the input the windowed Gaussian reads.
     Unsharp {
         sigma: f32,
         radius: u32,
         amount: f32,
+        padded_f16: &'a [u8],
     },
 }
 
@@ -255,12 +261,12 @@ impl PaintMode<'_> {
         }
     }
 
-    /// The halo (px) a window must carry around the region it writes, so
-    /// a windowed filter sees real neighbours instead of the window's
-    /// edge. Zero for every per-texel mode.
+    /// The padding (px, every side) the windowed input of this mode
+    /// must carry: the Gaussian's declared reach for the unsharp chain,
+    /// zero for every per-texel mode.
     pub fn halo(&self) -> u32 {
         match self {
-            PaintMode::Unsharp { radius, .. } => *radius,
+            PaintMode::Unsharp { .. } => u32::from(GAUSSIAN_MAX_RADIUS),
             _ => 0,
         }
     }
@@ -485,21 +491,39 @@ pub async fn composite_stroke_window(
             sigma,
             radius,
             amount,
+            padded_f16,
         } => {
-            let opaque = window_is_opaque(base_f16);
-            let bp = if opaque {
-                base.clone()
+            let pad = u32::from(GAUSSIAN_MAX_RADIUS);
+            let (pw, ph) = (w + 2 * pad, h + 2 * pad);
+            if padded_f16.len() != (pw as usize) * (ph as usize) * 8 {
+                return Err(GpuError::Kernel {
+                    kernel: "stroke",
+                    detail: format!(
+                        "padded window is {} bytes, expected {} ({pw}×{ph})",
+                        padded_f16.len(),
+                        (pw as usize) * (ph as usize) * 8
+                    ),
+                });
+            }
+            let padded = b.upload(pw, ph, TexFormat::Rgba16Float, padded_f16);
+            // The padded window contains the base window, so one opacity
+            // test covers both.
+            let opaque = window_is_opaque(padded_f16);
+            let (bp, pp) = if opaque {
+                (base.clone(), padded)
             } else {
-                unary(
-                    &mut b,
-                    &CAST_PREMULTIPLY,
-                    CastPremultiplyParams::new().as_bytes(),
-                    &base,
-                )?
+                let premul = CastPremultiplyParams::new();
+                let bp = unary(&mut b, &CAST_PREMULTIPLY, premul.as_bytes(), &base)?;
+                let pp = b.target(pw, ph);
+                b.dispatch(&CAST_PREMULTIPLY, &[&padded], premul.as_bytes(), None, &pp)?;
+                (bp, pp)
             };
-            let g = ConvGaussianParams::new(sigma, radius);
-            let gh = unary(&mut b, &CONV_GAUSSIAN_H, g.as_bytes(), &bp)?;
-            let gv = unary(&mut b, &CONV_GAUSSIAN_V, g.as_bytes(), &gh)?;
+            let g = ConvGaussianParams::new(sigma, radius.min(pad));
+            // Each windowed pass shrinks its axis by twice the reach.
+            let gh = b.target(w, ph);
+            b.dispatch(&CONV_GAUSSIAN_H, &[&pp], g.as_bytes(), None, &gh)?;
+            let gv = b.target(w, h);
+            b.dispatch(&CONV_GAUSSIAN_V, &[&gh], g.as_bytes(), None, &gv)?;
             let out = b.target(w, h);
             b.dispatch(
                 &CONV_UNSHARP,
@@ -651,12 +675,13 @@ mod tests {
             sigma: 2.0,
             radius: 6,
             amount: -1.0,
+            padded_f16: &[],
         };
         assert_eq!(
             u.kernel_ids_for(true),
             vec!["conv.gaussian_h", "conv.gaussian_v", "conv.unsharp"]
         );
-        assert_eq!(u.halo(), 6);
+        assert_eq!(u.halo(), 24, "the Gaussian's declared reach");
     }
 
     #[test]

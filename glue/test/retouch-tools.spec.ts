@@ -148,3 +148,35 @@ describe("dodge / burn / sponge", () => {
     }
   });
 });
+
+describe("blur / sharpen brushes", () => {
+  it("are stroke tools without tone options, registered in the manifest", () => {
+    const tools = (manifestJson as PluginManifest).contributes?.tools ?? [];
+    for (const t of ["blur", "sharpen"] as const) {
+      expect(STROKE_TOOLS).toContain(t);
+      expect(TONE_TOOLS).not.toContain(t);
+      expect(tools).toContain(`media.paged.image.tool.${t}`);
+    }
+  });
+
+  it("the real wasm knows the tool names and still declines without a GPU", async () => {
+    if (!existsSync(WASM)) return;
+    const wasm = await boot();
+    const img = wasm.ingest_rgba8(4, 4, new Uint8Array(64).fill(200));
+    const p = [8, 0.5, 1, 1, 0.25, "normal", new Float32Array([0, 0, 0, 1]), "none"] as const;
+    for (const t of ["blur", "sharpen"]) {
+      expect(() => wasm.brush_stroke_begin(img.handle, t, ...p)).toThrow(/GPU-only/);
+    }
+    expect(() => wasm.brush_stroke_begin(img.handle, "smudge", ...p)).toThrow(/unknown paint tool/);
+  });
+
+  it("the session declines both without a GPU", async () => {
+    const { handle, session } = await ingest();
+    for (const t of ["blur", "sharpen"] as const) {
+      expect(await session.brushBegin(t)).toBe(false);
+      expect(session.state().status).toMatch(/GPU-only/);
+    }
+    session.dispose();
+    handle.dispose();
+  });
+});
