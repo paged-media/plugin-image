@@ -899,10 +899,12 @@ export function activate(host: BundleHost): BundleHandle {
       // HOST UNDO (ADR 012, the in-context tier). While the context is
       // active, Cmd+Z / Shift+Cmd+Z and Edit ▸ Undo/Redo step the image's
       // OWN journal instead of the document's — the document has not
-      // changed, the pixels have. `onCanUndo` answering false hands the
-      // keystroke back to the document, so an image with nothing to undo
-      // never swallows it. The step itself is async (a recomposite); the
-      // hook only has to say it took the keystroke.
+      // changed, the pixels have. The host does NOT fall through to the
+      // document's undo mid-session (ADR 012: the boundary is entering
+      // and leaving the context), so `onCanUndo` answering false greys
+      // Undo out rather than reaching the document; leaving the image
+      // (which commits it) is what hands undo back. The step itself is
+      // async (a recomposite); the hook only has to say it took it.
       onCanUndo: () => session.state().history?.canUndo ?? false,
       onCanRedo: () => session.state().history?.canRedo ?? false,
       onUndo: () => {

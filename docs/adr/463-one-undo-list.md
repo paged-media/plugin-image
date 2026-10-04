@@ -28,8 +28,9 @@ step. The list is bounded (200 structure steps; the journal bounds pixel steps b
 kept in step with the journal when it evicts or clears.
 
 Inside the image's edit context, the host's undo and redo call the image's (ADR 012's
-in-context hooks); when the image has nothing to undo, the hooks decline and the keystroke
-goes to the document. Where the host reads them (protocol 66), the context also names the step, so the
+in-context hooks). The host does not fall through to the document's undo while the context
+is active: when the image has nothing to undo, Undo is disabled, and leaving the context
+(which commits the image, ADR 462) hands undo back to the document. Where the host reads them (protocol 66), the context also names the step, so the
 Edit menu reads "Undo Brush stroke" rather than a generic "Undo".
 
 ## Evidence
@@ -40,7 +41,7 @@ Edit menu reads "Undo Brush stroke" rather than a generic "Undo".
 - `image-js/src/layers.rs:1015-1017` — removing a layer records itself
 - `image-js/src/layers.rs:808-820` — the canvas operations record themselves
 - `image-js/src/lib.rs:2680-2690` — every structural export goes through `recorded_edit`
-- `glue/src/activate.ts:830-841` — the host undo hooks, declining when there is nothing to undo
+- `glue/src/activate.ts:908-919` — the host undo hooks; Undo is disabled when there is nothing to undo
 
 ## Alternatives considered
 
