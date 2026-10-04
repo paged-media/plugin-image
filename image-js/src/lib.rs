@@ -72,6 +72,7 @@ pub mod layers;
 pub mod mip;
 pub mod paths;
 pub mod pixels;
+pub mod retouch;
 pub mod saveback;
 pub mod selection;
 pub mod stroke;
@@ -1475,6 +1476,17 @@ mod wasm {
         pixels: Vec<u8>,
         layered: bool,
     ) -> Result<DecodedHandle, JsValue> {
+        land_fill_as("Fill", width, height, pixels, layered).await
+    }
+
+    /// [`land_fill`] under an undo label of the caller's choosing.
+    async fn land_fill_as(
+        label: &'static str,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+        layered: bool,
+    ) -> Result<DecodedHandle, JsValue> {
         if !layered {
             return register(width, height, pixels);
         }
@@ -1488,7 +1500,7 @@ mod wasm {
         with_stack_async(|mut doc| async move {
             let result = async {
                 doc.stack
-                    .edit_active("Fill", damage, pixels.into())
+                    .edit_active(label, damage, pixels.into())
                     .map_err(ingest_err)?;
                 let rgba = doc
                     .stack
@@ -1832,6 +1844,36 @@ mod wasm {
                 )
             })?;
         land_fill(img.width, img.height, out, layered).await
+    }
+
+    /// PATCH: replace the SELECTION with the region `(dx, dy)` image px
+    /// away from it, healed so it blends (`retouch::patch_rgba8`: the
+    /// shifted source plus the membrane tone correction, composited
+    /// through the selection's coverage on the GPU). Lands in the active
+    /// layer as one journaled undo step ("Patch"). Needs a selection; a
+    /// zero offset is refused rather than spending an undo step on the
+    /// identity.
+    #[wasm_bindgen]
+    pub async fn patch_selection(handle: u32, dx: f32, dy: f32) -> Result<DecodedHandle, JsValue> {
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        let coverage = sel.ok_or_else(|| {
+            JsValue::from_str("patch needs a selection — select the area to replace first")
+        })?;
+        let out = crate::retouch::patch_rgba8(
+            &ctx,
+            &img.rgba.to_rgba8(),
+            img.width,
+            img.height,
+            &coverage,
+            dx.round() as i32,
+            dy.round() as i32,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+        .ok_or_else(|| {
+            JsValue::from_str("nothing to patch — an empty selection, or a zero offset")
+        })?;
+        land_fill_as("Patch", img.width, img.height, out, layered).await
     }
 
     /// APPLY a gradient map — luminance through a two-stop colour ramp.

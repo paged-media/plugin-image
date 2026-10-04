@@ -944,6 +944,17 @@ export function layers_undo(): Promise<string>;
 export function layers_ungroup(id: number): void;
 
 /**
+ * PATCH: replace the SELECTION with the region `(dx, dy)` image px
+ * away from it, healed so it blends (`retouch::patch_rgba8`: the
+ * shifted source plus the membrane tone correction, composited
+ * through the selection's coverage on the GPU). Lands in the active
+ * layer as one journaled undo step ("Patch"). Needs a selection; a
+ * zero offset is refused rather than spending an undo step on the
+ * identity.
+ */
+export function patch_selection(handle: number, dx: number, dy: number): Promise<DecodedHandle>;
+
+/**
  * The hash of the sources this wasm was built from
  * (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
  * "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
@@ -1328,6 +1339,7 @@ export interface InitOutput {
     readonly layers_set_visible: (a: number, b: number) => [number, number];
     readonly layers_undo: () => any;
     readonly layers_ungroup: (a: number) => [number, number];
+    readonly patch_selection: (a: number, b: number, c: number) => any;
     readonly perf_counters: () => [number, number];
     readonly perf_counters_reset: () => void;
     readonly psd_apply_adjusted: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

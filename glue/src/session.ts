@@ -519,6 +519,9 @@ export interface ImageSession {
   /** RED-EYE removal inside the ellipse that fits the box `(x, y, w, h)`
    *  (image px); `darken` 0–1 (default 0.5). */
   applyRedEye(box: { x: number; y: number; w: number; h: number }, darken?: number): Promise<boolean>;
+  /** PATCH: replace the selection with the region (dx, dy) image px away,
+   *  healed so it blends. Needs a selection. */
+  patchSelection(dx: number, dy: number): Promise<boolean>;
   /** NOISE ▸ Median (3×3). */
   applyMedian(): Promise<boolean>;
   /** OTHER ▸ Maximum ("max") / Minimum ("min"), 3×3. */
@@ -1988,6 +1991,15 @@ export function createImageSession(host: BundleHost): ImageSession {
       return api.applyEffect("Red eye", (h) =>
         engine!.applyRedEye(h, box.x + box.w / 2, box.y + box.h / 2, box.w / 2, box.h / 2, darken),
       );
+    },
+
+    async patchSelection(dx, dy) {
+      if (!state.selection) {
+        setStatus("Patch needs a selection — select the area to replace, then drag it onto the source.");
+        return false;
+      }
+      if (Math.round(dx) === 0 && Math.round(dy) === 0) return false;
+      return api.applyEffect("Patch", (h) => engine!.patchSelection(h, dx, dy));
     },
 
     async applyMedian() {

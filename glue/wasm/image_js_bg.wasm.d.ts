@@ -126,6 +126,7 @@ export const layers_set_opacity: (a: number, b: number) => [number, number];
 export const layers_set_visible: (a: number, b: number) => [number, number];
 export const layers_undo: () => any;
 export const layers_ungroup: (a: number) => [number, number];
+export const patch_selection: (a: number, b: number, c: number) => any;
 export const perf_counters: () => [number, number];
 export const perf_counters_reset: () => void;
 export const psd_apply_adjusted: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

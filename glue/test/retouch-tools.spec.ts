@@ -39,6 +39,7 @@ import {
   type ImageWasmModule,
 } from "../src/engine";
 import { ToneSection } from "../src/panels/sections/tone-section";
+import { patchOffset } from "../src/patch-tool";
 import { createImageSession } from "../src/session";
 import { makeFakeEditor, mapBacking, psdBytes, shellStub, silentConsole } from "./helpers";
 
@@ -219,3 +220,44 @@ describe("spot healing brush", () => {
     handle.dispose();
   });
 });
+
+describe("patch", () => {
+  it("a drag names the source offset; a click names none", () => {
+    expect(patchOffset([10, 10], [40.4, 5.6])).toEqual([30, -4]);
+    expect(patchOffset([10, 10], [10.3, 9.8])).toBeNull();
+  });
+
+  it("the facade forwards to patch_selection", async () => {
+    const calls: unknown[][] = [];
+    const engine = wrapEngine({
+      patch_selection: async (...a: unknown[]) => {
+        calls.push(a);
+        return { handle: 7, width: 4, height: 4, display: 0, depth_reduced: false, free() {} };
+      },
+    } as unknown as ImageWasmModule);
+    expect((await engine.patchSelection(7, 30, -4)).handle).toBe(7);
+    expect(calls).toEqual([[7, 30, -4]]);
+  });
+
+  it("the real wasm door declines without a GPU", async () => {
+    if (!existsSync(WASM)) return;
+    const wasm = await boot();
+    const img = wasm.ingest_rgba8(4, 4, new Uint8Array(64).fill(200));
+    await expect(wasm.patch_selection(img.handle, 2, 0)).rejects.toThrow(/GPU-only/);
+  });
+
+  it("the session needs a selection, ignores a zero drag and declines without a GPU", async () => {
+    const { handle, session } = await ingest();
+    expect(await session.patchSelection(5, 0)).toBe(false);
+    expect(session.state().status).toMatch(/needs a selection/);
+    expect(session.selectAll()).toBeTruthy();
+    expect(await session.patchSelection(0, 0)).toBe(false);
+    expect(await session.patchSelection(5, 0)).toBe(false);
+    expect(session.state().status).toMatch(/GPU-only/);
+    const tools = (manifestJson as PluginManifest).contributes?.tools ?? [];
+    expect(tools).toContain("media.paged.image.tool.patch");
+    session.dispose();
+    handle.dispose();
+  });
+});
+

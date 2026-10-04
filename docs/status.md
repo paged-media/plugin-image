@@ -36,7 +36,9 @@ landed. How the parts fit is in
   through the `adjust.dodge_burn` kernel, masked by the dabs' coverage; blur and sharpen
   brushes (the Gaussian/unsharp chain under the dabs, strength = flow); the spot healing
   brush (on release an exemplar search around the stroke picks a source offset, and the
-  heal composite — source plus membrane tone correction — lands under the stroke); with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
+  heal composite — source plus membrane tone correction — lands under the stroke); the patch
+  tool (drag the selection onto the source; the selection is replaced by the region at that
+  offset and healed to its surroundings); with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
   presets from an `.abr` brush library. The type tool paints a shaped run of text into the
   active layer with font bytes the host serves for the document's fonts.
 - **Layers.** Add, duplicate, remove, reorder; visibility, lock, opacity and 26 blend modes;

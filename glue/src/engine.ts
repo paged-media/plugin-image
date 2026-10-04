@@ -1328,6 +1328,9 @@ export interface ImageEngine {
     ry: number,
     darken: number,
   ): Promise<DecodedInfo>;
+  /** PATCH: replace the selection with the region (dx, dy) image px away,
+   *  healed to its surroundings. THROWS with no selection or a zero offset. */
+  patchSelection(handle: number, dx: number, dy: number): Promise<DecodedInfo>;
   /** NOISE — Median, 3×3 (the kernel's fixed comparator network). */
   applyMedian(handle: number): Promise<DecodedInfo>;
   /** OTHER — Maximum ("max") or Minimum ("min"), 3×3. */
@@ -1864,6 +1867,7 @@ export interface ImageWasmModule {
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
   apply_median(handle: number): Promise<DecodedHandleWasm>;
+  patch_selection(handle: number, dx: number, dy: number): Promise<DecodedHandleWasm>;
   apply_red_eye(
     handle: number,
     cx: number,
@@ -2479,6 +2483,9 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyRedEye(handle, cx, cy, rx, ry, darken) {
       return decodedInfoOf(await wasm.apply_red_eye(handle, cx, cy, rx, ry, darken));
+    },
+    async patchSelection(handle, dx, dy) {
+      return decodedInfoOf(await wasm.patch_selection(handle, dx, dy));
     },
     async applyMedian(handle) {
       return decodedInfoOf(await wasm.apply_median(handle));

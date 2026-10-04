@@ -46,6 +46,7 @@ import { makeMoveGesture } from "./move-tool";
 import { makeBucketGesture } from "./bucket-tool";
 import { makeGradientGesture } from "./gradient-tool";
 import { makeRedEyeGesture } from "./red-eye-tool";
+import { makePatchGesture } from "./patch-tool";
 import { makeSelectionGesture } from "./selection-tool";
 import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 import { makeTypeGesture } from "./type-tool";
@@ -64,6 +65,7 @@ const SPONGE_TOOL_ID = "media.paged.image.tool.sponge";
 const BLUR_TOOL_ID = "media.paged.image.tool.blur";
 const SHARPEN_TOOL_ID = "media.paged.image.tool.sharpen";
 const SPOT_HEAL_TOOL_ID = "media.paged.image.tool.spotHeal";
+const PATCH_TOOL_ID = "media.paged.image.tool.patch";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -462,6 +464,17 @@ export function activate(host: BundleHost): BundleHandle {
     section: "drawType",
     cursor: PAINT_CURSOR,
     gesture: () => makeBrushGesture(host, session, "spot-heal"),
+  });
+
+  // PATCH — drag the selection onto the area to copy from; it is replaced
+  // and healed on release. Shares the healing brush's slot; no shortcut.
+  contributeTool(host, {
+    id: PATCH_TOOL_ID,
+    title: "Patch",
+    icon: "tool-heal",
+    group: HEAL_TOOL_ID,
+    section: "drawType",
+    gesture: () => makePatchGesture(host, session),
   });
 
   // GENERATE — the `gen.*` family's editor reach. Fills the CURRENT
@@ -945,6 +958,7 @@ export function activate(host: BundleHost): BundleHandle {
         BLUR_TOOL_ID,
         SHARPEN_TOOL_ID,
         SPOT_HEAL_TOOL_ID,
+        PATCH_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host

@@ -2110,6 +2110,24 @@ export function layers_ungroup(id) {
 }
 
 /**
+ * PATCH: replace the SELECTION with the region `(dx, dy)` image px
+ * away from it, healed so it blends (`retouch::patch_rgba8`: the
+ * shifted source plus the membrane tone correction, composited
+ * through the selection's coverage on the GPU). Lands in the active
+ * layer as one journaled undo step ("Patch"). Needs a selection; a
+ * zero offset is refused rather than spending an undo step on the
+ * identity.
+ * @param {number} handle
+ * @param {number} dx
+ * @param {number} dy
+ * @returns {Promise<DecodedHandle>}
+ */
+export function patch_selection(handle, dx, dy) {
+    const ret = wasm.patch_selection(handle, dx, dy);
+    return ret;
+}
+
+/**
  * The hash of the sources this wasm was built from
  * (`scripts/source-hash.mjs`, stamped by `scripts/build-wasm.sh`;
  * "unstamped" for any other build). `glue/test/wasm-fresh.spec.ts`
@@ -3371,12 +3389,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 787, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 794, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 803, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 810, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },
