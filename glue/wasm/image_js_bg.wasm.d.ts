@@ -79,6 +79,7 @@ export const gpu_ready: () => number;
 export const image_auto_enhance_params: (a: number) => [number, number, number];
 export const image_channel_stats: (a: number) => [number, number, number, number];
 export const image_histogram: (a: number) => [number, number, number];
+export const image_readout: (a: number) => [number, number, number, number];
 export const image_tile_rgba8: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const image_tile_rgba8_level: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const ingest_rgba8: (a: number, b: number, c: number, d: number) => [number, number, number];

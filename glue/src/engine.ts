@@ -1075,6 +1075,10 @@ export interface ImageEngine {
    *  derived Rec.709 luma, reduced from the same buffer the histogram
    *  reads. */
   channelStats(handle: number): ChannelStatsInfo[];
+  /** The histogram and the channels readout from ONE pass over the
+   *  pixels (`image_readout`) — what the panel refreshes after a
+   *  recomposite. */
+  readout(handle: number): { histogram: ImageHistogram; channels: ChannelStatsInfo[] };
   /** LOAD A CHANNEL AS THE SELECTION. The channel's bytes ARE the
    *  coverage representation, so this is a copy and not a threshold — a
    *  50% channel yields a 50%-selected region, which is what a
@@ -1648,6 +1652,7 @@ export interface ImageWasmModule {
   ): Promise<DecodedHandleWasm>;
   selection_bind(handle: number): void;
   image_channel_stats(handle: number): string;
+  image_readout(handle: number): string;
   selection_to_paths(threshold: number, tolerance: number): string;
   selection_from_channel(handle: number, channel: string, mode: number): void;
   selection_set_rect(
@@ -2247,6 +2252,22 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       JSON.parse(wasm.selection_to_paths(threshold, tolerance)) as TracedContour[],
     channelStats: (handle) =>
       JSON.parse(wasm.image_channel_stats(handle)) as ChannelStatsInfo[],
+    readout(handle) {
+      const r = JSON.parse(wasm.image_readout(handle)) as {
+        histogram: number[];
+        channels: ChannelStatsInfo[];
+      };
+      const flat = Uint32Array.from(r.histogram);
+      return {
+        histogram: {
+          r: flat.slice(0, 256),
+          g: flat.slice(256, 512),
+          b: flat.slice(512, 768),
+          luma: flat.slice(768, 1024),
+        },
+        channels: r.channels,
+      };
+    },
     selectionFromChannel: (handle, channel, mode) =>
       wasm.selection_from_channel(handle, channel, selectionModeCode(mode)),
     selectionSetRect: (x, y, w, h, mode) =>

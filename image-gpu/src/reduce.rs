@@ -131,7 +131,7 @@ impl RgbaLumaHistogram {
 /// weights are the ITU-R BT.601 luma weights (standard literature; no
 /// reference reading).
 #[inline]
-fn luma_bin(r: u8, g: u8, b: u8) -> usize {
+pub fn luma_bin(r: u8, g: u8, b: u8) -> usize {
     let y = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
     let yr = y.round();
     if yr <= 0.0 {

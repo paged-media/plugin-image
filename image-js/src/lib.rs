@@ -1091,6 +1091,23 @@ mod wasm {
         })
     }
 
+    /// The histogram AND the channels readout in one pass (see
+    /// `channels::readout`): `{"histogram":[r…,g…,b…,luma…],"channels":[…]}`.
+    /// What the panel refreshes after every recomposite; the two exports
+    /// below stay for callers that want one of them.
+    #[wasm_bindgen]
+    pub fn image_readout(handle: u32) -> Result<String, JsValue> {
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let (hist, channels) = crate::channels::readout(&img.rgba.to_rgba8());
+        let flat: Vec<String> = hist.to_flat().iter().map(u32::to_string).collect();
+        Ok(format!(
+            "{{\"histogram\":[{}],\"channels\":{channels}}}",
+            flat.join(",")
+        ))
+    }
+
     /// The CHANNELS readout for an engine-held image: `[{name, min, max,
     /// mean}]` for red/green/blue/alpha and the derived Rec.709 luma.
     /// Pure CPU reduction over the same straight-RGBA8 buffer

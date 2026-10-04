@@ -1455,12 +1455,23 @@ export function createImageSession(host: BundleHost): ImageSession {
   /** Recompute the histogram + the CHANNELS readout + (re)build the crop
    *  machine for the live engine-held source. Called after a decode/
    *  ingest and after a crop commit (both change the source pixels).
-   *  Both readouts come from the SAME buffer in the same pass, which is
-   *  why the Channels panel's means can never disagree with the
-   *  histogram it sits under. A read failure is non-fatal (the panel
+   *  Both readouts come from the SAME buffer in ONE pass
+   *  (`image_readout`), which is why the Channels panel's means can never
+   *  disagree with the histogram it sits under. A read failure is non-fatal (the panel
    *  just shows no readout). */
   const refreshHistogram = () => {
     if (!engine || !state.source) return;
+    // One pass for both readouts where the engine has it.
+    if (typeof engine.readout === "function") {
+      try {
+        const r = engine.readout(state.source.handle);
+        state.histogram = r.histogram;
+        state.channels = r.channels;
+        return;
+      } catch (err) {
+        host.log.debug("readout failed", err);
+      }
+    }
     try {
       state.histogram = engine.histogram(state.source.handle);
     } catch (err) {

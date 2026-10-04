@@ -176,9 +176,75 @@ pub fn stats_json(rgba: &[u8]) -> String {
     format!("[{}]", rows.join(","))
 }
 
+/// The LEVELS/CURVES histogram and the CHANNELS readout ([`stats_json`])
+/// in ONE pass over the pixels — they were six (the histogram, then one
+/// pass per channel). Each channel's min, max and mean come from its own
+/// 256-bin histogram, which is exact: the mean's integer sum is the same
+/// sum the per-channel pass took.
+pub fn readout(rgba: &[u8]) -> (image_gpu::RgbaLumaHistogram, String) {
+    let mut hist = image_gpu::RgbaLumaHistogram::default();
+    let mut alpha = [0u32; 256];
+    let mut luma709 = [0u32; 256];
+    for px in rgba.chunks_exact(4) {
+        let (r, g, b) = (px[0], px[1], px[2]);
+        hist.r[r as usize] += 1;
+        hist.g[g as usize] += 1;
+        hist.b[b as usize] += 1;
+        hist.luma[image_gpu::reduce::luma_bin(r, g, b)] += 1;
+        alpha[px[3] as usize] += 1;
+        luma709[Channel::Luma.value_at(px) as usize] += 1;
+    }
+    let row = |c: Channel, bins: &[u32; 256]| -> String {
+        let n: u64 = bins.iter().map(|&v| u64::from(v)).sum();
+        if n == 0 {
+            return format!(
+                "{{\"name\":\"{}\",\"min\":null,\"max\":null,\"mean\":null}}",
+                c.name()
+            );
+        }
+        let min = bins.iter().position(|&v| v > 0).unwrap_or(0);
+        let max = bins.iter().rposition(|&v| v > 0).unwrap_or(0);
+        let sum: u64 = bins
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| i as u64 * u64::from(v))
+            .sum();
+        format!(
+            "{{\"name\":\"{}\",\"min\":{},\"max\":{},\"mean\":{:.3}}}",
+            c.name(),
+            min,
+            max,
+            sum as f64 / n as f64
+        )
+    };
+    let rows = [
+        row(Channel::Red, &hist.r),
+        row(Channel::Green, &hist.g),
+        row(Channel::Blue, &hist.b),
+        row(Channel::Alpha, &alpha),
+        row(Channel::Luma, &luma709),
+    ];
+    (hist, format!("[{}]", rows.join(",")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one-pass readout says exactly what the two separate readouts
+    /// said.
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_one_pass_readout_equals_the_histogram_and_the_channel_stats__feat__image_channels_readout(
+    ) {
+        let px: Vec<u8> = (0..4096u32)
+            .flat_map(|i| [(i * 7) as u8, (i * 13) as u8, (i * 29) as u8, (i * 3) as u8])
+            .collect();
+        let (hist, json) = readout(&px);
+        assert_eq!(hist, image_gpu::histogram_rgba8(&px));
+        assert_eq!(json, stats_json(&px));
+        assert_eq!(readout(&[]).1, stats_json(&[]));
+    }
 
     /// Two pixels whose channels all differ, so a transposed read shows.
     const TWO: [u8; 8] = [10, 20, 30, 40, 200, 100, 50, 255];

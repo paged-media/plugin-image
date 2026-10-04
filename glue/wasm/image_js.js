@@ -1344,6 +1344,33 @@ export function image_histogram(handle) {
 }
 
 /**
+ * The histogram AND the channels readout in one pass (see
+ * `channels::readout`): `{"histogram":[r…,g…,b…,luma…],"channels":[…]}`.
+ * What the panel refreshes after every recomposite; the two exports
+ * below stay for callers that want one of them.
+ * @param {number} handle
+ * @returns {string}
+ */
+export function image_readout(handle) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.image_readout(handle);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * C-6 (I-06) — copy a LEVEL-0 tile window `(x, y, w, h)` out of a
  * decoded image as tightly packed RGBA8 (`w*h*4` bytes, row-major).
  * Edge tiles are clamped to the image extent (the caller passes the
@@ -3320,12 +3347,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 787, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 791, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 803, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 807, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },

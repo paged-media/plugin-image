@@ -605,6 +605,14 @@ export function image_channel_stats(handle: number): string;
 export function image_histogram(handle: number): Uint32Array;
 
 /**
+ * The histogram AND the channels readout in one pass (see
+ * `channels::readout`): `{"histogram":[r…,g…,b…,luma…],"channels":[…]}`.
+ * What the panel refreshes after every recomposite; the two exports
+ * below stay for callers that want one of them.
+ */
+export function image_readout(handle: number): string;
+
+/**
  * C-6 (I-06) — copy a LEVEL-0 tile window `(x, y, w, h)` out of a
  * decoded image as tightly packed RGBA8 (`w*h*4` bytes, row-major).
  * Edge tiles are clamped to the image extent (the caller passes the
@@ -1254,6 +1262,7 @@ export interface InitOutput {
     readonly image_auto_enhance_params: (a: number) => [number, number, number];
     readonly image_channel_stats: (a: number) => [number, number, number, number];
     readonly image_histogram: (a: number) => [number, number, number];
+    readonly image_readout: (a: number) => [number, number, number, number];
     readonly image_tile_rgba8: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly image_tile_rgba8_level: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly ingest_rgba8: (a: number, b: number, c: number, d: number) => [number, number, number];

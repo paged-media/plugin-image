@@ -91,8 +91,11 @@ describe("work budgets — layer opacity drag (20 steps)", () => {
   // trailing fold of the final state.
   const DRAG = {
     layersComposite: 2,
-    histogram: 2,
-    channelStats: 2,
+    // One pass for both readouts (`image_readout`): was 2 histograms +
+    // 2 channel-stat passes (6 passes over the pixels each time).
+    readout: 2,
+    histogram: 0,
+    channelStats: 0,
     submits: 2,
     // 2 × the 2×1 fixture's 8 bytes. At 4000×3000 that is still 96 M
     // numbers per drag, until the binary scene-layer door.
@@ -116,6 +119,7 @@ describe("work budgets — layer opacity drag (20 steps)", () => {
 
     const got = {
       layersComposite: engineLog!.count("layersComposite"),
+      readout: engineLog!.count("readout"),
       histogram: engineLog!.count("histogram"),
       channelStats: engineLog!.count("channelStats"),
       submits: fake.sceneLayers.submit.mock.calls.length,
