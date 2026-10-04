@@ -167,6 +167,13 @@ export function makeBrushGesture(
         session.setCloneSource(point);
         return;
       }
+      // ALT-CLICK WITH A PAINT TOOL IS THE EYEDROPPER (Photoshop's
+      // convention): it takes the image's colour under the pointer as
+      // the foreground, and paints nothing.
+      if (e.modifiers?.alt) {
+        session.sampleColor(point, 3);
+        return;
+      }
       if (!machine.down(point, e.pressure, e.pointerType as BrushPointerType))
         return;
       renderTip(point);

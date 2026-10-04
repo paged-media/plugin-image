@@ -36,6 +36,7 @@ const ENTRIES: [path: string, suffix: string, group: string][] = [
   ["Image/Bake adjustments into layer", "bakeAdjustToLayer", "adjust-bake"],
 
   ["Image/Layer/Add", "addLayer", "layer"],
+  ["Image/Layer/Convert to smart object", "convertLayerToSmart", "layer-smart"],
 
   ["Image/Selection/Select all", "selectAll", "sel"],
   ["Image/Selection/Deselect", "deselect", "sel"],
@@ -46,6 +47,9 @@ const ENTRIES: [path: string, suffix: string, group: string][] = [
   ["Image/Fill/Gradient…", "fillSelection", "fill"],
   ["Image/Fill/Noise…", "fillNoise", "fill"],
   ["Image/Fill/Content-aware", "contentAwareFill", "fill"],
+  ["Image/Fill/Define pattern", "definePattern", "fill-pattern"],
+  ["Image/Fill/Pattern", "fillPattern", "fill-pattern"],
+  ["Image/Filter/Shape blur", "shapeBlur", "filter"],
 
   ["Image/Apply crop", "commitCrop", "crop"],
   ["Image/Set type", "setType", "type"],

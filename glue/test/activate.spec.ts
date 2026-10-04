@@ -67,6 +67,12 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.bakeAdjustToLayer",
       "media.paged.image.command.undo",
       "media.paged.image.command.redo",
+      // Built long before anything reached them: smart objects, pattern
+      // fill (with Define pattern), shape blur.
+      "media.paged.image.command.convertLayerToSmart",
+      "media.paged.image.command.definePattern",
+      "media.paged.image.command.fillPattern",
+      "media.paged.image.command.shapeBlur",
       "media.paged.image.command.applyToFile",
       "media.paged.image.command.saveToFile",
       "media.paged.image.command.loadBrushLibrary",
@@ -83,6 +89,8 @@ describe("imageBundle.activate", () => {
     ]);
     expect(fake.tools.ids()).toEqual([
       "media.paged.image.tool.crop",
+      // Raster Move shares the crop slot (no shortcut: "v" is the host's).
+      "media.paged.image.tool.move",
       "media.paged.image.tool.marqueeRect",
       "media.paged.image.tool.marqueeEllipse",
       "media.paged.image.tool.lasso",

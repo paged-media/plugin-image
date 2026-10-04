@@ -27,7 +27,7 @@
 // reduce histogram); this leaf only renders + forwards.
 
 import { Fragment, useEffect, useReducer, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import manifest from "../../manifest.json";
 
@@ -58,37 +58,11 @@ import {
 } from "../engine";
 import type { AspectPreset } from "../crop-machine";
 
-const row: CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  gap: "var(--space-2, 8px)",
-  padding: "var(--space-1, 4px) 0",
-  borderBottom: "1px solid var(--pg-border, rgba(127,127,127,0.25))",
-};
-
-const kicker: CSSProperties = {
-  textTransform: "uppercase",
-  letterSpacing: "var(--tracking-wide, 0.08em)",
-  fontSize: "11px",
-  opacity: 0.7,
-};
-
-const sectionTitle: CSSProperties = {
-  ...kicker,
-  marginTop: "var(--space-3, 12px)",
-  marginBottom: "var(--space-1, 4px)",
-};
-
-const mono: CSSProperties = {
-  fontFamily: "var(--font-mono, monospace)",
-};
-
-const note: CSSProperties = {
-  fontSize: "11px",
-  opacity: 0.65,
-  marginTop: "var(--space-2, 8px)",
-};
+import { ColorSection } from "./sections/color-section";
+import { MoveSection } from "./sections/move-section";
+import { PatternSection } from "./sections/pattern-section";
+import { SmartObjectSection } from "./sections/smart-object-section";
+import { kicker, mono, note, row, sectionTitle } from "./sections/styles";
 
 interface SliderSpec {
   label: string;
@@ -1599,6 +1573,10 @@ export function makeImagePanel(session: ImageSession) {
       useState<Array<[number, number]>>(IDENTITY_CURVE);
     const [aspect, setAspect] = useState<AspectPreset>("free");
     const [angle, setAngle] = useState(0);
+    // Pattern / smart-object section state (slider positions only).
+    const [patternScale, setPatternScale] = useState(1);
+    const [shapeRadius, setShapeRadius] = useState(8);
+    const [smartScale, setSmartScale] = useState(1);
     // Generate-section local state (the request shape, not engine state).
     const [pathThreshold, setPathThreshold] = useState(128);
     const [gradKind, setGradKind] = useState<GradientKind>("linear");
@@ -2373,6 +2351,33 @@ export function makeImagePanel(session: ImageSession) {
           the gradient geometry follows the selection bounds.
         </div>
 
+        <PatternSection
+          session={session}
+          pattern={s.pattern}
+          gpu={s.gpu}
+          disabled={disabled}
+          scale={patternScale}
+          onScale={setPatternScale}
+          radius={shapeRadius}
+          onRadius={setShapeRadius}
+        />
+        <MoveSection
+          session={session}
+          hasSelection={!!s.selection && s.selection.w > 0}
+          size={s.source ? { width: s.source.width, height: s.source.height } : null}
+          gpu={s.gpu}
+          disabled={disabled}
+        />
+        <SmartObjectSection
+          session={session}
+          active={s.layers.active}
+          isSmart={s.layers.layers[s.layers.active]?.kind === "smart"}
+          gpu={s.gpu}
+          disabled={disabled}
+          scale={smartScale}
+          onScale={setSmartScale}
+        />
+
         {/* Filters — the T1/T2 kernels' first editor reach (blur, unsharp,
             hue rotation, invert); same GPU chain, same Apply commit. */}
         <div style={sectionTitle}>Filters</div>
@@ -2752,6 +2757,8 @@ export function makeImagePanel(session: ImageSession) {
           onRedo={() => void session.redo()}
         />
 
+        <ColorSection session={session} colors={s.colors} />
+
         {/* BRUSH — the paint tools' frozen-at-pointer-down parameters
             (paged.image's RASTER brush/pencil/eraser, distinct from
             paged.draw's vector ones on the same rail). The section states
@@ -3118,6 +3125,15 @@ export function makeImagePanel(session: ImageSession) {
             marginTop: "var(--space-3, 12px)",
           }}
         >
+          <label title="Sliders update the frame as they move; full resolution follows when they rest">
+            <input
+              type="checkbox"
+              data-image-live-preview
+              checked={s.livePreview}
+              onChange={(e) => session.setLivePreview(e.target.checked)}
+            />{" "}
+            Live
+          </label>
           <button
             type="button"
             disabled={disabled}

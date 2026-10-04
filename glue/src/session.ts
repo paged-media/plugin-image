@@ -35,6 +35,15 @@ import type {
   ElementId,
 } from "@paged-media/plugin-api";
 
+import { latestWins } from "./coalesce";
+import {
+  averageRgba8,
+  freshColors,
+  swapped,
+  toHex,
+  type ColorPair,
+  type SampleSize,
+} from "./color-state";
 import {
   bootEngine,
   DEFAULT_BRUSH_PARAMS,
@@ -195,6 +204,13 @@ export interface ImageSessionState {
    *  whole image. When set, the committed Apply masks every GPU
    *  adjust/filter dispatch (and the CPU curves pass) by the coverage. */
   selection: SelectionStats | null;
+  /** The defined pattern (`definePattern`), or null. */
+  pattern: { width: number; height: number } | null;
+  /** Foreground / background colour (`color-state.ts`). The brush paints
+   *  the foreground; gradients run foreground → background. */
+  colors: ColorPair;
+  /** Adjustment sliders update the frame as they move (on by default). */
+  livePreview: boolean;
   /** The SAVE-BACK bytes staged by `applyToFile` (null until asked
    *  for). The panel reports them; the Export Center delivers them —
    *  the host wires no save-FILE door (`shell.pickFile` reads, it does
@@ -437,6 +453,33 @@ export interface ImageSession {
     offsetY?: number,
     opacity?: number,
   ): Promise<boolean>;
+  /**
+   * Edit ▸ Define Pattern: copy the selection's bounding box (the whole
+   * image when nothing is selected) into an image of its own, held by
+   * the session as THE pattern. It is also the shape Shape Blur uses.
+   * Replaces the previous pattern. CPU only (a window copy).
+   */
+  definePattern(): boolean;
+  /** Live preview on/off (`state().livePreview`). */
+  setLivePreview(on: boolean): void;
+  /** Set the foreground colour; the brush paints it from the next stroke. */
+  setForeground(c: Rgba01): void;
+  setBackground(c: Rgba01): void;
+  /** Photoshop X: swap foreground and background. */
+  swapColors(): void;
+  /** Photoshop D: black foreground, white background. */
+  resetColors(): void;
+  /**
+   * The eyedropper: average the COMPOSITE around image pixel `at`
+   * (1 = that pixel, 3 = 3×3, 5 = 5×5, clipped at the edges) and make it
+   * the foreground (or the background). Returns the colour, or null when
+   * nothing is ingested or `at` is outside the image.
+   */
+  sampleColor(at: [number, number], size?: SampleSize, target?: "fg" | "bg"): Rgba01 | null;
+  /** Fill the selection with the defined pattern (Edit ▸ Fill ▸ Pattern). */
+  fillWithPattern(scale?: number, opacity?: number): Promise<boolean>;
+  /** Shape blur with the defined pattern as the blur's shape. */
+  shapeBlurWithPattern(radiusPx?: number): Promise<boolean>;
   /**
    * MOVE the SELECTED pixels. This is what the Move tool does when a
    * selection is live, and it is NOT `offsetLayer` — that moves the
@@ -792,6 +835,9 @@ export function createImageSession(host: BundleHost): ImageSession {
     status: "Select a placed image frame, then ingest.",
     psd: null,
     selection: null,
+    pattern: null,
+    colors: freshColors(),
+    livePreview: true,
     saveBack: null,
     brush: { ...DEFAULT_BRUSH_PARAMS, color: [...DEFAULT_BRUSH_PARAMS.color] },
     blendModes: [],
@@ -835,6 +881,8 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  byte-identical re-emit is only correct while it is 0, because the
    *  retained parse never sees an edit that lands in the layer stack. */
   let pixelEdits = 0;
+  /** The engine handle of the defined pattern (`definePattern`). */
+  let patternHandle: number | null = null;
 
   const emit = () => {
     for (const l of [...listeners]) l();
@@ -979,7 +1027,11 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  readouts, and put the adjusted composite back in-frame. Every layer
    *  mutation ends here so the canvas and the panel can never disagree.
    *  A one-layer stack short-circuits engine-side (no GPU, no dispatch). */
-  const recomposite = async (): Promise<boolean> => {
+  const recomposite = (): Promise<boolean> => recompositeLatest();
+
+  /** The fold itself. Coalesced latest-wins (`coalesce.ts`): a burst of
+   *  slider steps costs at most two folds, each of the CURRENT stack. */
+  const recompositeNow = async (): Promise<boolean> => {
     if (!engine || !state.source) return false;
     try {
       await engine.layersComposite();
@@ -1001,6 +1053,8 @@ export function createImageSession(host: BundleHost): ImageSession {
     else emit();
     return true;
   };
+
+  const recompositeLatest = latestWins(recompositeNow);
 
   /** Adopt a commit's result. When the engine handed back the SAME
    *  handle it edited in place (the layer lane) — the pixels changed but
@@ -1150,6 +1204,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     sourceFormat = null;
     state.saveBack = null;
     pixelEdits = 0;
+    freeProxy();
   };
 
   /** "8BPS" — the PSD/PSB magic. */
@@ -1337,16 +1392,22 @@ export function createImageSession(host: BundleHost): ImageSession {
     width: number,
     height: number,
     box: { w: number; h: number },
+    // The size the image is LAID OUT at, when the pixels are a smaller
+    // preview proxy of it. The layout (and `ptPerPx`) always follows the
+    // full-resolution image, so a proxy lands exactly where the final
+    // pixels will.
+    layoutWidth = width,
+    layoutHeight = height,
   ): Promise<boolean> => {
     const surface = scene();
     if (!surface) return false;
-    const scale = Math.min(box.w / width, box.h / height);
+    const scale = Math.min(box.w / layoutWidth, box.h / layoutHeight);
     // The SAME number the layout uses — see `state.ptPerPx`. Recorded
     // here so a panel converting image px to points cannot disagree
     // with what was drawn.
     state.ptPerPx = scale;
-    const w = width * scale;
-    const h = height * scale;
+    const w = layoutWidth * scale;
+    const h = layoutHeight * scale;
     await surface.submit(target, {
       items: [
         {
@@ -1363,6 +1424,85 @@ export function createImageSession(host: BundleHost): ImageSession {
     });
     state.compositedFrame = target;
     return true;
+  };
+
+  // ── LIVE PREVIEW ────────────────────────────────────────────────────
+  //
+  // A slider change re-runs the adjustment chain on a PROXY — the source
+  // resampled (Lanczos) to about what the frame shows — and puts it in
+  // the frame at once; the full-resolution result follows when the
+  // sliders rest. Before this, nothing moved on the page until Apply.
+  // Latest-wins (`coalesce.ts`): a drag costs at most one preview in
+  // flight and one trailing preview of the final values.
+
+  /** The resampled source the preview runs on, or null. Rebuilt when the
+   *  source pixels or the wanted size change. */
+  let proxy: { handle: number; width: number; height: number; key: string } | null = null;
+
+  const freeProxy = () => {
+    if (proxy && engine) engine.freeImage(proxy.handle);
+    proxy = null;
+  };
+
+  /** Proxy size: the frame box at 2 px per pt (a HiDPI screen at 100 %),
+   *  never larger than the source. */
+  const proxySize = (box: { w: number; h: number }, src: SourceImage) => {
+    const fit = Math.min(1, (2 * box.w) / src.width, (2 * box.h) / src.height);
+    return {
+      w: Math.max(1, Math.round(src.width * fit)),
+      h: Math.max(1, Math.round(src.height * fit)),
+    };
+  };
+
+  /** Full resolution after the sliders rest this long (ms). */
+  const PREVIEW_SETTLE_MS = 400;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const previewNow = async (): Promise<boolean> => {
+    const src = state.source;
+    const target = src?.elementId;
+    if (!src || !engine || !target || !state.gpu || !scene()) return false;
+    const box = await frameBox(target);
+    const { w, h } = proxySize(box, src);
+    // A selection is bound at SOURCE resolution, so a masked chain cannot
+    // run on the proxy; and a proxy as large as the source is the source.
+    const direct = !!state.selection || (w === src.width && h === src.height);
+    try {
+      let handle = src.handle;
+      let pw = src.width;
+      let ph = src.height;
+      if (!direct) {
+        const key = `${src.handle}:${pixelEdits}:${w}x${h}`;
+        if (proxy?.key !== key) {
+          freeProxy();
+          const r = await engine.resize(src.handle, w, h, "lanczos3");
+          proxy = { handle: r.handle, width: r.width, height: r.height, key };
+        }
+        ({ handle, width: pw, height: ph } = proxy!);
+      }
+      const rgba = await engine.adjust(handle, state.params);
+      await submitLayer(target, rgba, pw, ph, box, src.width, src.height);
+      return true;
+    } catch (err) {
+      host.log.debug("live preview failed", err);
+      return false;
+    }
+  };
+  const previewLatest = latestWins(previewNow);
+
+  /** Called by every parameter setter. */
+  let lastPreview: Promise<boolean> = Promise.resolve(false);
+  const schedulePreview = () => {
+    if (!state.livePreview || !state.source?.elementId || !state.gpu) return;
+    lastPreview = previewLatest();
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      // After the last preview has landed, so the proxy can never be the
+      // image left in the frame. (A change during the full-resolution
+      // pass schedules another settle, which re-runs it.)
+      void lastPreview.then(() => api.apply());
+    }, PREVIEW_SETTLE_MS);
   };
 
   const clearLayer = async () => {
@@ -1581,6 +1721,12 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     setParams(p) {
       state.params = { ...state.params, ...p };
+      emit();
+      schedulePreview();
+    },
+
+    setLivePreview(on) {
+      state.livePreview = on;
       emit();
     },
 
@@ -1897,6 +2043,102 @@ export function createImageSession(host: BundleHost): ImageSession {
         ),
       );
     },
+    setForeground(c) {
+      state.colors = { ...state.colors, fg: [...c] };
+      state.brush = { ...state.brush, color: [...c] };
+      emit();
+    },
+
+    setBackground(c) {
+      state.colors = { ...state.colors, bg: [...c] };
+      emit();
+    },
+
+    swapColors() {
+      state.colors = swapped(state.colors);
+      state.brush = { ...state.brush, color: [...state.colors.fg] };
+      emit();
+    },
+
+    resetColors() {
+      const c = freshColors();
+      api.setForeground(c.fg);
+      api.setBackground(c.bg);
+    },
+
+    sampleColor(at, size = 1, target = "fg") {
+      const src = state.source;
+      if (!src || !engine) return null;
+      const [px, py] = [Math.floor(at[0]), Math.floor(at[1])];
+      if (px < 0 || py < 0 || px >= src.width || py >= src.height) return null;
+      const r = (size - 1) / 2;
+      const x0 = Math.max(0, px - r);
+      const y0 = Math.max(0, py - r);
+      const x1 = Math.min(src.width, px + r + 1);
+      const y1 = Math.min(src.height, py + r + 1);
+      let c: Rgba01 | null;
+      try {
+        c = averageRgba8(engine.tile(src.handle, x0, y0, x1 - x0, y1 - y0));
+      } catch (err) {
+        host.log.debug("colour sample failed", err);
+        return null;
+      }
+      if (!c) return null;
+      if (target === "fg") api.setForeground(c);
+      else api.setBackground(c);
+      setStatus(`Sampled ${toHex(c)} at ${px}, ${py}${size > 1 ? ` (${size}×${size} average)` : ""}.`);
+      emit();
+      return c;
+    },
+
+    definePattern() {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      const sel = state.selection;
+      const box =
+        sel && sel.w > 0 && sel.h > 0
+          ? sel
+          : { x: 0, y: 0, w: src.width, h: src.height };
+      try {
+        const rgba = engine.tile(src.handle, box.x, box.y, box.w, box.h);
+        const info = engine.ingestRgba8(box.w, box.h, rgba);
+        if (patternHandle !== null) engine.freeImage(patternHandle);
+        patternHandle = info.handle;
+        state.pattern = { width: box.w, height: box.h };
+        setStatus(
+          `Pattern defined — ${box.w}×${box.h} px from the ` +
+            `${sel && sel.w > 0 ? "selection's bounds" : "whole image"}.`,
+        );
+        emit();
+        return true;
+      } catch (err) {
+        setStatus(`Define pattern failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+    },
+
+    async fillWithPattern(scale = 1, opacity = 1) {
+      if (patternHandle === null) {
+        setStatus("No pattern defined — use Define pattern first.");
+        emit();
+        return false;
+      }
+      return api.fillPattern(patternHandle, scale, 0, 0, 0, opacity);
+    },
+
+    async shapeBlurWithPattern(radiusPx = 8) {
+      if (patternHandle === null) {
+        setStatus("Shape blur uses the defined pattern as its shape — define one first.");
+        emit();
+        return false;
+      }
+      return api.applyShapeBlur(patternHandle, radiusPx, 1);
+    },
+
     async moveSelection(dx, dy, vacate = VacateMode.Transparent) {
       return this.applyEffect("Move selection", (h) =>
         engine!.applyMoveSelection(h, dx, dy, vacate),
@@ -2085,6 +2327,7 @@ export function createImageSession(host: BundleHost): ImageSession {
         levels: { ...state.params.levels, ...l },
       };
       emit();
+      schedulePreview();
     },
 
     setCurvePoints(points) {
@@ -2101,6 +2344,7 @@ export function createImageSession(host: BundleHost): ImageSession {
         curveLut: isIdentityCurve ? null : engine.curveLut(points),
       };
       emit();
+      schedulePreview();
     },
 
     autoEnhance() {
@@ -2562,6 +2806,8 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     setBrushParams(p) {
       state.brush = { ...state.brush, ...p };
+      // The brush paints the FOREGROUND: one colour, two names for it.
+      if (p.color) state.colors = { ...state.colors, fg: [...p.color] };
       // Editing any parameter means the brush is no longer the preset.
       // Keeping the row highlighted would claim a provenance the stroke
       // does not have.
@@ -3306,6 +3552,7 @@ export function createImageSession(host: BundleHost): ImageSession {
 
     dispose() {
       disposed = true;
+      if (settleTimer) clearTimeout(settleTimer);
       selectionSub.dispose();
       discardStroke();
       releaseTiles();
@@ -3314,6 +3561,8 @@ export function createImageSession(host: BundleHost): ImageSession {
       // earlier teardown, and terminate is idempotent).
       decodePool?.dispose();
       decodePool = null;
+      if (patternHandle !== null && engine) engine.freeImage(patternHandle);
+      patternHandle = null;
       freeSource();
       // The host tears the scene surface down (contribute-tracked); its
       // dispose clears every submitted layer.

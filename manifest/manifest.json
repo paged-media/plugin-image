@@ -63,10 +63,15 @@
       "media.paged.image.command.addLayer",
       "media.paged.image.command.bakeAdjustToLayer",
       "media.paged.image.command.undo",
-      "media.paged.image.command.redo"
+      "media.paged.image.command.redo",
+      "media.paged.image.command.convertLayerToSmart",
+      "media.paged.image.command.definePattern",
+      "media.paged.image.command.fillPattern",
+      "media.paged.image.command.shapeBlur"
     ],
     "tools": [
       "media.paged.image.tool.crop",
+      "media.paged.image.tool.move",
       "media.paged.image.tool.marqueeRect",
       "media.paged.image.tool.marqueeEllipse",
       "media.paged.image.tool.lasso",

@@ -84,17 +84,19 @@ function submittedElements(fake: ReturnType<typeof makeFakeEditor>): number {
 }
 
 describe("work budgets — layer opacity drag (20 steps)", () => {
-  // Measured 2026-10-04: every step of a slider drag recomposites the
-  // stack, re-reads the histogram and channel stats, and resubmits the
-  // whole page image. Latest-wins coalescing lowers these.
+  // A burst of 20 slider steps. Measured 2026-10-04 at 20 of each (every
+  // step recomposited, re-read the histogram and channel stats and
+  // resubmitted the whole page image, in no guaranteed order). Latest-wins
+  // coalescing (src/coalesce.ts) made it 2: the first step's fold and one
+  // trailing fold of the final state.
   const DRAG = {
-    layersComposite: 20,
-    histogram: 20,
-    channelStats: 20,
-    submits: 20,
-    // 20 × the 2×1 fixture's 8 bytes: the whole image every step. At
-    // 4000×3000 the same drag would hand the host 960 M numbers.
-    rgbaElements: 160,
+    layersComposite: 2,
+    histogram: 2,
+    channelStats: 2,
+    submits: 2,
+    // 2 × the 2×1 fixture's 8 bytes. At 4000×3000 that is still 96 M
+    // numbers per drag, until the binary scene-layer door.
+    rgbaElements: 16,
   };
 
   it("counts what twenty opacity steps cost", async () => {
@@ -104,7 +106,13 @@ describe("work budgets — layer opacity drag (20 steps)", () => {
     engineLog!.reset();
     fake.sceneLayers.submit.mockClear();
 
-    for (let i = 0; i < 20; i++) await session.setLayerOpacity(1, 1 - i / 40);
+    // The panel slider fires each step WITHOUT awaiting the last one
+    // (React onChange), so the drag is a burst, not a sequence.
+    const steps: Promise<boolean>[] = [];
+    for (let i = 0; i < 20; i++) steps.push(session.setLayerOpacity(1, 1 - i / 40));
+    await Promise.all(steps);
+    // The final state is the last step's, whatever was coalesced.
+    expect(session.state().layers.layers[1]?.opacity).toBeCloseTo(1 - 19 / 40);
 
     const got = {
       layersComposite: engineLog!.count("layersComposite"),

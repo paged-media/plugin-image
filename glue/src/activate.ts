@@ -40,6 +40,7 @@ import manifest from "../manifest.json";
 import { createImageSession } from "./session";
 import { makeImagePanel } from "./panels/image-panel";
 import { makeCropGesture } from "./crop-tool";
+import { makeMoveGesture } from "./move-tool";
 import { makeSelectionGesture } from "./selection-tool";
 import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 import { makeTypeGesture } from "./type-tool";
@@ -48,6 +49,7 @@ import { makeTextBindingProvider } from "./binding-provider/text-provider";
 
 const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
+const MOVE_TOOL_ID = "media.paged.image.tool.move";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -147,6 +149,19 @@ export function activate(host: BundleHost): BundleHandle {
     // INV-REG-1 (editor registry-invariants) keeps tool shortcuts unique.
     shortcut: "shift+x",
     gesture: () => makeCropGesture(host, session),
+  });
+
+  // MOVE (raster) — drag the selected pixels (Alt: copy) or, with no
+  // selection, the active layer; arrows nudge 1 px, Shift+arrow 10. It
+  // shares the crop tool's rail slot and takes no shortcut of its own:
+  // "v" is the host Selection tool, which moves the FRAME.
+  contributeTool(host, {
+    id: MOVE_TOOL_ID,
+    title: "Move pixels",
+    icon: "tool-select",
+    group: CROP_TOOL_ID,
+    section: "transform",
+    gesture: () => makeMoveGesture(host, session),
   });
 
   // The crop commit command (also surfaced as the panel's "Apply crop"
@@ -345,7 +360,7 @@ export function activate(host: BundleHost): BundleHandle {
   // mask on the GPU. DESTRUCTIVE by design (it swaps the engine-held
   // source like a crop commit) — see fill.rs for why a generator cannot
   // be a re-runnable stage of the adjust chain. The commands carry the
-  // v0 defaults (black→white linear, noise amount 0.5); the panel's
+  // defaults (foreground→background linear, noise amount 0.5); the panel's
   // Generate section exposes the pickers.
   host.contribute.command({
     id: "media.paged.image.command.fillSelection",
@@ -353,11 +368,13 @@ export function activate(host: BundleHost): BundleHandle {
     category: "Image",
     handler: () => {
       host.shell.openPanel(PANEL_ID);
+      // Foreground → background, Photoshop's default gradient.
+      const { fg, bg } = session.state().colors;
       void session.fillSelection({
         kind: "gradient",
         gradient: "linear",
-        c0: [0, 0, 0, 1],
-        c1: [1, 1, 1, 1],
+        c0: [...fg],
+        c1: [...bg],
       });
     },
   });
@@ -411,6 +428,45 @@ export function activate(host: BundleHost): BundleHandle {
     category: "Image",
     handler: () => {
       void session.redo();
+    },
+  });
+  // Built engine-side long before anything could reach it: smart
+  // objects, pattern fill, shape blur. The panel carries their controls;
+  // these are the palette and menu reach.
+  host.contribute.command({
+    id: "media.paged.image.command.convertLayerToSmart",
+    title: "Convert active layer to smart object",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.makeLayerSmart(session.state().layers.active);
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.definePattern",
+    title: "Define pattern from selection (image)",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      session.definePattern();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.fillPattern",
+    title: "Fill selection with the defined pattern",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.fillWithPattern();
+    },
+  });
+  host.contribute.command({
+    id: "media.paged.image.command.shapeBlur",
+    title: "Shape blur (defined pattern as the shape)",
+    category: "Image",
+    handler: () => {
+      host.shell.openPanel(PANEL_ID);
+      void session.shapeBlurWithPattern();
     },
   });
 
@@ -701,6 +757,7 @@ export function activate(host: BundleHost): BundleHandle {
         LASSO_TOOL_ID,
         MAGIC_WAND_TOOL_ID,
         CROP_TOOL_ID,
+        MOVE_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host
@@ -713,6 +770,25 @@ export function activate(host: BundleHost): BundleHandle {
       },
       onExit: () => {
         host.log.debug("rasterImage context exited");
+      },
+      // HOST UNDO (ADR 012, the in-context tier). While the context is
+      // active, Cmd+Z / Shift+Cmd+Z and Edit ▸ Undo/Redo step the image's
+      // OWN journal instead of the document's — the document has not
+      // changed, the pixels have. `onCanUndo` answering false hands the
+      // keystroke back to the document, so an image with nothing to undo
+      // never swallows it. The step itself is async (a recomposite); the
+      // hook only has to say it took the keystroke.
+      onCanUndo: () => session.state().history?.canUndo ?? false,
+      onCanRedo: () => session.state().history?.canRedo ?? false,
+      onUndo: () => {
+        if (!session.state().history?.canUndo) return false;
+        void session.undo();
+        return true;
+      },
+      onRedo: () => {
+        if (!session.state().history?.canRedo) return false;
+        void session.redo();
+        return true;
       },
     });
 
