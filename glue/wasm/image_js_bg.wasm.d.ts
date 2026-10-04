@@ -103,6 +103,7 @@ export const layers_remove: (a: number) => [number, number];
 export const layers_render_smart: (a: number, b: number) => any;
 export const layers_reorder: (a: number, b: number) => [number, number];
 export const layers_set_active: (a: number) => [number, number];
+export const layers_set_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => [number, number];
 export const layers_set_blend: (a: number, b: number, c: number) => [number, number];
 export const layers_set_clipped: (a: number, b: number) => [number, number];
 export const layers_set_group_blend: (a: number, b: number, c: number) => [number, number];

@@ -1765,6 +1765,40 @@ export function layers_set_active(index) {
 }
 
 /**
+ * EDIT an adjustment layer's chain in place (same arguments as
+ * `layers_add_adjustment`, after the layer index). Identity is
+ * allowed here — an edited layer may be dialled back to nothing.
+ * @param {number} index
+ * @param {number} exposure_ev
+ * @param {number} brightness
+ * @param {number} contrast
+ * @param {number} saturation
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} in_black
+ * @param {number} in_white
+ * @param {number} gamma
+ * @param {number} out_black
+ * @param {number} out_white
+ * @param {Uint8Array} curve_lut
+ * @param {number} blur_sigma
+ * @param {number} sharpen_amount
+ * @param {number} hue_degrees
+ * @param {boolean} invert
+ * @param {Float32Array} ext
+ */
+export function layers_set_adjustment(index, exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, curve_lut, blur_sigma, sharpen_amount, hue_degrees, invert, ext) {
+    const ptr0 = passArray8ToWasm0(curve_lut, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(ext, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_set_adjustment(index, exposure_ev, brightness, contrast, saturation, temp, tint, in_black, in_white, gamma, out_black, out_white, ptr0, len0, blur_sigma, sharpen_amount, hue_degrees, invert, ptr1, len1);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * Set a layer's blend by `compose.*` wire name (prefix optional).
  * An unregistered name is a clean error, never a silent normal.
  * @param {number} index

@@ -3313,6 +3313,53 @@ mod wasm {
         with_stack(|d| Ok(d.stack.add_adjustment(name, params)))
     }
 
+    /// EDIT an adjustment layer's chain in place (same arguments as
+    /// `layers_add_adjustment`, after the layer index). Identity is
+    /// allowed here — an edited layer may be dialled back to nothing.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn layers_set_adjustment(
+        index: usize,
+        exposure_ev: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        temp: f32,
+        tint: f32,
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+        curve_lut: &[u8],
+        blur_sigma: f32,
+        sharpen_amount: f32,
+        hue_degrees: f32,
+        invert: bool,
+        ext: &[f32],
+    ) -> Result<(), JsValue> {
+        let params = build_adjust_params(
+            exposure_ev,
+            brightness,
+            contrast,
+            saturation,
+            temp,
+            tint,
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+            curve_lut,
+            blur_sigma,
+            sharpen_amount,
+            hue_degrees,
+            invert,
+            ext,
+        )?;
+        with_stack(|d| d.stack.set_adjustment(index, params).map_err(ingest_err))
+    }
+
     /// BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
     /// per-layer adjustment (the panel's chain is otherwise a re-runnable
     /// PREVIEW of the composite and mutates nothing). Journaled over the

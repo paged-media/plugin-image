@@ -219,6 +219,10 @@ export interface ImageSessionState {
   livePreview: boolean;
   /** Magic wand + paint bucket tolerance / contiguity. */
   wand: WandOptions;
+  /** The adjustment layer the panel's sliders are bound to, or null when
+   *  they drive the preview/Apply chain. Selecting an adjustment layer
+   *  this session created binds it; selecting any other layer unbinds. */
+  editingAdjustment: { index: number; id: number } | null;
   /** The SAVE-BACK bytes staged by `applyToFile` (null until asked
    *  for). The panel reports them; the Export Center delivers them —
    *  the host wires no save-FILE door (`shell.pickFile` reads, it does
@@ -867,6 +871,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     colors: freshColors(),
     livePreview: true,
     wand: { tolerance: WAND_TOLERANCE_DEFAULT, contiguous: WAND_CONTIGUOUS_DEFAULT },
+    editingAdjustment: null,
     saveBack: null,
     brush: { ...DEFAULT_BRUSH_PARAMS, color: [...DEFAULT_BRUSH_PARAMS.color] },
     blendModes: [],
@@ -910,6 +915,38 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  byte-identical re-emit is only correct while it is 0, because the
    *  retained parse never sees an edit that lands in the layer stack. */
   let pixelEdits = 0;
+  /** The chain of every adjustment layer this session created, by layer
+   *  id — the panel's own parameters, so selecting the layer can show
+   *  them again. (Layers opened from a PSD have no entry; their chain is
+   *  read-only here.) */
+  const adjustmentParams = new Map<number, AdjustParams>();
+  /** The panel chain to restore when the sliders unbind from a layer. */
+  let paramsBeforeBinding: AdjustParams | null = null;
+
+  /** Edit the bound adjustment layer: write the chain, recomposite
+   *  (coalesced), keep the mirror. */
+  const editBoundAdjustment = () => {
+    const bound = state.editingAdjustment;
+    if (!bound || !engine) return false;
+    // By id: a reorder or a removal moves indexes under the binding.
+    const index = state.layers.layers.findIndex((l) => l.id === bound.id);
+    if (index < 0) {
+      state.editingAdjustment = null;
+      return false;
+    }
+    bound.index = index;
+    try {
+      engine.layersSetAdjustment(index, state.params);
+    } catch (err) {
+      setStatus(`Adjustment edit failed: ${err instanceof Error ? err.message : err}`);
+      emit();
+      return true;
+    }
+    adjustmentParams.set(bound.id, structuredClone(state.params));
+    void recomposite();
+    return true;
+  };
+
   /** The engine handle of the defined pattern (`definePattern`). */
   let patternHandle: number | null = null;
 
@@ -1524,6 +1561,7 @@ export function createImageSession(host: BundleHost): ImageSession {
   /** Called by every parameter setter. */
   let lastPreview: Promise<boolean> = Promise.resolve(false);
   const schedulePreview = () => {
+    if (editBoundAdjustment()) return;
     if (!state.livePreview || !state.source?.elementId || !state.gpu) return;
     lastPreview = previewLatest();
     if (settleTimer) clearTimeout(settleTimer);
@@ -3241,6 +3279,18 @@ export function createImageSession(host: BundleHost): ImageSession {
         return false;
       }
       refreshLayers();
+      const row = state.layers.layers[index];
+      const params = row ? adjustmentParams.get(row.id) : undefined;
+      if (row && row.kind === "adjustment" && params) {
+        if (!state.editingAdjustment) paramsBeforeBinding = state.params;
+        state.editingAdjustment = { index, id: row.id };
+        state.params = structuredClone(params);
+        setStatus(`Editing adjustment layer “${row.name}” — the sliders change it directly.`);
+      } else if (state.editingAdjustment) {
+        state.editingAdjustment = null;
+        state.params = paramsBeforeBinding ?? freshIdentityParams();
+        paramsBeforeBinding = null;
+      }
       emit();
       return true;
     },
@@ -3434,7 +3484,9 @@ export function createImageSession(host: BundleHost): ImageSession {
       state.busy = true;
       emit();
       try {
-        engine.layersAddAdjustment("", state.params);
+        const at = engine.layersAddAdjustment("", state.params);
+        const id = engine.layers().layers[at]?.id;
+        if (id !== undefined) adjustmentParams.set(id, structuredClone(state.params));
       } catch (err) {
         // Identity is the common refusal, and it is honest: a row that
         // adjusts nothing would just be clutter that looks like work.

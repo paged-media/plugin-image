@@ -1157,6 +1157,8 @@ export interface ImageEngine {
    *  non-destructive, unlike `layersBakeAdjust`. Returns its index.
    *  Throws at identity rather than adding a row that does nothing. */
   layersAddAdjustment(name: string, params: AdjustParams): number;
+  /** Retune an adjustment layer in place (identity allowed). */
+  layersSetAdjustment(index: number, params: AdjustParams): void;
   /** Apply a gradient map (luminance through a two-stop ramp) as a
    *  journaled, selection-masked pixel edit. */
   applyGradientMap(
@@ -1665,6 +1667,26 @@ export interface ImageWasmModule {
     invert: boolean,
     ext: Float32Array,
   ): number;
+  layers_set_adjustment(
+    index: number,
+    exposureEv: number,
+    brightness: number,
+    contrast: number,
+    saturation: number,
+    temp: number,
+    tint: number,
+    inBlack: number,
+    inWhite: number,
+    gamma: number,
+    outBlack: number,
+    outWhite: number,
+    curveLut: Uint8Array,
+    blurSigma: number,
+    sharpenAmount: number,
+    hueDegrees: number,
+    invert: boolean,
+    ext: Float32Array,
+  ): void;
   apply_gradient_map(
     handle: number,
     shadow: Float32Array,
@@ -2453,6 +2475,27 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       // one meaning. The only difference is where the chain LIVES.
       wasm.layers_add_adjustment(
         name,
+        p.exposureEv,
+        p.brightness,
+        p.contrast,
+        p.saturation,
+        p.temp,
+        p.tint,
+        p.levels.inBlack,
+        p.levels.inWhite,
+        p.levels.gamma,
+        p.levels.outBlack,
+        p.levels.outWhite,
+        p.curveLut ?? new Uint8Array(0),
+        p.blurSigma,
+        p.sharpenAmount,
+        p.hueDegrees,
+        p.invert,
+        packAdjustExt(p),
+      ),
+    layersSetAdjustment: (index, p) =>
+      wasm.layers_set_adjustment(
+        index,
         p.exposureEv,
         p.brightness,
         p.contrast,

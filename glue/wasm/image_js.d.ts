@@ -817,6 +817,13 @@ export function layers_reorder(from: number, to: number): void;
 export function layers_set_active(index: number): void;
 
 /**
+ * EDIT an adjustment layer's chain in place (same arguments as
+ * `layers_add_adjustment`, after the layer index). Identity is
+ * allowed here — an edited layer may be dialled back to nothing.
+ */
+export function layers_set_adjustment(index: number, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean, ext: Float32Array): void;
+
+/**
  * Set a layer's blend by `compose.*` wire name (prefix optional).
  * An unregistered name is a clean error, never a silent normal.
  */
@@ -1224,6 +1231,7 @@ export interface InitOutput {
     readonly layers_render_smart: (a: number, b: number) => any;
     readonly layers_reorder: (a: number, b: number) => [number, number];
     readonly layers_set_active: (a: number) => [number, number];
+    readonly layers_set_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => [number, number];
     readonly layers_set_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_clipped: (a: number, b: number) => [number, number];
     readonly layers_set_group_blend: (a: number, b: number, c: number) => [number, number];

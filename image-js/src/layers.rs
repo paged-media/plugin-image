@@ -861,6 +861,12 @@ impl LayerStack {
         params: AdjustParams,
     ) -> Result<(), IngestError> {
         let layer = self.layer_mut(index)?;
+        if layer.locked {
+            return Err(IngestError::Unsupported(format!(
+                "layer \"{}\" is locked",
+                layer.name
+            )));
+        }
         match &mut layer.kind {
             LayerKind::Adjustment(p) => {
                 **p = params;
@@ -1854,6 +1860,34 @@ mod tests {
 
     fn device() -> Option<&'static GpuContext> {
         image_gpu::test_support::device_or_skip("layers")
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn an_adjustment_layer_is_editable_and_only_an_adjustment_layer__feat__image_editor_layers() {
+        let mut s = stack(2, 2);
+        let a = s.add_adjustment(
+            "brighten",
+            AdjustParams {
+                exposure_ev: 0.5,
+                ..AdjustParams::default()
+            },
+        );
+        let p = AdjustParams {
+            exposure_ev: -1.0,
+            ..AdjustParams::default()
+        };
+        s.set_adjustment(a, p.clone()).expect("edit");
+        match &s.layers[a].kind {
+            LayerKind::Adjustment(q) => assert_eq!(q.exposure_ev, -1.0),
+            _ => panic!("still an adjustment layer"),
+        }
+        assert!(
+            s.set_adjustment(0, p.clone()).is_err(),
+            "a pixel layer is not one"
+        );
+        s.set_locked(a, true).expect("lock");
+        assert!(s.set_adjustment(a, p).is_err(), "locked");
     }
 
     // ── canvas operations ────────────────────────────────────────────
