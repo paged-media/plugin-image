@@ -180,3 +180,42 @@ describe("blur / sharpen brushes", () => {
     handle.dispose();
   });
 });
+
+describe("spot healing brush", () => {
+  it("is a stroke tool that needs no clone source", async () => {
+    const { SAMPLING_TOOLS } = await import("../src/engine");
+    expect(STROKE_TOOLS).toContain("spot-heal");
+    expect(SAMPLING_TOOLS).not.toContain("spot-heal");
+    const tools = (manifestJson as PluginManifest).contributes?.tools ?? [];
+    expect(tools).toContain("media.paged.image.tool.spotHeal");
+  });
+
+  it("the real wasm knows the tool name and declines without a GPU", async () => {
+    if (!existsSync(WASM)) return;
+    const wasm = await boot();
+    const img = wasm.ingest_rgba8(4, 4, new Uint8Array(64).fill(200));
+    expect(() =>
+      wasm.brush_stroke_begin(
+        img.handle,
+        "spot-heal",
+        8,
+        0.5,
+        1,
+        1,
+        0.25,
+        "normal",
+        new Float32Array([0, 0, 0, 1]),
+        "none",
+      ),
+    ).toThrow(/GPU-only/);
+  });
+
+  it("the session goes straight to the GPU check (no Alt-click demanded)", async () => {
+    const { handle, session } = await ingest();
+    expect(await session.brushBegin("spot-heal")).toBe(false);
+    expect(session.state().status).toMatch(/GPU-only/);
+    expect(session.state().status).not.toMatch(/clone source/);
+    session.dispose();
+    handle.dispose();
+  });
+});

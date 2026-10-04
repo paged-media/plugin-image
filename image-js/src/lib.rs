@@ -3778,7 +3778,7 @@ mod wasm {
         let tool = StrokeTool::from_wire(tool).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "unknown paint tool \"{tool}\" \
-                 (brush | pencil | eraser | clone | heal | dodge | burn | sponge | blur | sharpen)"
+                 (brush | pencil | eraser | clone | heal | dodge | burn | sponge | blur | sharpen | spot-heal)"
             ))
         })?;
         let blend_kernel = blend_kernel(blend).ok_or_else(|| {
@@ -3989,9 +3989,10 @@ mod wasm {
             let session = slot
                 .as_mut()
                 .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
-            if !session.params().tool.samples_image() {
+            if !session.params().tool.takes_source() {
                 return Err(JsValue::from_str(
-                    "only the clone and heal tools read from a source",
+                    "only the clone and heal tools read from a source (the spot \
+                     healing brush finds its own)",
                 ));
             }
             session.set_clone_source(crate::stroke::CloneSource { x, y, aligned });
@@ -4037,9 +4038,20 @@ mod wasm {
 
     #[wasm_bindgen]
     pub async fn brush_stroke_commit() -> Result<DecodedHandle, JsValue> {
-        let session = STROKE
+        let mut session = STROKE
             .with(|s| s.borrow_mut().take())
             .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
+        // The SPOT HEALING BRUSH deposits nothing while it is dragged; its
+        // source is found and its heal composited here, on release.
+        if session.params().tool == StrokeTool::SpotHeal {
+            let ctx = GPU.with(|g| g.borrow().clone()).ok_or_else(|| {
+                JsValue::from_str("the spot healing brush is GPU-only — call init_gpu first")
+            })?;
+            session
+                .resolve_spot_heal(&ctx)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
         let (w, h) = (session.width(), session.height());
         let handle = session.handle();
         let bounds = session.stroke_bounds();

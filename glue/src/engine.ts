@@ -591,7 +591,11 @@ export type StrokeTool =
    *  radius follows the tip) and sharpen (unsharp masking). The brush's
    *  FLOW is their strength. */
   | "blur"
-  | "sharpen";
+  | "sharpen"
+  /** SPOT HEALING BRUSH: paint over a blemish; on release the engine
+   *  finds a source itself (an exemplar search around the stroke) and
+   *  heals from it. No Alt-click, and nothing lands until release. */
+  | "spot-heal";
 
 export const STROKE_TOOLS: StrokeTool[] = [
   "brush",
@@ -604,6 +608,7 @@ export const STROKE_TOOLS: StrokeTool[] = [
   "sponge",
   "blur",
   "sharpen",
+  "spot-heal",
 ];
 
 /** The filter strokes that take tone options (`brush_stroke_set_tone`). */

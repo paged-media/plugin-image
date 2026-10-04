@@ -63,6 +63,7 @@ const BURN_TOOL_ID = "media.paged.image.tool.burn";
 const SPONGE_TOOL_ID = "media.paged.image.tool.sponge";
 const BLUR_TOOL_ID = "media.paged.image.tool.blur";
 const SHARPEN_TOOL_ID = "media.paged.image.tool.sharpen";
+const SPOT_HEAL_TOOL_ID = "media.paged.image.tool.spotHeal";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -449,6 +450,19 @@ export function activate(host: BundleHost): BundleHandle {
       gesture: () => makeBrushGesture(host, session, tool),
     });
   }
+
+  // SPOT HEALING BRUSH — shares the healing brush's slot; no anchor, no
+  // shortcut. The heal lands on release (the engine searches for the
+  // source then).
+  contributeTool(host, {
+    id: SPOT_HEAL_TOOL_ID,
+    title: "Spot healing brush",
+    icon: "tool-heal",
+    group: HEAL_TOOL_ID,
+    section: "drawType",
+    cursor: PAINT_CURSOR,
+    gesture: () => makeBrushGesture(host, session, "spot-heal"),
+  });
 
   // GENERATE — the `gen.*` family's editor reach. Fills the CURRENT
   // SELECTION (the whole image when there is none) with a fixed
@@ -930,6 +944,7 @@ export function activate(host: BundleHost): BundleHandle {
         SPONGE_TOOL_ID,
         BLUR_TOOL_ID,
         SHARPEN_TOOL_ID,
+        SPOT_HEAL_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host

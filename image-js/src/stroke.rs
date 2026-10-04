@@ -121,6 +121,13 @@ pub enum StrokeTool {
     Blur,
     /// SHARPEN brush: unsharp masking under the dabs, strength = flow.
     Sharpen,
+    /// SPOT HEALING BRUSH: a healing brush that finds its own source. The
+    /// stroke marks the hole; on release the exemplar search
+    /// (`inpaint::spot_source_offset`, run on a window around the stroke)
+    /// picks the offset to copy from, and the heal composite — source
+    /// window + membrane tone correction — lands under the coverage. No
+    /// Alt-click; nothing is deposited until the stroke is resolved.
+    SpotHeal,
 }
 
 impl StrokeTool {
@@ -137,6 +144,7 @@ impl StrokeTool {
             "sponge" => StrokeTool::Sponge,
             "blur" => StrokeTool::Blur,
             "sharpen" => StrokeTool::Sharpen,
+            "spot-heal" => StrokeTool::SpotHeal,
             _ => return None,
         })
     }
@@ -153,6 +161,7 @@ impl StrokeTool {
             StrokeTool::Sponge => "sponge",
             StrokeTool::Blur => "blur",
             StrokeTool::Sharpen => "sharpen",
+            StrokeTool::SpotHeal => "spot-heal",
         }
     }
 
@@ -179,12 +188,21 @@ impl StrokeTool {
 
     /// Does this tool paint from a SAMPLED window rather than a colour?
     pub fn samples_image(self) -> bool {
+        matches!(
+            self,
+            StrokeTool::Clone | StrokeTool::Heal | StrokeTool::SpotHeal
+        )
+    }
+
+    /// Does the tool take a user-set source anchor (Alt-click)? The spot
+    /// healing brush samples the image too, but finds its source itself.
+    pub fn takes_source(self) -> bool {
         matches!(self, StrokeTool::Clone | StrokeTool::Heal)
     }
 
     /// Does it tone-match the sample to its destination?
     pub fn tone_matches(self) -> bool {
-        matches!(self, StrokeTool::Heal)
+        matches!(self, StrokeTool::Heal | StrokeTool::SpotHeal)
     }
 
     /// The pencil is aliased; brush and eraser antialias their rim.
@@ -379,6 +397,7 @@ impl StrokeParams {
             StrokeTool::Clone | StrokeTool::Heal => None,
             StrokeTool::Dodge | StrokeTool::Burn | StrokeTool::Sponge => None,
             StrokeTool::Blur | StrokeTool::Sharpen => None,
+            StrokeTool::SpotHeal => None,
         }
     }
 }
@@ -1027,6 +1046,64 @@ impl StrokeSession {
         }
     }
 
+    /// RESOLVE a spot-healing stroke: find its source and composite it.
+    ///
+    /// The search runs on the BASE in a window around the stroke (twice
+    /// the stroke's extent on every side, at least 32 px — the exemplar
+    /// search's own reach is bounded too), with the hole = every texel
+    /// the stroke's effective coverage touches. The offset it returns is
+    /// fixed as the stroke's clone offset and the whole stroke is
+    /// re-composited through the HEAL path: source window, membrane
+    /// correction, the coverage as the mask. Returns `false` (and paints
+    /// nothing) when the stroke is empty, the tool is not the spot
+    /// healing brush, or the search finds no source that clears the hole.
+    pub async fn resolve_spot_heal(&mut self, ctx: &GpuContext) -> Result<bool, IngestError> {
+        if self.params.tool != StrokeTool::SpotHeal {
+            return Ok(false);
+        }
+        let Some(bounds) = self.stroke_bounds() else {
+            return Ok(false);
+        };
+        let margin = (bounds.w.max(bounds.h) as i32 * 2).max(32);
+        let Some(win) = Region::new(
+            bounds.x - margin,
+            bounds.y - margin,
+            bounds.w + 2 * margin as u32,
+            bounds.h + 2 * margin as u32,
+        )
+        .intersect(Region::new(0, 0, self.width, self.height)) else {
+            return Ok(false);
+        };
+        let crop = self.window_rgba8(win);
+        let hole: Vec<u8> = (0..win.h)
+            .flat_map(|y| (0..win.w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let cov = self.accumulator.effective_at(
+                    (win.x as u32) + x,
+                    (win.y as u32) + y,
+                    1.0,
+                    self.selection.as_deref(),
+                );
+                if cov > 0.0 {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let Some((dx, dy)) = crate::inpaint::spot_source_offset(&crop, win.w, win.h, &hole) else {
+            return Ok(false);
+        };
+        self.clone_offset = Some((dx as f32, dy as f32));
+        self.composite(ctx, bounds).await?;
+        Ok(true)
+    }
+
+    /// The offset a resolved spot-healing stroke copied from.
+    pub fn resolved_offset(&self) -> Option<(f32, f32)> {
+        self.clone_offset
+    }
+
     /// Finish: hand back the painted pixels. The caller writes them into
     /// the ACTIVE LAYER — journaling the tiles [`Self::stroke_bounds`]
     /// covers — and re-composites the stack.
@@ -1069,6 +1146,7 @@ mod tests {
             StrokeTool::Sponge,
             StrokeTool::Blur,
             StrokeTool::Sharpen,
+            StrokeTool::SpotHeal,
         ] {
             assert_eq!(StrokeTool::from_wire(t.as_wire()), Some(t));
         }
@@ -2173,5 +2251,122 @@ mod tests {
             "the shoulder lightens: {}",
             at(&out, 36)
         );
+    }
+
+    // ── spot healing brush ───────────────────────────────────────────
+
+    /// A smooth horizontal ramp with fine vertical stripes (texture), and
+    /// a dark BLEMISH disc of radius 3 at (cx, cy).
+    fn blemished(w: u32, h: u32, cx: f32, cy: f32) -> DecodedImage {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                let v = if d <= 3.0 {
+                    20u8
+                } else {
+                    (100 + x + if x % 4 < 2 { 6 } else { 0 }) as u8
+                };
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        DecodedImage::from_rgba8(w, h, rgba).expect("valid")
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn spot_heal_is_a_sampling_tool_that_takes_no_anchor__feat__image_editor_spot_heal() {
+        assert!(StrokeTool::SpotHeal.samples_image());
+        assert!(StrokeTool::SpotHeal.tone_matches());
+        assert!(!StrokeTool::SpotHeal.takes_source());
+        assert!(StrokeTool::Clone.takes_source() && StrokeTool::Heal.takes_source());
+        assert!(params(StrokeTool::SpotHeal).solid_paint_mode().is_none());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_spot_source_search_picks_an_offset_that_clears_the_hole__feat__image_editor_spot_heal() {
+        let image = blemished(64, 48, 32.0, 24.0);
+        let rgba = image.rgba.to_rgba8().into_owned();
+        let hole: Vec<u8> = (0..48u32)
+            .flat_map(|y| (0..64u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let d = ((x as f32 - 32.0).powi(2) + (y as f32 - 24.0).powi(2)).sqrt();
+                if d <= 5.0 {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let (dx, dy) =
+            crate::inpaint::spot_source_offset(&rgba, 64, 48, &hole).expect("a source exists");
+        assert!(dx * dx + dy * dy > 0);
+        for (i, &m) in hole.iter().enumerate() {
+            if m != 0 {
+                let (x, y) = ((i % 64) as i32 + dx, (i / 64) as i32 + dy);
+                assert!((0..64).contains(&x) && (0..48).contains(&y));
+                assert_eq!(hole[(y * 64 + x) as usize], 0, "the source clears the hole");
+            }
+        }
+        // Deterministic: the same hole twice, the same answer.
+        assert_eq!(
+            crate::inpaint::spot_source_offset(&rgba, 64, 48, &hole),
+            Some((dx, dy))
+        );
+        // Nothing to copy from: everything is the hole.
+        assert_eq!(
+            crate::inpaint::spot_source_offset(&rgba, 8, 8, &[255u8; 64]),
+            None
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_spot_heal_stroke_removes_the_blemish_and_touches_nothing_else__feat__image_editor_spot_heal(
+    ) {
+        let Some(ctx) = device() else { return };
+        let (w, h) = (96u32, 64u32);
+        let image = blemished(w, h, 48.0, 32.0);
+        let base = image.rgba.to_rgba8().into_owned();
+        let mut p = params(StrokeTool::SpotHeal);
+        p.size = 12.0;
+        p.hardness = 0.8;
+        let mut s = StrokeSession::begin(1, &image, p, None).expect("begin");
+        pollster::block_on(s.extend(ctx, StrokeSample::new(48.0, 32.0, 1.0))).expect("extend");
+        assert_eq!(
+            s.pixels(),
+            &base[..],
+            "nothing lands before the stroke is resolved"
+        );
+        assert!(pollster::block_on(s.resolve_spot_heal(ctx)).expect("resolve"));
+        assert!(s.resolved_offset().is_some());
+        let out = s.commit();
+        let at = |px: &[u8], x: u32, y: u32| px[((y * w + x) * 4) as usize] as i32;
+        // The blemish centre now sits near the ramp around it (~148).
+        let want = 100 + 48;
+        assert!(
+            (at(&out, 48, 32) - want).abs() < 20,
+            "healed centre {} vs surrounding {want} (blemish was {})",
+            at(&out, 48, 32),
+            at(&base, 48, 32)
+        );
+        // Far from the stroke, the bytes are the base's.
+        for (x, y) in [(2u32, 2u32), (90, 60), (48, 2), (10, 32)] {
+            let i = ((y * w + x) * 4) as usize;
+            assert_eq!(out[i..i + 4], base[i..i + 4], "({x},{y}) untouched");
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn resolving_is_a_no_op_for_other_tools_and_empty_strokes__feat__image_editor_spot_heal() {
+        let Some(ctx) = device() else { return };
+        let image = blemished(48, 48, 24.0, 24.0);
+        let mut brush = StrokeSession::begin(1, &image, params(StrokeTool::Brush), None).unwrap();
+        assert!(!pollster::block_on(brush.resolve_spot_heal(ctx)).unwrap());
+        let mut empty =
+            StrokeSession::begin(1, &image, params(StrokeTool::SpotHeal), None).unwrap();
+        assert!(!pollster::block_on(empty.resolve_spot_heal(ctx)).unwrap());
     }
 }
