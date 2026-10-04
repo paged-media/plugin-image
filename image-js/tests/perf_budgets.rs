@@ -335,7 +335,13 @@ fn apply_with_six_stages__feat__image_editor_adjust_breadth() {
         sharpen_amount: 0.5,
         ..AdjustParams::default()
     };
-    pollster::block_on(adjust_rgba8(ctx, &img, &p, None)).expect("warm-up");
+    // Warm up on DIFFERENT parameters: the same Apply twice is a
+    // remembered result (below), and this budget is the Apply itself.
+    let warm = AdjustParams {
+        exposure_ev: 0.31,
+        ..p.clone()
+    };
+    pollster::block_on(adjust_rgba8(ctx, &img, &warm, None)).expect("warm-up");
     counters::reset();
     let (out, _e, g) = counters::measure(|| pollster::block_on(adjust_rgba8(ctx, &img, &p, None)));
     out.expect("apply");
@@ -345,6 +351,21 @@ fn apply_with_six_stages__feat__image_editor_adjust_breadth() {
         .map(|((n, v), (_, b))| (n, v, b))
         .collect();
     check("Apply, 6 stages, 512²", &rows);
+
+    // The SAME Apply again (what Apply does after the live preview has
+    // rendered full resolution on idle): no GPU work at all.
+    counters::reset();
+    let (again, _e, g) =
+        counters::measure(|| pollster::block_on(adjust_rgba8(ctx, &img, &p, None)));
+    assert_eq!(again.expect("again"), out_bytes(&img, &p, ctx));
+    let rows: Vec<(&str, u64, u64)> = gpu_rows(&g).into_iter().map(|(n, v)| (n, v, 0)).collect();
+    check("the same Apply again, 512²", &rows);
+}
+
+/// A fresh Apply's bytes (the remembered one forgotten first).
+fn out_bytes(img: &DecodedImage, p: &AdjustParams, ctx: &GpuContext) -> Vec<u8> {
+    image_js::ingest::forget_last_apply();
+    pollster::block_on(adjust_rgba8(ctx, img, p, None)).expect("fresh")
 }
 
 // ── brush (60 samples) ───────────────────────────────────────────────

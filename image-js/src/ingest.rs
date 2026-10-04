@@ -1306,6 +1306,24 @@ fn build_adjust_chain(
     node
 }
 
+/// The last Apply: its source pixels, parameters, selection and result.
+/// Holding the source `Arc` keeps its identity from being reused.
+struct LastApply {
+    source: Arc<[u8]>,
+    params: AdjustParams,
+    selection: Option<Arc<SelectionCoverage>>,
+    out: Arc<[u8]>,
+}
+
+thread_local! {
+    static LAST_APPLY: std::cell::RefCell<Option<LastApply>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Forget the remembered Apply (tests; a caller that frees images).
+pub fn forget_last_apply() {
+    LAST_APPLY.with(|l| *l.borrow_mut() = None);
+}
+
 pub async fn adjust_rgba8(
     ctx: &GpuContext,
     image: &DecodedImage,
@@ -1318,6 +1336,50 @@ pub async fn adjust_rgba8(
         return Ok(out);
     }
 
+    // The SAME Apply again — same source pixels, parameters and
+    // selection — is the last result. It happens on every Apply after the
+    // live preview has rendered full resolution on idle, which ran this
+    // exact chain a moment before.
+    let source = image.rgba.raw_arc();
+    let same = |l: &LastApply| {
+        Arc::ptr_eq(&l.source, &source)
+            && l.params == *params
+            && match (&l.selection, &selection) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    };
+    if let Some(out) = LAST_APPLY.with(|l| {
+        l.borrow()
+            .as_ref()
+            .filter(|l| same(l))
+            .map(|l| Arc::clone(&l.out))
+    }) {
+        crate::counters::whole_copy(out.len());
+        return Ok(out.to_vec());
+    }
+    let out = adjust_rgba8_uncached(ctx, image, params, selection.clone()).await?;
+    // Kept for the next call: one copy of the result per Apply.
+    let shared: Arc<[u8]> = Arc::from(out.as_slice());
+    crate::counters::whole_copy(out.len());
+    LAST_APPLY.with(|l| {
+        *l.borrow_mut() = Some(LastApply {
+            source,
+            params: params.clone(),
+            selection,
+            out: shared,
+        })
+    });
+    Ok(out)
+}
+
+async fn adjust_rgba8_uncached(
+    ctx: &GpuContext,
+    image: &DecodedImage,
+    params: &AdjustParams,
+    selection: Option<Arc<SelectionCoverage>>,
+) -> Result<Vec<u8>, IngestError> {
     // The GPU kernel chain (skipped wholesale when only a curve is set).
     let mut pixels = if params.has_gpu_stage() {
         let mut pipe = Pipeline::new();
