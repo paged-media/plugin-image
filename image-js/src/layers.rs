@@ -198,6 +198,82 @@ pub struct SmartSource {
 
 /// One pixel layer: canvas-extent straight RGBA8 plus the four
 /// properties the composite reads and the one (`locked`) it refuses on.
+/// A whole-canvas geometric change: every layer, every mask and every
+/// smart object's source moves together, so the stack keeps its layers.
+/// All of these are exact pixel moves (no resampling), the same class of
+/// CPU windowing as a crop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasOp {
+    RotateCw,
+    RotateCcw,
+    Rotate180,
+    FlipHorizontal,
+    FlipVertical,
+    /// Image ▸ Canvas Size: a new extent, the old canvas placed by
+    /// `anchor` (0 = left/top, 1 = centre, 2 = right/bottom on each
+    /// axis). Added area is transparent; area cut off is gone.
+    Resize {
+        width: u32,
+        height: u32,
+        anchor_x: u8,
+        anchor_y: u8,
+    },
+}
+
+impl CanvasOp {
+    /// The canvas extent after the op.
+    pub fn output_size(&self, w: u32, h: u32) -> (u32, u32) {
+        match *self {
+            CanvasOp::RotateCw | CanvasOp::RotateCcw => (h, w),
+            CanvasOp::Rotate180 | CanvasOp::FlipHorizontal | CanvasOp::FlipVertical => (w, h),
+            CanvasOp::Resize { width, height, .. } => (width, height),
+        }
+    }
+
+    /// For an output pixel, the input pixel it comes from (None = added
+    /// area). `(w, h)` is the INPUT extent.
+    fn source(&self, x: u32, y: u32, w: u32, h: u32) -> Option<(u32, u32)> {
+        match *self {
+            CanvasOp::RotateCw => Some((y, h - 1 - x)),
+            CanvasOp::RotateCcw => Some((w - 1 - y, x)),
+            CanvasOp::Rotate180 => Some((w - 1 - x, h - 1 - y)),
+            CanvasOp::FlipHorizontal => Some((w - 1 - x, y)),
+            CanvasOp::FlipVertical => Some((x, h - 1 - y)),
+            CanvasOp::Resize {
+                width,
+                height,
+                anchor_x,
+                anchor_y,
+            } => {
+                let off = |new: u32, old: u32, a: u8| -> i64 {
+                    (i64::from(new) - i64::from(old)) * i64::from(a.min(2)) / 2
+                };
+                let sx = i64::from(x) - off(width, w, anchor_x);
+                let sy = i64::from(y) - off(height, h, anchor_y);
+                (sx >= 0 && sy >= 0 && sx < i64::from(w) && sy < i64::from(h))
+                    .then_some((sx as u32, sy as u32))
+            }
+        }
+    }
+
+    /// Remap a `bpp`-bytes-per-pixel buffer of extent `(w, h)`; added
+    /// area takes `fill`.
+    fn remap(&self, src: &[u8], w: u32, h: u32, bpp: usize, fill: u8) -> Vec<u8> {
+        let (ow, oh) = self.output_size(w, h);
+        let mut out = vec![fill; ow as usize * oh as usize * bpp];
+        for y in 0..oh {
+            for x in 0..ow {
+                if let Some((sx, sy)) = self.source(x, y, w, h) {
+                    let d = (y as usize * ow as usize + x as usize) * bpp;
+                    let s = (sy as usize * w as usize + sx as usize) * bpp;
+                    out[d..d + bpp].copy_from_slice(&src[s..s + bpp]);
+                }
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Layer {
     /// Pixels of its own, or an adjustment over what is below.
@@ -663,6 +739,59 @@ impl LayerStack {
     /// the source, and a "convert to pixels" that silently threw away
     /// the original is exactly the destructive move this rung exists to
     /// prevent — rasterize by baking into a NEW pixel layer instead.
+    /// Rotate, flip or re-size the whole canvas: every layer's pixels,
+    /// every mask and every smart object's source move together, so the
+    /// stack keeps its layers (a crop, by contrast, flattens).
+    ///
+    /// The undo journal is CLEARED: its tiles address the old extent and
+    /// could not be replayed onto the new one. Canvas Size is refused
+    /// while a smart object is in the stack (its render would no longer
+    /// line up with its source).
+    pub fn transform_canvas(&mut self, op: CanvasOp) -> Result<(), IngestError> {
+        let (w, h) = (self.width, self.height);
+        let (ow, oh) = op.output_size(w, h);
+        if ow == 0 || oh == 0 {
+            return Err(IngestError::Unsupported(
+                "canvas size must be at least 1×1".into(),
+            ));
+        }
+        let resize = matches!(op, CanvasOp::Resize { .. });
+        if resize
+            && self
+                .layers
+                .iter()
+                .any(|l| matches!(l.kind, LayerKind::Smart(_)))
+        {
+            return Err(IngestError::Unsupported(
+                "Canvas Size with a smart object in the stack is not supported \
+                 (its render would no longer line up with its source)"
+                    .into(),
+            ));
+        }
+        for layer in &mut self.layers {
+            let bpp = layer.rgba.bytes_per_pixel();
+            let depth = layer.rgba.depth();
+            let px = op.remap(layer.rgba.raw(), w, h, bpp, 0);
+            layer.rgba = crate::pixels::Pixels::from_raw(Arc::from(px.into_boxed_slice()), depth);
+            if let Some(mask) = &layer.mask {
+                // Added area is revealed, as a reveal-all mask extends.
+                let m = op.remap(mask.data(), w, h, 1, 255);
+                layer.mask = SelectionCoverage::from_data(ow, oh, m).map(Arc::new);
+            }
+            if let LayerKind::Smart(src) = &mut layer.kind {
+                let s = op.remap(&src.rgba, src.width, src.height, 4, 0);
+                let (sw, sh) = op.output_size(src.width, src.height);
+                src.rgba = Arc::from(s.into_boxed_slice());
+                src.width = sw;
+                src.height = sh;
+            }
+        }
+        self.width = ow;
+        self.height = oh;
+        self.journal = TileJournal::new();
+        Ok(())
+    }
+
     pub fn make_smart(&mut self, index: usize) -> Result<(), IngestError> {
         let (w, h) = (self.width, self.height);
         let layer = self.layer_mut(index)?;
@@ -1386,6 +1515,17 @@ impl LayerStack {
     /// GPU-only whenever there is anything to blend (every step is a
     /// registered `compose.*`/`cast.*` dispatch, spec §6); the trivial
     /// stack short-circuits before touching the device.
+    /// Does folding this stack need a GPU? (False for the empty stack and
+    /// the one-plain-layer fast path, which `composite` answers without
+    /// a device.)
+    pub fn composite_needs_gpu(&self) -> bool {
+        match self.plates(None).as_slice() {
+            [] => false,
+            [(l, _)] => !l.is_plain(),
+            _ => true,
+        }
+    }
+
     pub async fn composite(
         &self,
         ctx: Option<&GpuContext>,
@@ -1714,6 +1854,125 @@ mod tests {
 
     fn device() -> Option<&'static GpuContext> {
         image_gpu::test_support::device_or_skip("layers")
+    }
+
+    // ── canvas operations ────────────────────────────────────────────
+
+    /// A 3×2 canvas whose pixel at (x, y) has red = 10·y + x.
+    fn numbered() -> LayerStack {
+        let mut px = Vec::new();
+        for y in 0..2u8 {
+            for x in 0..3u8 {
+                px.extend_from_slice(&[10 * y + x, 0, 0, 255]);
+            }
+        }
+        LayerStack::from_image(3, 2, Arc::from(px.into_boxed_slice())).expect("valid")
+    }
+
+    fn reds(s: &LayerStack) -> Vec<u8> {
+        s.active()
+            .rgba
+            .to_rgba8()
+            .chunks_exact(4)
+            .map(|p| p[0])
+            .collect()
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn canvas_rotate_and_flip_move_every_pixel_exactly__feat__image_editor_crop() {
+        let mut s = numbered();
+        s.transform_canvas(CanvasOp::RotateCw).expect("cw");
+        assert_eq!((s.width, s.height), (2, 3));
+        // Clockwise: the old bottom-left (10) is the new top-left.
+        assert_eq!(reds(&s), vec![10, 0, 11, 1, 12, 2]);
+        s.transform_canvas(CanvasOp::RotateCcw).expect("ccw");
+        assert_eq!(reds(&s), reds(&numbered()), "cw then ccw is the identity");
+        s.transform_canvas(CanvasOp::FlipHorizontal).expect("flip");
+        assert_eq!(reds(&s), vec![2, 1, 0, 12, 11, 10]);
+        s.transform_canvas(CanvasOp::FlipHorizontal)
+            .expect("flip back");
+        s.transform_canvas(CanvasOp::Rotate180).expect("180");
+        assert_eq!(reds(&s), vec![12, 11, 10, 2, 1, 0]);
+        s.transform_canvas(CanvasOp::FlipVertical).expect("v");
+        assert_eq!(reds(&s), vec![2, 1, 0, 12, 11, 10]);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn canvas_size_places_the_old_canvas_by_its_anchor__feat__image_editor_crop() {
+        let mut s = numbered();
+        s.transform_canvas(CanvasOp::Resize {
+            width: 5,
+            height: 2,
+            anchor_x: 2,
+            anchor_y: 0,
+        })
+        .expect("grow");
+        // Anchored right: two transparent columns on the left.
+        let px = s.active().rgba.to_rgba8().into_owned();
+        let alpha: Vec<u8> = px.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(alpha, vec![0, 0, 255, 255, 255, 0, 0, 255, 255, 255]);
+        assert_eq!(reds(&s)[2..5], [0, 1, 2]);
+        // Shrink centred: the middle column survives.
+        let mut s = numbered();
+        s.transform_canvas(CanvasOp::Resize {
+            width: 1,
+            height: 2,
+            anchor_x: 1,
+            anchor_y: 1,
+        })
+        .expect("shrink");
+        assert_eq!(reds(&s), vec![1, 11]);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn canvas_ops_move_masks_and_every_layer__feat__image_editor_layers() {
+        let mut s = numbered();
+        s.add("top");
+        let cov = SelectionCoverage::from_data(3, 2, vec![255, 0, 0, 0, 0, 0]).expect("cov");
+        s.layers[1].mask = Some(Arc::new(cov));
+        s.transform_canvas(CanvasOp::FlipHorizontal).expect("flip");
+        assert_eq!(
+            s.layers[1].mask.as_ref().expect("mask").data(),
+            &[0, 0, 255, 0, 0, 0]
+        );
+        assert_eq!(
+            reds(&s),
+            vec![0; 6],
+            "the active (empty) layer moved too, harmlessly"
+        );
+        s.set_active(0).expect("active");
+        assert_eq!(reds(&s), vec![2, 1, 0, 12, 11, 10]);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn canvas_ops_clear_the_history_and_refuse_resize_over_a_smart_object__feat__image_editor_layers(
+    ) {
+        let mut s = numbered();
+        s.edit_active("paint", Region::new(0, 0, 3, 2), px(3, 2, 9).into())
+            .expect("edit");
+        assert!(s.history().can_undo);
+        s.transform_canvas(CanvasOp::RotateCw).expect("rotate");
+        assert!(
+            !s.history().can_undo,
+            "the journal's tiles addressed the old extent"
+        );
+        s.make_smart(0).expect("smart");
+        let err = s
+            .transform_canvas(CanvasOp::Resize {
+                width: 4,
+                height: 4,
+                anchor_x: 0,
+                anchor_y: 0,
+            })
+            .expect_err("refused");
+        assert!(err.to_string().contains("smart object"));
+        // Rotation is fine: the source rotates with the render.
+        s.transform_canvas(CanvasOp::Rotate180)
+            .expect("rotate smart");
     }
 
     // ── smart objects ────────────────────────────────────────────────

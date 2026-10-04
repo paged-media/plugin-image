@@ -41,6 +41,7 @@ import { createImageSession } from "./session";
 import { makeImagePanel } from "./panels/image-panel";
 import { makeCropGesture } from "./crop-tool";
 import { makeMoveGesture } from "./move-tool";
+import { makeBucketGesture } from "./bucket-tool";
 import { makeSelectionGesture } from "./selection-tool";
 import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 import { makeTypeGesture } from "./type-tool";
@@ -50,6 +51,7 @@ import { makeTextBindingProvider } from "./binding-provider/text-provider";
 const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
 const MOVE_TOOL_ID = "media.paged.image.tool.move";
+const BUCKET_TOOL_ID = "media.paged.image.tool.bucket";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -162,6 +164,17 @@ export function activate(host: BundleHost): BundleHandle {
     group: CROP_TOOL_ID,
     section: "transform",
     gesture: () => makeMoveGesture(host, session),
+  });
+
+  // PAINT BUCKET — floods by colour (wand tolerance / contiguity) with
+  // the foreground. Shares the brush slot; no shortcut ("g" is taken).
+  contributeTool(host, {
+    id: BUCKET_TOOL_ID,
+    title: "Paint bucket",
+    icon: "tool-gradient",
+    group: BRUSH_TOOL_ID,
+    section: "drawType",
+    gesture: () => makeBucketGesture(host, session),
   });
 
   // The crop commit command (also surfaced as the panel's "Apply crop"
@@ -433,6 +446,28 @@ export function activate(host: BundleHost): BundleHandle {
   // Built engine-side long before anything could reach it: smart
   // objects, pattern fill, shape blur. The panel carries their controls;
   // these are the palette and menu reach.
+  // Filters and Image-menu verbs added with the fundamentals.
+  for (const [suffix, title, run] of [
+    ["median", "Median (3×3)", () => session.applyMedian()],
+    ["maximum", "Maximum (3×3)", () => session.applyMorph("max")],
+    ["minimum", "Minimum (3×3)", () => session.applyMorph("min")],
+    ["fillForeground", "Fill with the foreground colour", () => session.fillForeground()],
+    ["rotateCw", "Rotate canvas 90° clockwise", () => session.canvasOp("rotate-cw")],
+    ["rotateCcw", "Rotate canvas 90° counter-clockwise", () => session.canvasOp("rotate-ccw")],
+    ["rotate180", "Rotate canvas 180°", () => session.canvasOp("rotate-180")],
+    ["flipHorizontal", "Flip canvas horizontal", () => session.canvasOp("flip-h")],
+    ["flipVertical", "Flip canvas vertical", () => session.canvasOp("flip-v")],
+  ] as const) {
+    host.contribute.command({
+      id: `media.paged.image.command.${suffix}`,
+      title,
+      category: "Image",
+      handler: () => {
+        host.shell.openPanel(PANEL_ID);
+        void run();
+      },
+    });
+  }
   host.contribute.command({
     id: "media.paged.image.command.convertLayerToSmart",
     title: "Convert active layer to smart object",
@@ -758,6 +793,7 @@ export function activate(host: BundleHost): BundleHandle {
         MAGIC_WAND_TOOL_ID,
         CROP_TOOL_ID,
         MOVE_TOOL_ID,
+        BUCKET_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host

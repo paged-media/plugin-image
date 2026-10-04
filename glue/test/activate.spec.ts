@@ -67,6 +67,17 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.bakeAdjustToLayer",
       "media.paged.image.command.undo",
       "media.paged.image.command.redo",
+      // Filters and canvas verbs (Median/Maximum/Minimum, fill with the
+      // foreground, rotate/flip).
+      "media.paged.image.command.median",
+      "media.paged.image.command.maximum",
+      "media.paged.image.command.minimum",
+      "media.paged.image.command.fillForeground",
+      "media.paged.image.command.rotateCw",
+      "media.paged.image.command.rotateCcw",
+      "media.paged.image.command.rotate180",
+      "media.paged.image.command.flipHorizontal",
+      "media.paged.image.command.flipVertical",
       // Built long before anything reached them: smart objects, pattern
       // fill (with Define pattern), shape blur.
       "media.paged.image.command.convertLayerToSmart",
@@ -91,6 +102,9 @@ describe("imageBundle.activate", () => {
       "media.paged.image.tool.crop",
       // Raster Move shares the crop slot (no shortcut: "v" is the host's).
       "media.paged.image.tool.move",
+      // The paint bucket (registered with the move tool; it shares the
+      // brush's rail slot).
+      "media.paged.image.tool.bucket",
       "media.paged.image.tool.marqueeRect",
       "media.paged.image.tool.marqueeEllipse",
       "media.paged.image.tool.lasso",

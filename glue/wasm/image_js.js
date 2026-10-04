@@ -512,6 +512,47 @@ export function apply_lens_blur(handle, radius_px, threshold, boost) {
 }
 
 /**
+ * ADJUST — Color Lookup: a 9×9×9 RGB cube (`cube` = 729 rgb triples,
+ * red fastest, values 0–1), applied trilinearly. The panel resamples
+ * a .cube file of any size to this edge first.
+ * @param {number} handle
+ * @param {Float32Array} cube
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_lut3d(handle, cube) {
+    const ptr0 = passArrayF32ToWasm0(cube, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.apply_lut3d(handle, ptr0, len0);
+    return ret;
+}
+
+/**
+ * NOISE — Median, 3×3 (the kernel's fixed comparator network; a
+ * larger radius needs a histogram method, which is a different
+ * kernel). Every output texel is one of the input samples.
+ * @param {number} handle
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_median(handle) {
+    const ret = wasm.apply_median(handle);
+    return ret;
+}
+
+/**
+ * OTHER — Maximum (`kind` "max", grey dilation) or Minimum ("min",
+ * grey erosion), 3×3.
+ * @param {number} handle
+ * @param {string} kind
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_morph(handle, kind) {
+    const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.apply_morph(handle, ptr0, len0);
+    return ret;
+}
+
+/**
  * PIXELATE — mosaic. `cell_px` <= 1 is the identity.
  * @param {number} handle
  * @param {number} cell_px
@@ -834,6 +875,27 @@ export function brush_stroke_stats() {
 }
 
 /**
+ * The PAINT BUCKET: flood from image pixel `(x, y)` over pixels within
+ * `tolerance` of it (connected ones only when `contiguous`), within
+ * the selection when there is one, and fill that with `color`
+ * (straight RGBA in `[0, 1]`). The flood samples the COMPOSITE —
+ * Photoshop's "sample all layers" — and paints the active layer.
+ * @param {number} handle
+ * @param {number} x
+ * @param {number} y
+ * @param {number} tolerance
+ * @param {boolean} contiguous
+ * @param {Float32Array} color
+ * @returns {Promise<DecodedHandle>}
+ */
+export function bucket_fill(handle, x, y, tolerance, contiguous, color) {
+    const ptr0 = passArrayF32ToWasm0(color, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.bucket_fill(handle, x, y, tolerance, contiguous, ptr0, len0);
+    return ret;
+}
+
+/**
  * Apply a pointer drag from `(sx, sy)` to `(px, py)` (image-px) to the
  * rect `[x, y, w, h]` at `handle` (the [`crop_hit_handle`]
  * discriminant), with the aspect lock + image-extent clamp. Returns
@@ -1118,6 +1180,21 @@ export function fill_noise(handle, amount, seed) {
  */
 export function fill_pattern(handle, tile_handle, scale, angle_deg, offset_x, offset_y, opacity) {
     const ret = wasm.fill_pattern(handle, tile_handle, scale, angle_deg, offset_x, offset_y, opacity);
+    return ret;
+}
+
+/**
+ * FILL the current selection (the whole image when none) with ONE
+ * colour — Edit ▸ Fill ▸ Foreground colour. `color` is straight RGBA
+ * in `[0, 1]`. Returns the engine-held image's handle.
+ * @param {number} handle
+ * @param {Float32Array} color
+ * @returns {Promise<DecodedHandle>}
+ */
+export function fill_solid(handle, color) {
+    const ptr0 = passArrayF32ToWasm0(color, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.fill_solid(handle, ptr0, len0);
     return ret;
 }
 
@@ -1413,6 +1490,31 @@ export function layers_bake_adjust(exposure_ev, brightness, contrast, saturation
  */
 export function layers_bound() {
     const ret = wasm.layers_bound();
+    return ret;
+}
+
+/**
+ * IMAGE ▸ Rotate / Flip / Canvas Size, over the WHOLE stack (every
+ * layer, mask and smart source moves together; see
+ * `LayerStack::transform_canvas`). `op` is "rotate-cw", "rotate-ccw",
+ * "rotate-180", "flip-h", "flip-v" or "canvas" (then `width`,
+ * `height` and the anchors apply; they are ignored otherwise).
+ *
+ * The bound image takes the new extent and the composite; its mip
+ * pyramid goes, and the selection is re-bound (dropped), because
+ * both address the old extent. The undo history is cleared.
+ * Returns `[width, height]`.
+ * @param {string} op
+ * @param {number} width
+ * @param {number} height
+ * @param {number} anchor_x
+ * @param {number} anchor_y
+ * @returns {Promise<Uint32Array>}
+ */
+export function layers_canvas_op(op, width, height, anchor_x, anchor_y) {
+    const ptr0 = passStringToWasm0(op, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_canvas_op(ptr0, len0, width, height, anchor_x, anchor_y);
     return ret;
 }
 
@@ -2140,6 +2242,21 @@ export function selection_invert() {
  */
 export function selection_magic_wand(x, y, tolerance, contiguous, mode) {
     const ret = wasm.selection_magic_wand(x, y, tolerance, contiguous, mode);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Select ▸ Modify: `op` ∈ expand | contract | border | smooth, by
+ * `radius` px. Errors when there is no explicit selection.
+ * @param {string} op
+ * @param {number} radius
+ */
+export function selection_modify(op, radius) {
+    const ptr0 = passStringToWasm0(op, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.selection_modify(ptr0, len0, radius);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
@@ -3039,12 +3156,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 715, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 761, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 731, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 777, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },
@@ -3064,6 +3181,13 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_generic_0000000000000006: function(arg0, arg1) {
+            var v0 = getArrayU32FromWasm0(arg0, arg1).slice();
+            wasm.__wbindgen_free(arg0, arg1 * 4, 4);
+            // Cast intrinsic for `Vector(U32) -> Externref`.
+            const ret = v0;
+            return ret;
+        },
+        __wbindgen_generic_0000000000000007: function(arg0, arg1) {
             var v0 = getArrayU8FromWasm0(arg0, arg1).slice();
             wasm.__wbindgen_free(arg0, arg1 * 1, 1);
             // Cast intrinsic for `Vector(U8) -> Externref`.

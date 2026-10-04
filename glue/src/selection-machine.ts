@@ -58,15 +58,19 @@ export type SelectionShapeKind =
  *  no-op click (avoids committing invisible slivers). */
 const MIN_DRAG_PX = 1;
 
-/** The default magic-wand tolerance (of 255, per channel): 32 — the v0
- *  fixed default (documented on the wand tool; a tool-option slider is a
- *  follow-up). */
+/** The default magic-wand (and paint-bucket) tolerance, of 255 per
+ *  channel: 32, Photoshop's default. The panel's slider changes it. */
 export const WAND_TOLERANCE_DEFAULT = 32;
 
-/** The wand's v0 contiguity: connected flood (the Photoshop default).
- *  The non-contiguous global threshold is reachable through the engine
- *  door; no tool toggle yet (stated in the tool docs). */
+/** The default contiguity: a connected flood (Photoshop's default); the
+ *  panel's toggle switches to a global colour match. */
 export const WAND_CONTIGUOUS_DEFAULT = true;
+
+/** Tolerance (0–255 per channel) and contiguity for the wand and bucket. */
+export interface WandOptions {
+  tolerance: number;
+  contiguous: boolean;
+}
 
 /** WHERE QUICK SELECTION READS PIXELS. The machine is otherwise blind to
  *  the bound image (every other shape rasterizes engine-side), but
@@ -160,6 +164,12 @@ export function createSelectionMachine(
   /** Growth-rule overrides (radius / tolerance / cap) — the tool-option
    *  seam; the defaults are the documented ones. */
   quickOptions: QuickSelectOptions = {},
+  /** The magic wand's options, read at each click (the panel's
+   *  tolerance slider and contiguous toggle). */
+  wandOptions: () => WandOptions = () => ({
+    tolerance: WAND_TOLERANCE_DEFAULT,
+    contiguous: WAND_CONTIGUOUS_DEFAULT,
+  }),
 ): SelectionMachine {
   let active: {
     kind: SelectionShapeKind;
@@ -423,12 +433,13 @@ export function createSelectionMachine(
         : null,
 
     wand(point, mode) {
+      const { tolerance, contiguous } = wandOptions();
       try {
         engine.selectionMagicWand(
           Math.max(0, Math.round(point[0])),
           Math.max(0, Math.round(point[1])),
-          WAND_TOLERANCE_DEFAULT,
-          WAND_CONTIGUOUS_DEFAULT,
+          Math.max(0, Math.min(255, Math.round(tolerance))),
+          contiguous,
           mode,
         );
       } catch {

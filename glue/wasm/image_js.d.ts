@@ -195,6 +195,26 @@ export function apply_gradient_map(handle: number, shadow: Float32Array, highlig
 export function apply_lens_blur(handle: number, radius_px: number, threshold: number, boost: number): Promise<DecodedHandle>;
 
 /**
+ * ADJUST — Color Lookup: a 9×9×9 RGB cube (`cube` = 729 rgb triples,
+ * red fastest, values 0–1), applied trilinearly. The panel resamples
+ * a .cube file of any size to this edge first.
+ */
+export function apply_lut3d(handle: number, cube: Float32Array): Promise<DecodedHandle>;
+
+/**
+ * NOISE — Median, 3×3 (the kernel's fixed comparator network; a
+ * larger radius needs a histogram method, which is a different
+ * kernel). Every output texel is one of the input samples.
+ */
+export function apply_median(handle: number): Promise<DecodedHandle>;
+
+/**
+ * OTHER — Maximum (`kind` "max", grey dilation) or Minimum ("min",
+ * grey erosion), 3×3.
+ */
+export function apply_morph(handle: number, kind: string): Promise<DecodedHandle>;
+
+/**
  * PIXELATE — mosaic. `cell_px` <= 1 is the identity.
  */
 export function apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandle>;
@@ -367,6 +387,15 @@ export function brush_stroke_set_source(x: number, y: number, aligned: boolean):
 export function brush_stroke_stats(): Float64Array;
 
 /**
+ * The PAINT BUCKET: flood from image pixel `(x, y)` over pixels within
+ * `tolerance` of it (connected ones only when `contiguous`), within
+ * the selection when there is one, and fill that with `color`
+ * (straight RGBA in `[0, 1]`). The flood samples the COMPOSITE —
+ * Photoshop's "sample all layers" — and paints the active layer.
+ */
+export function bucket_fill(handle: number, x: number, y: number, tolerance: number, contiguous: boolean, color: Float32Array): Promise<DecodedHandle>;
+
+/**
  * Apply a pointer drag from `(sx, sy)` to `(px, py)` (image-px) to the
  * rect `[x, y, w, h]` at `handle` (the [`crop_hit_handle`]
  * discriminant), with the aspect lock + image-extent clamp. Returns
@@ -498,6 +527,13 @@ export function fill_noise(handle: number, amount: number, seed: number): Promis
  * `opacity == 0` is the identity.
  */
 export function fill_pattern(handle: number, tile_handle: number, scale: number, angle_deg: number, offset_x: number, offset_y: number, opacity: number): Promise<DecodedHandle>;
+
+/**
+ * FILL the current selection (the whole image when none) with ONE
+ * colour — Edit ▸ Fill ▸ Foreground colour. `color` is straight RGBA
+ * in `[0, 1]`. Returns the engine-held image's handle.
+ */
+export function fill_solid(handle: number, color: Float32Array): Promise<DecodedHandle>;
 
 /**
  * Release an engine-held decoded image (its mip pyramid cache, and
@@ -633,6 +669,20 @@ export function layers_bake_adjust(exposure_ev: number, brightness: number, cont
  * The handle the stack is bound to, or `-1` when none is open.
  */
 export function layers_bound(): number;
+
+/**
+ * IMAGE ▸ Rotate / Flip / Canvas Size, over the WHOLE stack (every
+ * layer, mask and smart source moves together; see
+ * `LayerStack::transform_canvas`). `op` is "rotate-cw", "rotate-ccw",
+ * "rotate-180", "flip-h", "flip-v" or "canvas" (then `width`,
+ * `height` and the anchors apply; they are ignored otherwise).
+ *
+ * The bound image takes the new extent and the composite; its mip
+ * pyramid goes, and the selection is re-bound (dropped), because
+ * both address the old extent. The undo history is cleared.
+ * Returns `[width, height]`.
+ */
+export function layers_canvas_op(op: string, width: number, height: number, anchor_x: number, anchor_y: number): Promise<Uint32Array>;
 
 /**
  * DELETE the mask (the coverage is gone), as distinct from
@@ -968,6 +1018,12 @@ export function selection_invert(): void;
 export function selection_magic_wand(x: number, y: number, tolerance: number, contiguous: boolean, mode: number): void;
 
 /**
+ * Select ▸ Modify: `op` ∈ expand | contract | border | smooth, by
+ * `radius` px. Errors when there is no explicit selection.
+ */
+export function selection_modify(op: string, radius: number): void;
+
+/**
  * Select ALL explicitly (a full-extent selection in the readouts;
  * the adjust chain still takes the trivial-mask fast path).
  */
@@ -1100,6 +1156,9 @@ export interface InitOutput {
     readonly apply_gallery_threshold_ink: (a: number, b: number, c: number, d: number) => any;
     readonly apply_gradient_map: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly apply_lens_blur: (a: number, b: number, c: number, d: number) => any;
+    readonly apply_lut3d: (a: number, b: number, c: number) => any;
+    readonly apply_median: (a: number) => any;
+    readonly apply_morph: (a: number, b: number, c: number) => any;
     readonly apply_mosaic: (a: number, b: number) => any;
     readonly apply_motion_blur: (a: number, b: number, c: number) => any;
     readonly apply_move_selection: (a: number, b: number, c: number, d: number) => any;
@@ -1118,6 +1177,7 @@ export interface InitOutput {
     readonly brush_stroke_extend: (a: number, b: number, c: number) => any;
     readonly brush_stroke_set_source: (a: number, b: number, c: number) => [number, number];
     readonly brush_stroke_stats: () => [number, number];
+    readonly bucket_fill: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly crop_apply_drag: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];
     readonly crop_frame_corners: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly crop_hit_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
@@ -1131,6 +1191,7 @@ export interface InitOutput {
     readonly fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly fill_noise: (a: number, b: number, c: number) => any;
     readonly fill_pattern: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly fill_solid: (a: number, b: number, c: number) => any;
     readonly free_image: (a: number) => void;
     readonly gpu_ready: () => number;
     readonly image_auto_enhance_params: (a: number) => [number, number, number];
@@ -1146,6 +1207,7 @@ export interface InitOutput {
     readonly layers_add_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number) => [number, number, number];
     readonly layers_bake_adjust: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => any;
     readonly layers_bound: () => number;
+    readonly layers_canvas_op: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly layers_clear_mask: (a: number) => [number, number];
     readonly layers_close: () => void;
     readonly layers_composite: () => any;
@@ -1195,6 +1257,7 @@ export interface InitOutput {
     readonly selection_from_channel: (a: number, b: number, c: number, d: number) => [number, number];
     readonly selection_invert: () => [number, number];
     readonly selection_magic_wand: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly selection_modify: (a: number, b: number, c: number) => [number, number];
     readonly selection_select_all: () => [number, number];
     readonly selection_set_ellipse: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly selection_set_polygon: (a: number, b: number, c: number) => [number, number];

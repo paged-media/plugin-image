@@ -225,6 +225,104 @@ impl SessionSelection {
         self.revision += 1;
         Ok(())
     }
+
+    /// Select ▸ Modify: expand, contract, border or smooth the explicit
+    /// selection by `radius` px (see [`modify_coverage`]).
+    pub fn modify(&mut self, op: ModifyOp, radius: f32) -> Result<(), String> {
+        let Some(existing) = self.coverage.take() else {
+            return Err("no selection to modify".into());
+        };
+        self.coverage = Some(Arc::new(modify_coverage(&existing, op, radius)));
+        self.revision += 1;
+        Ok(())
+    }
+}
+
+/// Select ▸ Modify operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifyOp {
+    /// Grow the selection outward by the radius.
+    Expand,
+    /// Shrink it inward by the radius.
+    Contract,
+    /// A band `radius` px wide centred on the selection's edge.
+    Border,
+    /// Round off corners and remove specks smaller than about the radius.
+    Smooth,
+}
+
+impl ModifyOp {
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "expand" => Some(Self::Expand),
+            "contract" => Some(Self::Contract),
+            "border" => Some(Self::Border),
+            "smooth" => Some(Self::Smooth),
+            _ => None,
+        }
+    }
+}
+
+/// Chamfer distance from every pixel to the nearest pixel where
+/// `inside(coverage)` holds (0 on such pixels).
+fn distance_to(cov: &SelectionCoverage, inside: impl Fn(u8) -> bool) -> Vec<f32> {
+    use image_gpu::{distance_transform, DistanceParams, MaskChannel};
+    let one = half::f16::from_f32(1.0).to_bits().to_le_bytes();
+    let zero = half::f16::from_f32(0.0).to_bits().to_le_bytes();
+    let mut mask = Vec::with_capacity(cov.data().len() * 2);
+    for &c in cov.data() {
+        mask.extend_from_slice(if inside(c) { &one } else { &zero });
+    }
+    let params = DistanceParams {
+        channel: MaskChannel::R16,
+        ..DistanceParams::default()
+    };
+    distance_transform(&mask, cov.width(), cov.height(), params)
+        .chunks_exact(8)
+        .map(|t| half::f16::from_bits(u16::from_le_bytes([t[0], t[1]])).to_f32())
+        .collect()
+}
+
+/// Select ▸ Modify on a coverage field. A pixel counts as selected at
+/// coverage ≥ 128. Expand, contract and border produce a HARD mask (the
+/// distance decides membership); smooth feathers by half the radius and
+/// re-thresholds, which rounds corners and drops specks.
+pub fn modify_coverage(cov: &SelectionCoverage, op: ModifyOp, radius: f32) -> SelectionCoverage {
+    let (w, h) = (cov.width(), cov.height());
+    let r = radius.max(0.0);
+    let hard = |keep: &dyn Fn(usize) -> bool| -> SelectionCoverage {
+        let data = (0..cov.data().len())
+            .map(|i| if keep(i) { 255 } else { 0 })
+            .collect();
+        SelectionCoverage::from_data(w, h, data).unwrap_or_else(|| SelectionCoverage::empty(w, h))
+    };
+    match op {
+        ModifyOp::Expand => {
+            let d = distance_to(cov, |c| c >= 128);
+            hard(&|i| d[i] <= r)
+        }
+        ModifyOp::Contract => {
+            let d = distance_to(cov, |c| c < 128);
+            hard(&|i| d[i] > r)
+        }
+        ModifyOp::Border => {
+            let half_w = r / 2.0;
+            let outside = distance_to(cov, |c| c >= 128);
+            let inside = distance_to(cov, |c| c < 128);
+            hard(&|i| outside[i] <= half_w && inside[i] <= half_w.max(1.0))
+        }
+        ModifyOp::Smooth => {
+            let mut soft = cov.clone();
+            soft.feather(r / 2.0);
+            let data = soft
+                .data()
+                .iter()
+                .map(|&c| if c >= 128 { 255 } else { 0 })
+                .collect();
+            SelectionCoverage::from_data(w, h, data)
+                .unwrap_or_else(|| SelectionCoverage::empty(w, h))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +331,46 @@ mod tests {
 
     fn rect_shape(w: u32, h: u32) -> SelectionCoverage {
         SelectionCoverage::rasterize_rect(w, h, 1.0, 1.0, 2.0, 2.0)
+    }
+
+    fn selected(c: &SelectionCoverage) -> usize {
+        c.data().iter().filter(|&&v| v >= 128).count()
+    }
+
+    /// A 3×3 square in the middle of a 9×9 field.
+    fn square() -> SelectionCoverage {
+        SelectionCoverage::rasterize_rect(9, 9, 3.0, 3.0, 3.0, 3.0)
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn modify_expand_contract_border_smooth__feat__image_selection_mask_tools() {
+        let sq = square();
+        assert_eq!(selected(&sq), 9);
+        // Expand by 1: the 5×5 around it (the chamfer metric counts a
+        // diagonal step as about 1.4, so corners stay out at radius 1).
+        let e = modify_coverage(&sq, ModifyOp::Expand, 1.0);
+        assert_eq!(selected(&e), 21);
+        let e2 = modify_coverage(&sq, ModifyOp::Expand, 1.5);
+        assert_eq!(selected(&e2), 25, "with the corners at radius 1.5");
+        // Contract by 1: only the centre survives.
+        let c = modify_coverage(&sq, ModifyOp::Contract, 1.0);
+        assert_eq!(selected(&c), 1);
+        assert_eq!(c.coverage_at(4, 4), 255);
+        // Border 2: a ring across the edge, without the centre.
+        let b = modify_coverage(&sq, ModifyOp::Border, 2.0);
+        assert_eq!(b.coverage_at(4, 4), 0, "the interior is not the border");
+        assert_eq!(b.coverage_at(3, 3), 255, "the edge is");
+        assert_eq!(b.coverage_at(2, 4), 255, "and just outside it");
+        // Smooth removes a single-pixel speck.
+        let mut speck = SelectionCoverage::empty(9, 9);
+        speck.combine(
+            &SelectionCoverage::rasterize_rect(9, 9, 1.0, 1.0, 1.0, 1.0),
+            CombineMode::Add,
+        );
+        assert_eq!(selected(&modify_coverage(&speck, ModifyOp::Smooth, 4.0)), 0);
+        assert_eq!(ModifyOp::from_wire("border"), Some(ModifyOp::Border));
+        assert_eq!(ModifyOp::from_wire("grow"), None);
     }
 
     #[test]

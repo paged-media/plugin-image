@@ -58,7 +58,10 @@ import {
 } from "../engine";
 import type { AspectPreset } from "../crop-machine";
 
+import { CanvasSection, type CanvasSize } from "./sections/canvas-section";
 import { ColorSection } from "./sections/color-section";
+import { RankLookupSection } from "./sections/rank-lookup-section";
+import { SelectModifySection } from "./sections/select-modify-section";
 import { MoveSection } from "./sections/move-section";
 import { PatternSection } from "./sections/pattern-section";
 import { SmartObjectSection } from "./sections/smart-object-section";
@@ -1577,6 +1580,14 @@ export function makeImagePanel(session: ImageSession) {
     const [patternScale, setPatternScale] = useState(1);
     const [shapeRadius, setShapeRadius] = useState(8);
     const [smartScale, setSmartScale] = useState(1);
+    const [canvasSize, setCanvasSize] = useState<CanvasSize>({
+      width: 0,
+      height: 0,
+      anchorX: 1,
+      anchorY: 1,
+    });
+    const [modifyRadius, setModifyRadius] = useState(4);
+    const [lookupName, setLookupName] = useState<string | null>(null);
     // Generate-section local state (the request shape, not engine state).
     const [pathThreshold, setPathThreshold] = useState(128);
     const [gradKind, setGradKind] = useState<GradientKind>("linear");
@@ -1599,8 +1610,9 @@ export function makeImagePanel(session: ImageSession) {
     useEffect(() => {
       setResizeW(s.source?.width ?? 0);
       setResizeH(s.source?.height ?? 0);
+      setCanvasSize((c) => ({ ...c, width: s.source?.width ?? 0, height: s.source?.height ?? 0 }));
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [s.source?.handle]);
+    }, [s.source?.handle, s.source?.width, s.source?.height]);
     const disabled = s.busy || !s.source;
     const engineLine =
       s.engine === "ready"
@@ -2367,6 +2379,29 @@ export function makeImagePanel(session: ImageSession) {
           size={s.source ? { width: s.source.width, height: s.source.height } : null}
           gpu={s.gpu}
           disabled={disabled}
+        />
+        <CanvasSection
+          session={session}
+          size={canvasSize}
+          onSize={setCanvasSize}
+          disabled={disabled}
+        />
+        <RankLookupSection
+          session={session}
+          gpu={s.gpu}
+          disabled={disabled}
+          lookupName={lookupName}
+          onLookupFile={(f) => {
+            setLookupName(f.name);
+            void f.text().then((t) => session.applyColorLookup(t, f.name));
+          }}
+        />
+        <SelectModifySection
+          session={session}
+          hasSelection={!!s.selection && s.selection.w > 0}
+          radius={modifyRadius}
+          onRadius={setModifyRadius}
+          wand={s.wand}
         />
         <SmartObjectSection
           session={session}

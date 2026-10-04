@@ -28,7 +28,10 @@ import { createBundleHost } from "@paged-media/plugin-sdk";
 import type { PluginManifest } from "@paged-media/plugin-api";
 import manifestJson from "@paged-media/image-manifest/manifest.json";
 
+import { CanvasSection } from "../src/panels/sections/canvas-section";
 import { MoveSection } from "../src/panels/sections/move-section";
+import { RankLookupSection } from "../src/panels/sections/rank-lookup-section";
+import { SelectModifySection } from "../src/panels/sections/select-modify-section";
 import { PatternSection } from "../src/panels/sections/pattern-section";
 import { SmartObjectSection } from "../src/panels/sections/smart-object-section";
 import { createImageSession, type ImageSession } from "../src/session";
@@ -210,5 +213,46 @@ describe("panel sections", () => {
     expect(byData(tree, "data-image-make-smart").disabled).toBe(true);
     (byData(tree, "data-image-render-smart").onClick as () => void)();
     expect(calls).toEqual(["makeLayerSmart(0)", "renderLayerSmart(0,0.5)"]);
+  });
+
+  it("Canvas: each rotate/flip button calls its op; Apply size passes size and anchor", () => {
+    const { session, calls } = recorder();
+    const size = { width: 10, height: 20, anchorX: 0, anchorY: 2 };
+    const tree = CanvasSection({ session, size, onSize: () => {}, disabled: false });
+    for (const p of elements(tree).filter((p) => "data-image-canvas-op" in p)) (p.onClick as () => void)();
+    (byData(tree, "data-image-canvas-size").onClick as () => void)();
+    expect(calls).toEqual([
+      "canvasOp(rotate-ccw)",
+      "canvasOp(rotate-cw)",
+      "canvasOp(rotate-180)",
+      "canvasOp(flip-h)",
+      "canvasOp(flip-v)",
+      "canvasOp(canvas,[object Object])",
+    ]);
+  });
+
+  it("Median/Maximum/Minimum need a GPU; Modify needs a selection", () => {
+    const { session, calls } = recorder();
+    let tree = RankLookupSection({ session, gpu: false, disabled: false, lookupName: null, onLookupFile: () => {} });
+    expect(byData(tree, "data-image-median").disabled).toBe(true);
+    tree = RankLookupSection({ session, gpu: true, disabled: false, lookupName: null, onLookupFile: () => {} });
+    (byData(tree, "data-image-maximum").onClick as () => void)();
+    const mod = SelectModifySection({
+      session,
+      hasSelection: false,
+      radius: 3,
+      onRadius: () => {},
+      wand: { tolerance: 32, contiguous: true },
+    });
+    expect(elements(mod).filter((p) => "data-image-modify" in p).every((p) => p.disabled)).toBe(true);
+    const mod2 = SelectModifySection({
+      session,
+      hasSelection: true,
+      radius: 3,
+      onRadius: () => {},
+      wand: { tolerance: 32, contiguous: true },
+    });
+    (elements(mod2).find((p) => p["data-image-modify"] === "border")!.onClick as () => void)();
+    expect(calls).toEqual(["applyMorph(max)", "modifySelection(border,3)"]);
   });
 });

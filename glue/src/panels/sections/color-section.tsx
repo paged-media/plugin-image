@@ -64,6 +64,9 @@ export function ColorSection({
         <button type="button" data-image-reset-colors onClick={() => session.resetColors()}>
           Black / white
         </button>
+        <button type="button" data-image-fill-fg onClick={() => void session.fillForeground()}>
+          Fill
+        </button>
       </div>
       <div style={note}>
         The brush and pencil paint the foreground. Alt-click with either takes

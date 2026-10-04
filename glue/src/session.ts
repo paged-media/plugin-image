@@ -36,6 +36,7 @@ import type {
 } from "@paged-media/plugin-api";
 
 import { latestWins } from "./coalesce";
+import { parseCube, toKernelCube } from "./cube";
 import {
   averageRgba8,
   freshColors,
@@ -67,6 +68,8 @@ import {
   type PsdLayerInfo,
   type RasterFormat,
   type ResampleFilter,
+  type CanvasOpKind,
+  type SelectionModifyOp,
   type Rgba01,
   SAMPLING_TOOLS,
   type LevelsParams,
@@ -84,6 +87,9 @@ import { createCropMachine, type CropMachine } from "./crop-machine";
 import {
   createSelectionMachine,
   type SelectionMachine,
+  WAND_CONTIGUOUS_DEFAULT,
+  WAND_TOLERANCE_DEFAULT,
+  type WandOptions,
 } from "./selection-machine";
 import {
   createBrushMachine,
@@ -211,6 +217,8 @@ export interface ImageSessionState {
   colors: ColorPair;
   /** Adjustment sliders update the frame as they move (on by default). */
   livePreview: boolean;
+  /** Magic wand + paint bucket tolerance / contiguity. */
+  wand: WandOptions;
   /** The SAVE-BACK bytes staged by `applyToFile` (null until asked
    *  for). The panel reports them; the Export Center delivers them —
    *  the host wires no save-FILE door (`shell.pickFile` reads, it does
@@ -460,6 +468,26 @@ export interface ImageSession {
    * Replaces the previous pattern. CPU only (a window copy).
    */
   definePattern(): boolean;
+  /** NOISE ▸ Median (3×3). */
+  applyMedian(): Promise<boolean>;
+  /** OTHER ▸ Maximum ("max") / Minimum ("min"), 3×3. */
+  applyMorph(kind: "max" | "min"): Promise<boolean>;
+  /** ADJUST ▸ Color Lookup from a .cube file's text. */
+  applyColorLookup(cubeText: string, name?: string): Promise<boolean>;
+  /** Edit ▸ Fill with the foreground colour (the selection, or everything). */
+  fillForeground(): Promise<boolean>;
+  /** The paint bucket at image px `at`, in the foreground colour, using
+   *  `state().wand` tolerance / contiguity. */
+  bucketFill(at: [number, number]): Promise<boolean>;
+  /** Image ▸ Rotate / Flip / Canvas Size (whole stack; clears history). */
+  canvasOp(
+    op: CanvasOpKind,
+    size?: { width: number; height: number; anchorX: number; anchorY: number },
+  ): Promise<boolean>;
+  /** Select ▸ Modify by `radius` px. */
+  modifySelection(op: SelectionModifyOp, radius: number): boolean;
+  /** Wand / bucket options. */
+  setWandOptions(o: Partial<WandOptions>): void;
   /** Live preview on/off (`state().livePreview`). */
   setLivePreview(on: boolean): void;
   /** Set the foreground colour; the brush paints it from the next stroke. */
@@ -838,6 +866,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     pattern: null,
     colors: freshColors(),
     livePreview: true,
+    wand: { tolerance: WAND_TOLERANCE_DEFAULT, contiguous: WAND_CONTIGUOUS_DEFAULT },
     saveBack: null,
     brush: { ...DEFAULT_BRUSH_PARAMS, color: [...DEFAULT_BRUSH_PARAMS.color] },
     blendModes: [],
@@ -1350,6 +1379,8 @@ export function createImageSession(host: BundleHost): ImageSession {
               height: state.source.height,
             }
           : null,
+      {},
+      () => state.wand,
     );
     state.selection = engine.selectionStats();
     // The paint machine is pure pointer bookkeeping, but it is rebuilt
@@ -1728,6 +1759,107 @@ export function createImageSession(host: BundleHost): ImageSession {
     setLivePreview(on) {
       state.livePreview = on;
       emit();
+    },
+
+    setWandOptions(o) {
+      state.wand = { ...state.wand, ...o };
+      emit();
+    },
+
+    async applyMedian() {
+      return api.applyEffect("Median", (h) => engine!.applyMedian(h));
+    },
+
+    async applyMorph(kind) {
+      return api.applyEffect(kind === "max" ? "Maximum" : "Minimum", (h) =>
+        engine!.applyMorph(h, kind),
+      );
+    },
+
+    async applyColorLookup(cubeText, name = "Color lookup") {
+      let cube: Float32Array;
+      try {
+        cube = toKernelCube(parseCube(cubeText));
+      } catch (err) {
+        setStatus(`${name}: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+      return api.applyEffect(name, (h) => engine!.applyLut3d(h, cube));
+    },
+
+    async fillForeground() {
+      const fg = state.colors.fg;
+      return api.applyEffect("Fill", (h) => engine!.fillSolid(h, fg));
+    },
+
+    async bucketFill(at) {
+      const src = state.source;
+      if (!src) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      const [x, y] = [Math.floor(at[0]), Math.floor(at[1])];
+      if (x < 0 || y < 0 || x >= src.width || y >= src.height) return false;
+      const { tolerance, contiguous } = state.wand;
+      const fg = state.colors.fg;
+      return api.applyEffect("Paint bucket", (h) =>
+        engine!.bucketFill(h, x, y, tolerance, contiguous, fg),
+      );
+    },
+
+    async canvasOp(op, size) {
+      const src = state.source;
+      if (!src || !engine) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      discardStroke();
+      let wh: { width: number; height: number };
+      try {
+        wh = await engine.layersCanvasOp(
+          op,
+          size?.width,
+          size?.height,
+          size?.anchorX,
+          size?.anchorY,
+        );
+      } catch (err) {
+        setStatus(`${op} failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+      // Same handle, new extent: the tile claim and every readout
+      // addressed the old one.
+      releaseTiles();
+      src.width = wh.width;
+      src.height = wh.height;
+      markPixelsEdited();
+      refreshSourceReadout();
+      setStatus(
+        `${op === "canvas" ? "Canvas size" : "Canvas"} → ${wh.width}×${wh.height}. ` +
+          "Undo history cleared (it addressed the old canvas).",
+      );
+      if (src.elementId) await api.apply();
+      else emit();
+      return true;
+    },
+
+    modifySelection(op, radius) {
+      if (!engine || !state.source) {
+        setStatus("Nothing ingested — ingest a placed image first.");
+        return false;
+      }
+      try {
+        engine.selectionModify(op, radius);
+      } catch (err) {
+        setStatus(`Modify failed: ${err instanceof Error ? err.message : err}`);
+        emit();
+        return false;
+      }
+      api.refreshSelection();
+      setStatus(`Selection ${op === "border" ? "bordered" : `${op}ed`} by ${radius} px.`);
+      return true;
     },
 
     psdSetLayerOpacity(index, opacity) {

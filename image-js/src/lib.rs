@@ -1031,6 +1031,18 @@ mod wasm {
         with_selection(|s| s.feather(sigma))
     }
 
+    /// Select ▸ Modify: `op` ∈ expand | contract | border | smooth, by
+    /// `radius` px. Errors when there is no explicit selection.
+    #[wasm_bindgen]
+    pub fn selection_modify(op: &str, radius: f32) -> Result<(), JsValue> {
+        let op = crate::selection::ModifyOp::from_wire(op).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown selection modification \"{op}\" (expand | contract | border | smooth)"
+            ))
+        })?;
+        with_selection(|s| s.modify(op, radius))
+    }
+
     /// SELECTION → PATH: trace the live selection's coverage into closed
     /// polygons, as `[{outer, points: [[x, y], …]}]` in IMAGE pixel
     /// coordinates on pixel EDGES.
@@ -1535,6 +1547,72 @@ mod wasm {
         land_fill(img.width, img.height, out, layered).await
     }
 
+    /// FILL the current selection (the whole image when none) with ONE
+    /// colour — Edit ▸ Fill ▸ Foreground colour. `color` is straight RGBA
+    /// in `[0, 1]`. Returns the engine-held image's handle.
+    #[wasm_bindgen]
+    pub async fn fill_solid(handle: u32, color: Vec<f32>) -> Result<DecodedHandle, JsValue> {
+        if color.len() != 4 {
+            return Err(JsValue::from_str(
+                "fill colour must be 4 floats (straight RGBA in [0,1])",
+            ));
+        }
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        let spec = FillSpec::Solid {
+            color: [color[0], color[1], color[2], color[3]],
+        };
+        let out = fill_rgba8(&ctx, &img, &spec, sel)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        land_fill(img.width, img.height, out, layered).await
+    }
+
+    /// The PAINT BUCKET: flood from image pixel `(x, y)` over pixels within
+    /// `tolerance` of it (connected ones only when `contiguous`), within
+    /// the selection when there is one, and fill that with `color`
+    /// (straight RGBA in `[0, 1]`). The flood samples the COMPOSITE —
+    /// Photoshop's "sample all layers" — and paints the active layer.
+    #[wasm_bindgen]
+    pub async fn bucket_fill(
+        handle: u32,
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        contiguous: bool,
+        color: Vec<f32>,
+    ) -> Result<DecodedHandle, JsValue> {
+        if color.len() != 4 {
+            return Err(JsValue::from_str(
+                "fill colour must be 4 floats (straight RGBA in [0,1])",
+            ));
+        }
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        if x >= img.width || y >= img.height {
+            return Err(JsValue::from_str(
+                "the paint bucket was clicked outside the image",
+            ));
+        }
+        let mut flood = SelectionCoverage::magic_wand(
+            img.width,
+            img.height,
+            &img.rgba.to_rgba8(),
+            x,
+            y,
+            tolerance,
+            contiguous,
+        );
+        if let Some(sel) = &sel {
+            flood.combine(sel, CombineMode::Intersect);
+        }
+        let spec = FillSpec::Solid {
+            color: [color[0], color[1], color[2], color[3]],
+        };
+        let out = fill_rgba8(&ctx, &img, &spec, Some(Arc::new(flood)))
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        land_fill(img.width, img.height, out, layered).await
+    }
+
     /// RASTER TYPE: shape `text` with `font_bytes`, rasterize it, and
     /// paint it into the image at `(x, y)` in `rgba`.
     ///
@@ -1811,6 +1889,53 @@ mod wasm {
         use image_kernels::families::geom::{MosaicParams, GEOM_MOSAIC};
         let params = MosaicParams::new(cell_px);
         apply_point_kernel(handle, &GEOM_MOSAIC, params.as_bytes()).await
+    }
+
+    /// NOISE — Median, 3×3 (the kernel's fixed comparator network; a
+    /// larger radius needs a histogram method, which is a different
+    /// kernel). Every output texel is one of the input samples.
+    #[wasm_bindgen]
+    pub async fn apply_median(handle: u32) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::morph::{MorphParams, RANK_MEDIAN3};
+        apply_point_kernel(handle, &RANK_MEDIAN3, MorphParams::new().as_bytes()).await
+    }
+
+    /// OTHER — Maximum (`kind` "max", grey dilation) or Minimum ("min",
+    /// grey erosion), 3×3.
+    #[wasm_bindgen]
+    pub async fn apply_morph(handle: u32, kind: &str) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::morph::{MorphParams, MORPH_DILATE, MORPH_ERODE};
+        let def = match kind {
+            "max" => &MORPH_DILATE,
+            "min" => &MORPH_ERODE,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "unknown morphology \"{other}\" (max | min)"
+                )))
+            }
+        };
+        apply_point_kernel(handle, def, MorphParams::new().as_bytes()).await
+    }
+
+    /// ADJUST — Color Lookup: a 9×9×9 RGB cube (`cube` = 729 rgb triples,
+    /// red fastest, values 0–1), applied trilinearly. The panel resamples
+    /// a .cube file of any size to this edge first.
+    #[wasm_bindgen]
+    pub async fn apply_lut3d(handle: u32, cube: &[f32]) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::adjust::{AdjustLut3dParams, ADJUST_LUT3D, LUT3D_EDGE};
+        let n = LUT3D_EDGE * LUT3D_EDGE * LUT3D_EDGE;
+        if cube.len() != n * 3 {
+            return Err(JsValue::from_str(&format!(
+                "colour lookup: {} values, expected {} ({LUT3D_EDGE}³ rgb)",
+                cube.len(),
+                n * 3
+            )));
+        }
+        let mut p = AdjustLut3dParams::identity();
+        for (i, e) in p.cube.iter_mut().enumerate() {
+            *e = [cube[i * 3], cube[i * 3 + 1], cube[i * 3 + 2], 0.0];
+        }
+        apply_point_kernel(handle, &ADJUST_LUT3D, p.as_bytes()).await
     }
 
     /// ADJUST — selective colour. `range` 0..8; all-zero deltas are the
@@ -2959,6 +3084,83 @@ mod wasm {
                     .map(|()| js_sys::Uint8Array::from(&rgba[..])),
                 Err(e) => Err(ingest_err(e)),
             };
+            (doc, result)
+        })
+        .await
+    }
+
+    /// IMAGE ▸ Rotate / Flip / Canvas Size, over the WHOLE stack (every
+    /// layer, mask and smart source moves together; see
+    /// `LayerStack::transform_canvas`). `op` is "rotate-cw", "rotate-ccw",
+    /// "rotate-180", "flip-h", "flip-v" or "canvas" (then `width`,
+    /// `height` and the anchors apply; they are ignored otherwise).
+    ///
+    /// The bound image takes the new extent and the composite; its mip
+    /// pyramid goes, and the selection is re-bound (dropped), because
+    /// both address the old extent. The undo history is cleared.
+    /// Returns `[width, height]`.
+    #[wasm_bindgen]
+    pub async fn layers_canvas_op(
+        op: &str,
+        width: u32,
+        height: u32,
+        anchor_x: u8,
+        anchor_y: u8,
+    ) -> Result<Vec<u32>, JsValue> {
+        use crate::layers::CanvasOp;
+        let op = match op {
+            "rotate-cw" => CanvasOp::RotateCw,
+            "rotate-ccw" => CanvasOp::RotateCcw,
+            "rotate-180" => CanvasOp::Rotate180,
+            "flip-h" => CanvasOp::FlipHorizontal,
+            "flip-v" => CanvasOp::FlipVertical,
+            "canvas" => CanvasOp::Resize {
+                width,
+                height,
+                anchor_x,
+                anchor_y,
+            },
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "unknown canvas operation \"{other}\" \
+                     (rotate-cw | rotate-ccw | rotate-180 | flip-h | flip-v | canvas)"
+                )))
+            }
+        };
+        let ctx = GPU.with(|g| g.borrow().clone());
+        with_stack_async(|mut doc| async move {
+            let result = async {
+                // Refuse BEFORE changing anything when the new composite
+                // could not be computed: a transformed stack over an
+                // untransformed image is the state this must never leave.
+                if ctx.is_none() && doc.stack.composite_needs_gpu() {
+                    return Err(JsValue::from_str(
+                        "rotating or resizing a layered image is GPU-only \
+                         (the composite is a kernel dispatch) — call init_gpu first",
+                    ));
+                }
+                doc.stack.transform_canvas(op).map_err(ingest_err)?;
+                let rgba = doc
+                    .stack
+                    .composite(ctx.as_deref(), None)
+                    .await
+                    .map_err(ingest_err)?;
+                let (w, h) = (doc.stack.width(), doc.stack.height());
+                IMAGES.with(|m| {
+                    let mut map = m.borrow_mut();
+                    let img = map.get_mut(&doc.handle).ok_or_else(|| {
+                        JsValue::from_str(&format!("unknown image handle {}", doc.handle))
+                    })?;
+                    img.width = w;
+                    img.height = h;
+                    img.rgba = crate::pixels::Pixels::from_rgba8(rgba);
+                    Ok::<(), JsValue>(())
+                })?;
+                PYRAMIDS.with(|p| p.borrow_mut().remove(&doc.handle));
+                SELECTION.with(|s| s.borrow_mut().bind(doc.handle, w, h));
+                Ok(vec![w, h])
+            }
+            .await;
             (doc, result)
         })
         .await

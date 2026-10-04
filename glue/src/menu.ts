@@ -35,6 +35,12 @@ const ENTRIES: [path: string, suffix: string, group: string][] = [
   ["Image/Auto-enhance", "autoEnhance", "adjust"],
   ["Image/Bake adjustments into layer", "bakeAdjustToLayer", "adjust-bake"],
 
+  ["Image/Rotate 90° clockwise", "rotateCw", "canvas"],
+  ["Image/Rotate 90° counter-clockwise", "rotateCcw", "canvas"],
+  ["Image/Rotate 180°", "rotate180", "canvas"],
+  ["Image/Flip horizontal", "flipHorizontal", "canvas"],
+  ["Image/Flip vertical", "flipVertical", "canvas"],
+
   ["Image/Layer/Add", "addLayer", "layer"],
   ["Image/Layer/Convert to smart object", "convertLayerToSmart", "layer-smart"],
 
@@ -47,9 +53,13 @@ const ENTRIES: [path: string, suffix: string, group: string][] = [
   ["Image/Fill/Gradient…", "fillSelection", "fill"],
   ["Image/Fill/Noise…", "fillNoise", "fill"],
   ["Image/Fill/Content-aware", "contentAwareFill", "fill"],
+  ["Image/Fill/Foreground colour", "fillForeground", "fill"],
   ["Image/Fill/Define pattern", "definePattern", "fill-pattern"],
   ["Image/Fill/Pattern", "fillPattern", "fill-pattern"],
   ["Image/Filter/Shape blur", "shapeBlur", "filter"],
+  ["Image/Filter/Median", "median", "filter-rank"],
+  ["Image/Filter/Maximum", "maximum", "filter-rank"],
+  ["Image/Filter/Minimum", "minimum", "filter-rank"],
 
   ["Image/Apply crop", "commitCrop", "crop"],
   ["Image/Set type", "setType", "type"],

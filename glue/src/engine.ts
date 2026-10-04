@@ -481,6 +481,18 @@ export function displayTreatmentLabel(t: DisplayTreatment): string {
 /** The T1 resample kernels the resize door accepts. */
 export type ResampleFilter = "nearest" | "mitchell" | "lanczos3";
 
+/** Whole-canvas operations (`layersCanvasOp`). */
+export type CanvasOpKind =
+  | "rotate-cw"
+  | "rotate-ccw"
+  | "rotate-180"
+  | "flip-h"
+  | "flip-v"
+  | "canvas";
+
+/** Select ▸ Modify operations (`selectionModify`). */
+export type SelectionModifyOp = "expand" | "contract" | "border" | "smooth";
+
 /** Which `gen.*` gradient the fill door dispatches (the wire names the
  *  Rust `GradientKind::from_wire` decodes). */
 export type GradientKind =
@@ -1054,6 +1066,8 @@ export interface ImageEngine {
   /** Gaussian feather of the coverage (σ px; CPU mask prep). Throws when
    *  no explicit selection exists. */
   selectionFeather(sigma: number): void;
+  /** Select ▸ Modify by `radius` px. Throws without a selection. */
+  selectionModify(op: SelectionModifyOp, radius: number): void;
   /** Select-all (an explicit full-extent selection). */
   selectionSelectAll(): void;
   /** Deselect: back to "no selection" (adjust runs unmasked). */
@@ -1184,6 +1198,34 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
   applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /** NOISE — Median, 3×3 (the kernel's fixed comparator network). */
+  applyMedian(handle: number): Promise<DecodedInfo>;
+  /** OTHER — Maximum ("max") or Minimum ("min"), 3×3. */
+  applyMorph(handle: number, kind: "max" | "min"): Promise<DecodedInfo>;
+  /** ADJUST — Color Lookup through a 9×9×9 cube (729 rgb triples, red
+   *  fastest; `cube.ts` resamples a .cube file to this edge). */
+  applyLut3d(handle: number, cube: Float32Array): Promise<DecodedInfo>;
+  /** FILL the selection (whole image when none) with one straight-RGBA colour. */
+  fillSolid(handle: number, color: Rgba01): Promise<DecodedInfo>;
+  /** PAINT BUCKET: flood from image px (x, y) within `tolerance`
+   *  (contiguous or global), inside the selection, with `color`. */
+  bucketFill(
+    handle: number,
+    x: number,
+    y: number,
+    tolerance: number,
+    contiguous: boolean,
+    color: Rgba01,
+  ): Promise<DecodedInfo>;
+  /** IMAGE ▸ Rotate / Flip / Canvas Size over the whole layer stack.
+   *  Clears the undo history; returns the new extent. */
+  layersCanvasOp(
+    op: CanvasOpKind,
+    width?: number,
+    height?: number,
+    anchorX?: number,
+    anchorY?: number,
+  ): Promise<{ width: number; height: number }>;
   /** BLUR — SHAPE. `shapeHandle` supplies the silhouette (read from RED). */
   applyShapeBlur(
     handle: number,
@@ -1548,6 +1590,7 @@ export interface ImageWasmModule {
     mode: number,
   ): void;
   selection_feather(sigma: number): void;
+  selection_modify(op: string, radius: number): void;
   selection_select_all(): void;
   selection_clear(): void;
   selection_invert(): void;
@@ -1652,6 +1695,25 @@ export interface ImageWasmModule {
     spin: boolean,
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
+  apply_median(handle: number): Promise<DecodedHandleWasm>;
+  apply_morph(handle: number, kind: string): Promise<DecodedHandleWasm>;
+  apply_lut3d(handle: number, cube: Float32Array): Promise<DecodedHandleWasm>;
+  fill_solid(handle: number, color: Float32Array): Promise<DecodedHandleWasm>;
+  bucket_fill(
+    handle: number,
+    x: number,
+    y: number,
+    tolerance: number,
+    contiguous: boolean,
+    color: Float32Array,
+  ): Promise<DecodedHandleWasm>;
+  layers_canvas_op(
+    op: string,
+    width: number,
+    height: number,
+    anchor_x: number,
+    anchor_y: number,
+  ): Promise<Uint32Array>;
   apply_shape_blur(
     handle: number,
     shape_handle: number,
@@ -2083,6 +2145,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         selectionModeCode(mode),
       ),
     selectionFeather: (sigma) => wasm.selection_feather(sigma),
+    selectionModify: (op, radius) => wasm.selection_modify(op, radius),
     selectionSelectAll: () => wasm.selection_select_all(),
     selectionClear: () => wasm.selection_clear(),
     selectionInvert: () => wasm.selection_invert(),
@@ -2214,6 +2277,27 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       return decodedInfoOf(
         await wasm.apply_radial_blur(handle, cx, cy, amount, spin),
       );
+    },
+    async applyMedian(handle) {
+      return decodedInfoOf(await wasm.apply_median(handle));
+    },
+    async applyMorph(handle, kind) {
+      return decodedInfoOf(await wasm.apply_morph(handle, kind));
+    },
+    async applyLut3d(handle, cube) {
+      return decodedInfoOf(await wasm.apply_lut3d(handle, cube));
+    },
+    async fillSolid(handle, color) {
+      return decodedInfoOf(await wasm.fill_solid(handle, Float32Array.from(color)));
+    },
+    async bucketFill(handle, x, y, tolerance, contiguous, color) {
+      return decodedInfoOf(
+        await wasm.bucket_fill(handle, x, y, tolerance, contiguous, Float32Array.from(color)),
+      );
+    },
+    async layersCanvasOp(op, width = 0, height = 0, anchorX = 1, anchorY = 1) {
+      const wh = await wasm.layers_canvas_op(op, width, height, anchorX, anchorY);
+      return { width: wh[0], height: wh[1] };
     },
     async applyMosaic(handle, cellPx) {
       return decodedInfoOf(await wasm.apply_mosaic(handle, cellPx));
