@@ -58,10 +58,11 @@ use image_core::{
     ChannelLayout, ContentHash, PixelFormat, Region, SampleDepth, Tile, TileCoord, TileData,
     TileMap, TileSliceMut, TILE,
 };
+use image_gpu::chain::{ChainStage, ChainTile};
 use image_gpu::{execute_tile_once, execute_tile_once_async, GpuContext, TileInput};
 
 use crate::cache::{OpKey, OperationCache};
-use crate::node::{ApplyNode, OpNode};
+use crate::node::{ApplyInputs, ApplyNode, OpNode};
 use crate::region_prop::required_input_roi;
 use crate::{NodeId, PipelineError, PipelineSelection};
 
@@ -88,6 +89,22 @@ pub(crate) fn materialize_node(
     let node = nodes
         .get(node_id.0)
         .ok_or_else(|| PipelineError::Graph(format!("dangling node {node_id:?}")))?;
+
+    // A run of point stages is pulled as ONE chain (see `point_run`).
+    if let Some((base, run)) = point_run(nodes, node_id, cache.unbatched) {
+        let (base_map, base_hash) = materialize_node(nodes, cache, base, roi, ctx, selection)?;
+        let key = run_key(nodes, &run, base_hash, selection);
+        if let Some(hit) = cache.get(key) {
+            return Ok((hit.clone(), content_hash_of(hit)));
+        }
+        let stages = run_stages(nodes, &run);
+        let map = run_tiles(&stages, base_map, None, roi, selection, |st, tiles| {
+            image_gpu::chain::execute_chain(ctx, st, tiles)
+        })?;
+        let out_hash = content_hash_of(&map);
+        cache.insert(key, map.clone());
+        return Ok((map, out_hash));
+    }
 
     // The input-hash component of the cache key. A leaf source binds its
     // own decoded identity (op id ⊕ requested ROI); an apply node binds
@@ -125,7 +142,18 @@ pub(crate) fn materialize_node(
         OpNode::Source(_) => materialize_source(node, roi)?,
         OpNode::Apply(apply) => {
             let (a_map, b_map) = materialized_input.unwrap();
-            materialize_apply(apply, a_map, b_map, roi, ctx, selection)?
+            if cache.unbatched {
+                materialize_apply(apply, a_map, b_map, roi, ctx, selection)?
+            } else {
+                let stages = [ChainStage {
+                    def: apply.def,
+                    params: &apply.params,
+                }];
+                check_arity(apply, b_map.is_some())?;
+                run_tiles(&stages, a_map, b_map, roi, selection, |st, tiles| {
+                    image_gpu::chain::execute_chain(ctx, st, tiles)
+                })?
+            }
         }
     };
     let out_hash = content_hash_of(&map);
@@ -152,6 +180,21 @@ pub(crate) fn materialize_node_async<'a>(
         let node = nodes
             .get(node_id.0)
             .ok_or_else(|| PipelineError::Graph(format!("dangling node {node_id:?}")))?;
+
+        // A run of point stages — see materialize_node (LOCKSTEP).
+        if let Some((base, run)) = point_run(nodes, node_id, cache.unbatched) {
+            let (base_map, base_hash) =
+                materialize_node_async(nodes, cache, base, roi, ctx, selection).await?;
+            let key = run_key(nodes, &run, base_hash, selection);
+            if let Some(hit) = cache.get(key) {
+                return Ok((hit.clone(), content_hash_of(hit)));
+            }
+            let stages = run_stages(nodes, &run);
+            let map = run_tiles_async(&stages, base_map, None, roi, ctx, selection).await?;
+            let out_hash = content_hash_of(&map);
+            cache.insert(key, map.clone());
+            return Ok((map, out_hash));
+        }
 
         let (input_hash, materialized_input) = match node {
             OpNode::Source(_) => (source_identity_hash(node, roi), None),
@@ -185,7 +228,16 @@ pub(crate) fn materialize_node_async<'a>(
             OpNode::Source(_) => materialize_source(node, roi)?,
             OpNode::Apply(apply) => {
                 let (a_map, b_map) = materialized_input.unwrap();
-                materialize_apply_async(apply, a_map, b_map, roi, ctx, selection).await?
+                if cache.unbatched {
+                    materialize_apply_async(apply, a_map, b_map, roi, ctx, selection).await?
+                } else {
+                    let stages = [ChainStage {
+                        def: apply.def,
+                        params: &apply.params,
+                    }];
+                    check_arity(apply, b_map.is_some())?;
+                    run_tiles_async(&stages, a_map, b_map, roi, ctx, selection).await?
+                }
             }
         };
         let out_hash = content_hash_of(&map);
@@ -391,6 +443,185 @@ async fn materialize_apply_async(
         map.insert(coord, heap_tile(out_bytes));
     }
     Ok(map)
+}
+
+// ── resident chains ─────────────────────────────────────────────────
+
+/// Is `node` a unary POINT apply — a stage whose output tile depends
+/// only on the same tile of its one input?
+fn unary_point(nodes: &[OpNode], id: NodeId) -> Option<(&ApplyNode, NodeId)> {
+    match nodes.get(id.0)? {
+        OpNode::Apply(a) if matches!(a.def.class, image_kernels::KernelClass::Point) => {
+            match a.inputs {
+                ApplyInputs::Unary(input) => Some((a, input)),
+                ApplyInputs::Binary(..) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The run of consecutive unary point stages ending at `top`, bottom
+/// first, plus the node beneath the run — or `None` when `top` does not
+/// end a run of at least two (a lone stage goes through the per-node
+/// batch). Point stages tile identically (each tile's input is the same
+/// tile of the stage below, over the same ROI), so a run can be pulled
+/// tile by tile through every stage without the intermediate maps.
+fn point_run(nodes: &[OpNode], top: NodeId, unbatched: bool) -> Option<(NodeId, Vec<NodeId>)> {
+    if unbatched {
+        return None;
+    }
+    let mut run = vec![top];
+    let (_, mut below) = unary_point(nodes, top)?;
+    while let Some((_, next)) = unary_point(nodes, below) {
+        run.push(below);
+        below = next;
+    }
+    if run.len() < 2 {
+        return None;
+    }
+    run.reverse();
+    Some((below, run))
+}
+
+/// The cache key of a whole run: every stage's op and params, over the
+/// content of the node beneath it. Built from the same components as a
+/// single node's key, with a tag so it can never equal one.
+fn run_key(
+    nodes: &[OpNode],
+    run: &[NodeId],
+    base: ContentHash,
+    selection: Option<&PipelineSelection>,
+) -> OpKey {
+    let mut bytes = b"point-run".to_vec();
+    for id in run {
+        let n = &nodes[id.0];
+        bytes.extend_from_slice(&n.op_key().to_le_bytes());
+        bytes.extend_from_slice(&params_hash(n, selection).0.to_le_bytes());
+    }
+    let top = &nodes[run[run.len() - 1].0];
+    OpKey {
+        op_id: top.op_key(),
+        params: image_core::ParamsHash::of(&bytes),
+        input: base,
+    }
+}
+
+fn run_stages<'a>(nodes: &'a [OpNode], run: &[NodeId]) -> Vec<ChainStage<'a>> {
+    run.iter()
+        .map(|id| {
+            let (a, _) = unary_point(nodes, *id).expect("a run holds point stages");
+            ChainStage {
+                def: a.def,
+                params: &a.params,
+            }
+        })
+        .collect()
+}
+
+fn check_arity(apply: &ApplyNode, binary: bool) -> Result<(), PipelineError> {
+    let provided = if binary { 2 } else { 1 };
+    if apply.def.inputs as usize != provided {
+        return Err(PipelineError::Graph(format!(
+            "kernel {} arity {} wired with {provided} input(s)",
+            apply.def.id, apply.def.inputs
+        )));
+    }
+    Ok(())
+}
+
+/// Per covered tile: its coord, work extent, input bytes (absent tiles
+/// read as zeroed background) and selection-mask window — exactly what
+/// the per-tile path hands `execute_tile_once`.
+struct TileWork {
+    coord: TileCoord,
+    work: Region,
+    a: Vec<u8>,
+    b: Option<Vec<u8>>,
+    mask: Option<Vec<u8>>,
+}
+
+fn tile_work(
+    a: &TileMap,
+    b: Option<&TileMap>,
+    roi: Region,
+    selection: Option<&PipelineSelection>,
+) -> Result<Vec<TileWork>, PipelineError> {
+    let mut out = Vec::new();
+    for coord in roi.tiles_at(0) {
+        let Some(work) = tile_work_region(coord, roi) else {
+            continue;
+        };
+        let zero_len = (work.w as usize * work.h as usize) * WORKING_BPP;
+        let bytes = |m: &TileMap| -> Result<Vec<u8>, PipelineError> {
+            Ok(match m.get(coord) {
+                Some(tile) => heap_bytes(tile)?.to_vec(),
+                None => vec![0u8; zero_len],
+            })
+        };
+        out.push(TileWork {
+            coord,
+            work,
+            a: bytes(a)?,
+            b: b.map(bytes).transpose()?,
+            mask: selection.map(|s| s.coverage.mask_window_f16(work)),
+        });
+    }
+    Ok(out)
+}
+
+fn chain_tiles(work: &[TileWork]) -> Vec<ChainTile<'_>> {
+    work.iter()
+        .map(|t| {
+            let mut inputs = vec![t.a.as_slice()];
+            if let Some(b) = &t.b {
+                inputs.push(b.as_slice());
+            }
+            ChainTile {
+                inputs,
+                mask: t.mask.as_deref(),
+                w: t.work.w,
+                h: t.work.h,
+            }
+        })
+        .collect()
+}
+
+fn collect_tiles(work: &[TileWork], outs: Vec<Vec<u8>>) -> TileMap {
+    let mut map = TileMap::new(PixelFormat::GPU_WORKING);
+    for (t, bytes) in work.iter().zip(outs) {
+        map.insert(t.coord, heap_tile(bytes));
+    }
+    map
+}
+
+/// Run `stages` over every tile of `roi` in ONE submit with ONE readback
+/// (the stages of each tile chained on the device).
+fn run_tiles(
+    stages: &[ChainStage<'_>],
+    a: TileMap,
+    b: Option<TileMap>,
+    roi: Region,
+    selection: Option<&PipelineSelection>,
+    exec: impl FnOnce(&[ChainStage<'_>], &[ChainTile<'_>]) -> Result<Vec<Vec<u8>>, image_gpu::GpuError>,
+) -> Result<TileMap, PipelineError> {
+    let work = tile_work(&a, b.as_ref(), roi, selection)?;
+    let outs = exec(stages, &chain_tiles(&work))?;
+    Ok(collect_tiles(&work, outs))
+}
+
+/// [`run_tiles`]'s ASYNC twin — keep in LOCKSTEP.
+async fn run_tiles_async(
+    stages: &[ChainStage<'_>],
+    a: TileMap,
+    b: Option<TileMap>,
+    roi: Region,
+    ctx: &GpuContext,
+    selection: Option<&PipelineSelection>,
+) -> Result<TileMap, PipelineError> {
+    let work = tile_work(&a, b.as_ref(), roi, selection)?;
+    let outs = image_gpu::chain::execute_chain_async(ctx, stages, &chain_tiles(&work)).await?;
+    Ok(collect_tiles(&work, outs))
 }
 
 /// Fold two input content hashes into one cache-key component for a

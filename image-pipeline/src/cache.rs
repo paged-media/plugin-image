@@ -61,6 +61,10 @@ pub struct OperationCache {
     entries: HashMap<OpKey, TileMap>,
     hits: u64,
     misses: u64,
+    /// Execute every stage of every tile on its own (upload, dispatch,
+    /// submit, readback) instead of through resident chains — the
+    /// pre-residency scheduler, kept as the byte-equality reference.
+    pub(crate) unbatched: bool,
 }
 
 impl OperationCache {

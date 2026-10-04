@@ -322,6 +322,14 @@ impl Pipeline {
 
     /// Cache hits since construction — the test hook proving a re-pull is
     /// memoized, not recomputed.
+    /// Run pulls the pre-residency way: every stage of every tile its
+    /// own upload, dispatch, submit and readback. The resident scheduler
+    /// is proven byte-equal against this; nothing else should set it.
+    #[doc(hidden)]
+    pub fn set_unbatched_reference(&mut self, on: bool) {
+        self.cache.unbatched = on;
+    }
+
     pub fn cache_hits(&self) -> u64 {
         self.cache.hits()
     }

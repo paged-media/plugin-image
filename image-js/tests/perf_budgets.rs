@@ -292,14 +292,16 @@ fn a_twenty_step_opacity_drag__feat__image_editor_layers() {
 // ── Apply (the adjust chain) ─────────────────────────────────────────
 
 /// Measured 2026-10-04 on Metal: every stage, every tile, its own pipeline
-/// build, upload, submit and readback.
+/// build, upload, submit and readback. Now each node's tiles go out in
+/// one submit, and a run of point stages chains on the device per tile
+/// (one upload in, one readback out); the dispatches are the same ones.
 const APPLY6: [(&str, u64); 6] = [
-    ("pipelines_built", 0), // was 276: the per-device pipeline cache
-    ("dispatches", 276),
-    ("submits", 276),
-    ("textures_created", 832),
-    ("readbacks", 276),
-    ("bytes_uploaded", 54978224),
+    ("pipelines_built", 0),       // was 276: the per-device pipeline cache
+    ("dispatches", 276),          // unchanged: the same dispatches
+    ("submits", 18),              // was 276: resident chains
+    ("textures_created", 0),      // was 832: scratch pool + constant mask
+    ("readbacks", 18),            // was 276
+    ("bytes_uploaded", 26098352), // was 54978224: no intermediate re-uploads
 ];
 
 /// Apply with six stages on (exposure, contrast, saturation, hue, blur,
