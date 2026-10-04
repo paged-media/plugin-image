@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 3aa505d9c71c74e4c7ac240d7a679f6f30e4bc51f26baafd5fd2a92a1255b158 # shrinks to dims = (20, 13), sixteen = false, gens = [Pixel { seed: 0, alpha: 0, smart: false }], edits = [Opacity(0, 0.0), Opacity(6, 0.092247695), Visible(1, false)]
+cc 0ceb5989d7f51bff1bbaef067ec234b23169ee7c087651a50b971285d584759e # shrinks to dims = (20, 13), sixteen = false, gens = [Pixel { seed: 0, alpha: 0, smart: false }, Pixel { seed: 0, alpha: 0, smart: false }], edits = [Group(2, 1, false, 0.3), Stroke(2, 911485106, 1)]

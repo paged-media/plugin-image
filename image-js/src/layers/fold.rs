@@ -563,6 +563,13 @@ impl LayerStack {
             }
         }
 
+        // One plate's pixels changed inside a rectangle (a brush sample):
+        // fold just that rectangle and splice it into the last result.
+        if let Some(out) = self.refold_dirty(ctx, &mut cache, &steps).await? {
+            *self.fold.lock().expect("fold cache lock") = cache;
+            return Ok(out);
+        }
+
         // Resume from the checkpoint when everything below it is unchanged.
         let (from, state) = match &cache.checkpoint {
             Some((prefix, state))
@@ -601,5 +608,320 @@ impl LayerStack {
         cache.last = Some((steps, Arc::clone(&rgba)));
         *self.fold.lock().expect("fold cache lock") = cache;
         Ok(rgba)
+    }
+}
+
+/// The (old, new) pixels of the one plate a brush sample changed.
+type PlatePair = (Arc<[u8]>, Arc<[u8]>);
+
+/// The bounding box of the bytes that differ between two RGBA8 canvases
+/// of width `w`, or `None` when they are identical.
+fn diff_bbox(old: &[u8], new: &[u8], w: u32) -> Option<(u32, u32, u32, u32)> {
+    let row = w as usize * 4;
+    let rows_old = old.chunks_exact(row);
+    let mut y0 = None;
+    let mut y1 = 0;
+    let (mut x0, mut x1) = (usize::MAX, 0usize);
+    for (y, (a, b)) in rows_old.zip(new.chunks_exact(row)).enumerate() {
+        if a == b {
+            continue;
+        }
+        y0.get_or_insert(y);
+        y1 = y;
+        let first = a.iter().zip(b).position(|(p, q)| p != q).unwrap_or(0) / 4;
+        let last = row
+            - 1
+            - a.iter()
+                .rev()
+                .zip(b.iter().rev())
+                .position(|(p, q)| p != q)
+                .unwrap_or(0);
+        x0 = x0.min(first);
+        x1 = x1.max(last / 4);
+    }
+    let y0 = y0?;
+    Some((
+        x0 as u32,
+        y0 as u32,
+        (x1 - x0 + 1) as u32,
+        (y1 - y0 + 1) as u32,
+    ))
+}
+
+/// Straight RGBA8 window → rgba16float bytes.
+fn window_f16(px: &[u8], w: u32, r: (u32, u32, u32, u32)) -> Vec<u8> {
+    let (x, y, rw, rh) = r;
+    let mut win = Vec::with_capacity(rw as usize * rh as usize * 4);
+    for row in y..y + rh {
+        let start = (row as usize * w as usize + x as usize) * 4;
+        win.extend_from_slice(&px[start..start + rw as usize * 4]);
+    }
+    rgba8_to_f16(&win)
+}
+
+/// A step's r16float mask over the window — the same per-texel values
+/// the full-canvas mask holds there.
+fn mask_window(cov: &CovKey, w: u32, r: (u32, u32, u32, u32)) -> Vec<u8> {
+    let (x0, y0, rw, rh) = r;
+    SelectionMask::from_fn(rw, rh, |x, y| {
+        let (cx, cy) = (x0 + x, y0 + y);
+        let own = cov.own.as_ref().map(|c| u32::from(c.coverage_at(cx, cy)));
+        let clip = cov
+            .clip
+            .as_ref()
+            .map(|px| u32::from(px[(cy as usize * w as usize + cx as usize) * 4 + 3]));
+        let v = match (own, clip) {
+            (Some(a), Some(b)) => (a * b + 127) / 255,
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => 255,
+        };
+        v as f32 / 255.0
+    })
+    .into_bytes()
+}
+
+impl LayerStack {
+    /// Fold ONLY the rectangle in which one plate changed, when that is
+    /// all that changed since the last composite: the steps differ only
+    /// in that plate (and in clip bases that are that plate), the fold
+    /// from the checkpoint on is all point-wise blends, and the
+    /// checkpoint lies below the change. Every compose/cast kernel is a
+    /// per-texel function, so folding a window of every input yields the
+    /// same texels the full fold would — and outside the rectangle every
+    /// input is unchanged, so the last result stands there.
+    async fn refold_dirty(
+        &self,
+        ctx: &GpuContext,
+        cache: &mut FoldCache,
+        steps: &[Step],
+    ) -> Result<Option<Arc<[u8]>>, IngestError> {
+        let w = self.width;
+        let canvas = (w as usize) * (self.height as usize) * 4;
+        let Some((last_steps, _)) = &cache.last else {
+            return Ok(None);
+        };
+        let Some((prefix, state)) = &cache.checkpoint else {
+            return Ok(None);
+        };
+        if last_steps.len() != steps.len()
+            || prefix.len() > steps.len()
+            || !same_steps(prefix, &steps[..prefix.len()])
+        {
+            return Ok(None);
+        }
+        // Exactly one (old, new) plate pair may differ, at or above the
+        // checkpoint; every other difference must be that same pair.
+        let mut pair: Option<PlatePair> = None;
+        let mut note = |a: &Arc<[u8]>, b: &Arc<[u8]>| -> bool {
+            if Arc::ptr_eq(a, b) {
+                return true;
+            }
+            match &pair {
+                None => {
+                    pair = Some((Arc::clone(a), Arc::clone(b)));
+                    true
+                }
+                Some((o, n)) => Arc::ptr_eq(o, a) && Arc::ptr_eq(n, b),
+            }
+        };
+        for (old, new) in last_steps.iter().zip(steps) {
+            if old.same(new) {
+                continue;
+            }
+            let ok = match (old, new) {
+                (
+                    Step::Pixel {
+                        layer: l1,
+                        px: p1,
+                        blend: b1,
+                        opacity: o1,
+                        cov: c1,
+                    },
+                    Step::Pixel {
+                        layer: l2,
+                        px: p2,
+                        blend: b2,
+                        opacity: o2,
+                        cov: c2,
+                    },
+                ) => {
+                    l1 == l2
+                        && std::ptr::eq(*b1, *b2)
+                        && o1.to_bits() == o2.to_bits()
+                        && opt_ptr_eq(&c1.own, &c2.own)
+                        && note(p1, p2)
+                        && match (&c1.clip, &c2.clip) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => note(a, b),
+                            _ => false,
+                        }
+                }
+                _ => false,
+            };
+            if !ok {
+                return Ok(None);
+            }
+        }
+        let Some((old_px, new_px)) = pair else {
+            return Ok(None);
+        };
+        // The change must lie at or above the checkpoint, and nothing
+        // from the checkpoint on may be an adjustment (not point-wise).
+        let first_change = steps
+            .iter()
+            .position(|s| matches!(s, Step::Pixel { px, .. } if Arc::ptr_eq(px, &new_px)))
+            .unwrap_or(0);
+        if first_change < prefix.len()
+            || steps[prefix.len()..]
+                .iter()
+                .any(|s| matches!(s, Step::Adjust { .. }))
+            || old_px.len() != canvas
+            || new_px.len() != canvas
+        {
+            return Ok(None);
+        }
+        let Some(r) = diff_bbox(&old_px, &new_px, w) else {
+            // Byte-identical pixels in a new allocation: same composite.
+            let out = cache.last.as_ref().map(|(_, o)| Arc::clone(o));
+            if let Some(out) = &out {
+                cache.last = Some((steps.to_vec(), Arc::clone(out)));
+            }
+            return Ok(out);
+        };
+        let (rx, ry, rw, rh) = r;
+        crate::counters::bump(|c| {
+            c.layers_folded += steps[prefix.len()..]
+                .iter()
+                .filter(|s| s.is_layer())
+                .count() as u64
+        });
+
+        let mut batch = GpuBatch::new(ctx);
+        let window = |batch: &mut GpuBatch<'_>, t: &Option<Resident>| -> Option<Resident> {
+            t.as_ref().map(|t| {
+                let out = batch.target(rw, rh);
+                batch.copy(t, (rx, ry), &out, (0, 0), rw, rh);
+                out
+            })
+        };
+        let mut acc = window(&mut batch, &state.acc);
+        let mut parked: Vec<Option<Resident>> =
+            state.parked.iter().map(|p| window(&mut batch, p)).collect();
+        for step in &steps[prefix.len()..] {
+            match step {
+                Step::Open { .. } => parked.push(acc.take()),
+                Step::Close { blend, .. } => {
+                    let inner = acc.take();
+                    let outer = parked.pop().flatten();
+                    acc = match blend {
+                        None => outer,
+                        Some((def, opacity)) => {
+                            let a = outer.unwrap_or_else(|| ctx.zeros(rw, rh));
+                            let b = inner.unwrap_or_else(|| ctx.zeros(rw, rh));
+                            let out = batch.target(rw, rh);
+                            batch
+                                .dispatch(
+                                    def,
+                                    &[&a, &b],
+                                    ComposeParams::new(*opacity).as_bytes(),
+                                    None,
+                                    &out,
+                                )
+                                .map_err(gpu_err)?;
+                            Some(out)
+                        }
+                    };
+                }
+                Step::Pixel {
+                    layer,
+                    px,
+                    blend,
+                    opacity,
+                    cov,
+                } => {
+                    // The plate's window: copied from the cached plate,
+                    // or uploaded and premultiplied (premultiplying an
+                    // opaque texel is exactly the identity, so this does
+                    // not depend on the whole plate's opacity).
+                    let cached = cache
+                        .plates
+                        .get(layer)
+                        .filter(|(p, _)| Arc::ptr_eq(p, px))
+                        .map(|(_, t)| t.clone());
+                    let plate = match cached {
+                        Some(t) => {
+                            let out = batch.target(rw, rh);
+                            batch.copy(&t, (rx, ry), &out, (0, 0), rw, rh);
+                            out
+                        }
+                        None => {
+                            let src =
+                                batch.upload(rw, rh, TexFormat::Rgba16Float, &window_f16(px, w, r));
+                            let out = batch.target(rw, rh);
+                            batch
+                                .dispatch(
+                                    &CAST_PREMULTIPLY,
+                                    &[&src],
+                                    CastPremultiplyParams::new().as_bytes(),
+                                    None,
+                                    &out,
+                                )
+                                .map_err(gpu_err)?;
+                            out
+                        }
+                    };
+                    let mask = (!cov.is_none()).then(|| {
+                        batch.upload(rw, rh, TexFormat::R16Float, &mask_window(cov, w, r))
+                    });
+                    let a = acc.take().unwrap_or_else(|| ctx.zeros(rw, rh));
+                    let out = batch.target(rw, rh);
+                    batch
+                        .dispatch(
+                            blend,
+                            &[&a, &plate],
+                            ComposeParams::new(*opacity).as_bytes(),
+                            mask.as_ref(),
+                            &out,
+                        )
+                        .map_err(gpu_err)?;
+                    acc = Some(out);
+                }
+                Step::Adjust { .. } => unreachable!("excluded above"),
+            }
+        }
+        let a = acc.unwrap_or_else(|| ctx.zeros(rw, rh));
+        let out = batch.target(rw, rh);
+        batch
+            .dispatch(
+                &CAST_UNPREMULTIPLY,
+                &[&a],
+                CastUnpremultiplyParams::new().as_bytes(),
+                None,
+                &out,
+            )
+            .map_err(gpu_err)?;
+        let ticket = batch.read(&out);
+        let reads = batch.finish_async().await.map_err(gpu_err)?;
+        let win = f16_to_rgba8(&reads[ticket.0]);
+
+        // Splice into the last result — in place when nobody else holds
+        // it, else once into a copy.
+        let (_, last) = cache.last.take().expect("checked above");
+        let mut last = last;
+        if Arc::get_mut(&mut last).is_none() {
+            crate::counters::whole_copy(last.len());
+            last = Arc::from(&last[..]);
+        }
+        {
+            let dst = Arc::get_mut(&mut last).expect("unique");
+            let row = rw as usize * 4;
+            for y in 0..rh as usize {
+                let d = ((ry as usize + y) * w as usize + rx as usize) * 4;
+                dst[d..d + row].copy_from_slice(&win[y * row..(y + 1) * row]);
+            }
+        }
+        cache.last = Some((steps.to_vec(), Arc::clone(&last)));
+        Ok(Some(last))
     }
 }

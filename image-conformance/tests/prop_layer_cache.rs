@@ -127,6 +127,9 @@ enum Edit {
     Reorder(usize, usize),
     Group(usize, usize, bool, f32),
     Recomposite,
+    /// A brush stroke on layer k: `samples` previews, each changing a
+    /// small rectangle of the in-flight pixels, then the commit.
+    Stroke(usize, u32, u8),
 }
 
 fn layer_gen() -> impl Strategy<Value = LayerGen> {
@@ -152,6 +155,7 @@ fn edit_gen() -> impl Strategy<Value = Edit> {
         (0usize..8, 0usize..8, any::<bool>(), 0.3f32..1.0)
             .prop_map(|(a, b, p, o)| Edit::Group(a, b, p, o)),
         Just(Edit::Recomposite),
+        (0usize..8, any::<u32>(), 1u8..6).prop_map(|(i, s, n)| Edit::Stroke(i, s, n)),
     ]
 }
 
@@ -226,8 +230,58 @@ fn apply(s: &mut LayerStack, e: &Edit, w: u32, h: u32) {
             s.set_group_pass_through(id, *pass)?;
             s.set_group_opacity(id, *o)
         }),
-        Edit::Recomposite => Ok(()),
+        Edit::Recomposite | Edit::Stroke(..) => Ok(()),
     };
+}
+
+/// Paint `samples` small rectangles into the active layer's pixels,
+/// previewing each through the stack (the brush door's composite with
+/// the in-flight pixels standing in for the active layer), then commit.
+fn stroke(
+    ctx: &GpuContext,
+    s: &mut LayerStack,
+    k: usize,
+    seed: u32,
+    samples: u8,
+    w: u32,
+    h: u32,
+) -> Result<(), TestCaseError> {
+    let k = k % s.len();
+    if s.set_active(k).is_err() || !s.active().is_pixels() || s.active().rgba.is_16bit() {
+        return Ok(());
+    }
+    let mut px: Vec<u8> = s.active().rgba.raw().to_vec();
+    let mut painted: Arc<[u8]> = Arc::from(px.clone());
+    for n in 0..samples as u32 {
+        let r = seed.wrapping_add(n.wrapping_mul(7919));
+        let (x0, y0) = (r % w, (r / 7) % h);
+        let (rw, rh) = (1 + r % 5, 1 + (r / 3) % 4);
+        for y in y0..(y0 + rh).min(h) {
+            for x in x0..(x0 + rw).min(w) {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[
+                    (r % 256) as u8,
+                    (n * 40) as u8,
+                    200,
+                    (r % 3 * 120) as u8,
+                ]);
+            }
+        }
+        painted = Arc::from(px.clone());
+        let got = pollster::block_on(s.composite(Some(ctx), Some(&painted)));
+        let want = pollster::block_on(s.composite_reference(Some(ctx), Some(&painted)));
+        match (got, want) {
+            (Ok(g), Ok(w)) => prop_assert!(g[..] == w[..], "stroke sample {n} differs"),
+            (Err(_), Err(_)) => {}
+            (g, w) => prop_assert!(false, "stroke sample {n}: {g:?} vs {w:?}"),
+        }
+    }
+    let _ = s.edit_active(
+        "stroke",
+        Region::new(0, 0, w, h),
+        Pixels::from_rgba8(painted),
+    );
+    Ok(())
 }
 
 fn check(ctx: &GpuContext, s: &LayerStack, step: &str) -> Result<(), TestCaseError> {
@@ -260,6 +314,9 @@ proptest! {
         check(ctx, &s, "built")?;
         for (n, e) in edits.iter().enumerate() {
             apply(&mut s, e, w, h);
+            if let Edit::Stroke(k, seed, samples) = e {
+                stroke(ctx, &mut s, *k, *seed, *samples, w, h)?;
+            }
             check(ctx, &s, &format!("edit {n} {e:?}"))?;
         }
     }

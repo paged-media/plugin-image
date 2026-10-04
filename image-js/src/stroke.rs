@@ -345,8 +345,13 @@ pub struct StrokeSession {
     /// The untouched pixels at `begin` — every composite derives from
     /// these, and `cancel` restores them by simply being dropped.
     base: Arc<[u8]>,
-    /// The live painted pixels (straight RGBA8).
-    working: Vec<u8>,
+    /// The live painted pixels (straight RGBA8). An `Arc` so a preview
+    /// can share them ([`Self::pixels_arc`]); spliced in place while no
+    /// one else holds them, copied once when someone does.
+    working: Arc<[u8]>,
+    /// The region the LAST `extend` re-derived (`None` before the first
+    /// dab, or when the last sample painted nothing).
+    last_dirty: Option<Region>,
     accumulator: StrokeAccumulator,
     params: StrokeParams,
     /// The selection FROZEN at `begin`. Freezing it means a stroke can
@@ -417,7 +422,8 @@ impl StrokeSession {
             handle,
             width,
             height,
-            working: base.to_vec(),
+            working: Arc::from(&base[..]),
+            last_dirty: None,
             base,
             accumulator: StrokeAccumulator::new(width, height),
             params: params.sanitized(),
@@ -473,6 +479,34 @@ impl StrokeSession {
         &self.working
     }
 
+    /// The live painted pixels as a shared handle — what a preview hands
+    /// the layer stack without copying the image. The next `extend` then
+    /// copies once if the handle is still held (copy-on-write).
+    pub fn pixels_arc(&self) -> Arc<[u8]> {
+        Arc::clone(&self.working)
+    }
+
+    /// The region the last `extend` changed, clipped to the canvas.
+    pub fn last_dirty(&self) -> Option<Region> {
+        self.last_dirty
+    }
+
+    /// The `image_core::TILE`-grid tiles the last `extend` changed, as
+    /// `(column, row)` — what a host needs to resend instead of the
+    /// whole image.
+    pub fn dirty_tiles(&self) -> Vec<(u32, u32)> {
+        let Some(r) = self.last_dirty else {
+            return Vec::new();
+        };
+        let t = image_core::TILE;
+        let (x0, y0) = (r.x.max(0) as u32 / t, r.y.max(0) as u32 / t);
+        let x1 = (r.x.max(0) as u32 + r.w).saturating_sub(1) / t;
+        let y1 = (r.y.max(0) as u32 + r.h).saturating_sub(1) / t;
+        (y0..=y1)
+            .flat_map(|ty| (x0..=x1).map(move |tx| (tx, ty)))
+            .collect()
+    }
+
     /// Plan the dabs a new sample adds, WITHOUT stamping them. Split out
     /// so the spacing walk is testable on its own and so `extend` reads
     /// as "plan, stamp, composite".
@@ -522,6 +556,7 @@ impl StrokeSession {
             let flow = self.params.flow_at(d.pressure);
             self.accumulator.stamp(&tip, d.x, d.y, flow);
         }
+        self.last_dirty = None;
         let Some(dirty) = self.accumulator.take_dirty() else {
             return Ok(false);
         };
@@ -535,6 +570,7 @@ impl StrokeSession {
         let Some(region) = region.intersect(Region::new(0, 0, self.width, self.height)) else {
             return Ok(());
         };
+        self.last_dirty = Some(region);
         let (w, h) = (region.w, region.h);
         let base_window = self.window_rgba8(region);
         let base_f16 = rgba8_to_f16(&base_window);
@@ -705,6 +741,12 @@ impl StrokeSession {
     /// including in the rectangle's corners, which the dab's own falloff
     /// never reaches either.
     fn splice(&mut self, region: Region, window: &[u8]) {
+        if Arc::get_mut(&mut self.working).is_none() {
+            // Someone (a preview) still holds the last pixels: copy once.
+            crate::counters::whole_copy(self.working.len());
+            self.working = Arc::from(&self.working[..]);
+        }
+        let working = Arc::get_mut(&mut self.working).expect("unique after the copy");
         for y in 0..region.h {
             let iy = region.y as u32 + y;
             for x in 0..region.w {
@@ -720,7 +762,7 @@ impl StrokeSession {
                 }
                 let src = ((y * region.w + x) as usize) * 4;
                 let dst = ((iy * self.width + ix) as usize) * 4;
-                self.working[dst..dst + 4].copy_from_slice(&window[src..src + 4]);
+                working[dst..dst + 4].copy_from_slice(&window[src..src + 4]);
             }
         }
     }
@@ -729,7 +771,7 @@ impl StrokeSession {
     /// the ACTIVE LAYER — journaling the tiles [`Self::stroke_bounds`]
     /// covers — and re-composites the stack.
     pub fn commit(self) -> Vec<u8> {
-        self.working
+        self.working.to_vec()
     }
 
     /// True when the stroke deposited nothing (a click outside the

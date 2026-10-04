@@ -331,3 +331,74 @@ fn apply_with_six_stages__feat__image_editor_adjust_breadth() {
         .collect();
     check("Apply, 6 stages, 512²", &rows);
 }
+
+// ── brush (60 samples) ───────────────────────────────────────────────
+
+/// One stroke the way the `brush_stroke_extend` door runs it, sample
+/// by sample: extend the session, copy its pixels out, composite the
+/// stack with them standing in for the active layer, copy the preview
+/// out. Returns the number of samples that painted.
+fn brush_stroke(ctx: &GpuContext, s: &LayerStack, samples: usize) -> usize {
+    use image_js::stroke::{StrokeParams, StrokeSession, StrokeTool};
+    let mut params = StrokeParams::defaults(StrokeTool::Brush);
+    params.color = [0.9, 0.2, 0.1, 1.0];
+    let mut session = StrokeSession::begin_on(
+        1,
+        s.width(),
+        s.height(),
+        s.active().rgba.raw_arc(),
+        params,
+        None,
+    )
+    .expect("begin");
+    let mut painted = 0;
+    for i in 0..samples {
+        let sample =
+            image_gpu::StrokeSample::new(100.0 + i as f32 * 4.0, 200.0 + i as f32 * 2.0, 1.0);
+        if pollster::block_on(session.extend(ctx, sample)).expect("extend") {
+            painted += 1;
+        }
+        let px: Arc<[u8]> = Arc::from(session.pixels().to_vec().into_boxed_slice());
+        let preview = pollster::block_on(s.composite(Some(ctx), Some(&px))).expect("preview");
+        let _bytes = preview.to_vec();
+    }
+    painted
+}
+
+/// A 60-sample brush stroke on the top layer of a 3-layer 512² stack,
+/// previewed through the stack after every sample (the door's work).
+/// Measured 2026-10-04 on Metal with the resident fold, before the
+/// brush work: every painted sample re-uploaded the whole active plate
+/// and re-folded from the checkpoint at full size, and the stroke
+/// compositor submitted and read back every dispatch. Now the fold
+/// re-derives only the rectangle the sample changed (splicing it into
+/// the last result in place), the compositor runs as one batch, and a
+/// sample that painted nothing costs nothing.
+const BRUSH60: [(&str, u64); 6] = [
+    ("pipelines_built", 0),
+    ("dispatches", 308),        // was 356
+    ("submits", 88),            // was 236
+    ("textures_created", 6),    // was 572
+    ("readbacks", 88),          // was 236
+    ("bytes_uploaded", 848822), // was 127369120
+];
+
+#[test]
+fn a_sixty_sample_brush_stroke__feat__image_editor_paint() {
+    let Some(ctx) = device() else { return };
+    let s = stack(512, 512, 3);
+    pollster::block_on(s.composite(Some(ctx), None)).expect("warm-up");
+    brush_stroke(ctx, &s, 60);
+    counters::reset();
+    let (painted, e, g) = counters::measure(|| brush_stroke(ctx, &s, 60));
+    let mut rows = vec![
+        ("painted_samples", painted as u64, 44),
+        ("composites", e.composites, 60),
+        ("layers_folded", e.layers_folded, 44), // was 60
+        ("whole_image_copies", e.whole_image_copies, 0),
+    ];
+    for ((name, v), (_, b)) in gpu_rows(&g).into_iter().zip(BRUSH60) {
+        rows.push((name, v, b));
+    }
+    check("60-sample brush 512²", &rows);
+}
