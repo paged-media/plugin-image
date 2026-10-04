@@ -78,6 +78,8 @@ describe("imageBundle.activate", () => {
       "media.paged.image.command.rotate180",
       "media.paged.image.command.flipHorizontal",
       "media.paged.image.command.flipVertical",
+      // Commit the image's layers into the document.
+      "media.paged.image.command.commitImage",
       // Built long before anything reached them: smart objects, pattern
       // fill (with Define pattern), shape blur.
       "media.paged.image.command.convertLayerToSmart",

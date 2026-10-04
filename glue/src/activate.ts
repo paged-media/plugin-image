@@ -469,6 +469,14 @@ export function activate(host: BundleHost): BundleHandle {
     });
   }
   host.contribute.command({
+    id: "media.paged.image.command.commitImage",
+    title: "Commit image edits to the document",
+    category: "Image",
+    handler: () => {
+      void session.commitToDocument();
+    },
+  });
+  host.contribute.command({
     id: "media.paged.image.command.convertLayerToSmart",
     title: "Convert active layer to smart object",
     category: "Image",
@@ -806,6 +814,11 @@ export function activate(host: BundleHost): BundleHandle {
       },
       onExit: () => {
         host.log.debug("rasterImage context exited");
+        // Leaving the image hands its edits to the document.
+        if (session.state().uncommitted) void session.commitToDocument();
+      },
+      onCommit: () => {
+        if (session.state().uncommitted) void session.commitToDocument();
       },
       // HOST UNDO (ADR 012, the in-context tier). While the context is
       // active, Cmd+Z / Shift+Cmd+Z and Edit ▸ Undo/Redo step the image's

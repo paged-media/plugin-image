@@ -3185,6 +3185,65 @@ mod wasm {
         .await
     }
 
+    /// The open stack as bytes for storing in the document: element 0
+    /// is the manifest, the rest are the buffers it refers to by slot
+    /// (`LayerStack::export`). The history is not included.
+    #[wasm_bindgen]
+    pub fn layers_export() -> Result<js_sys::Array, JsValue> {
+        with_stack(|d| {
+            let (manifest, buffers) = d.stack.export();
+            let out = js_sys::Array::new();
+            out.push(&js_sys::Uint8Array::from(&manifest[..]));
+            for b in buffers {
+                out.push(&js_sys::Uint8Array::from(&b[..]));
+            }
+            Ok(out)
+        })
+    }
+
+    /// Replace the open stack with one stored by `layers_export`, then
+    /// composite it into the bound image (GPU-only unless the stored stack
+    /// is a single plain layer). The stored extent must equal the bound
+    /// image's; the history starts empty.
+    #[wasm_bindgen]
+    pub async fn layers_import(manifest: &[u8], buffers: js_sys::Array) -> Result<(), JsValue> {
+        let bufs: Vec<Arc<[u8]>> = buffers
+            .iter()
+            .map(|v| Arc::from(js_sys::Uint8Array::new(&v).to_vec().into_boxed_slice()))
+            .collect();
+        let stack = LayerStack::import(manifest, &bufs).map_err(ingest_err)?;
+        let ctx = GPU.with(|g| g.borrow().clone());
+        with_stack_async(|mut doc| async move {
+            let result = async {
+                if (stack.width(), stack.height()) != (doc.stack.width(), doc.stack.height()) {
+                    return Err(JsValue::from_str(&format!(
+                        "stored layers are {}×{}, the image is {}×{}",
+                        stack.width(),
+                        stack.height(),
+                        doc.stack.width(),
+                        doc.stack.height()
+                    )));
+                }
+                if ctx.is_none() && !stack.composite_is_trivial() {
+                    return Err(JsValue::from_str(
+                        "reopening a layered image is GPU-only (the composite is a \
+                         kernel dispatch) — call init_gpu first",
+                    ));
+                }
+                let rgba = stack
+                    .composite(ctx.as_deref(), None)
+                    .await
+                    .map_err(ingest_err)?;
+                set_image_pixels(doc.handle, rgba)?;
+                doc.stack = stack;
+                Ok(())
+            }
+            .await;
+            (doc, result)
+        })
+        .await
+    }
+
     /// CONVERT a pixel layer into a smart object, preserving its pixels
     /// as the source. One-way by design: going back would discard the
     /// source, which is the destructive move this exists to prevent.

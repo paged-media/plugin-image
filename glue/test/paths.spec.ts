@@ -74,14 +74,19 @@ async function ingested() {
   return { session, handle, fake };
 }
 
+/** The mutations this spec is about: everything but the ownership
+ *  marker ingest writes on the frame (setPluginMetadata). */
+const pathOps = (fake: { mutations: unknown[] }) =>
+  fake.mutations.filter((m) => (m as { op?: string }).op !== "setPluginMetadata");
+
 describe("selection → path (real engine wasm)", () => {
   it("inserts one polygon per contour, in DOCUMENT coordinates", async () => {
     const { session, handle, fake } = await ingested();
     session.selectAll();
     expect(await session.selectionToPath()).toBe(true);
 
-    expect(fake.mutations).toHaveLength(1);
-    const m = fake.mutations[0] as {
+    expect(pathOps(fake)).toHaveLength(1);
+    const m = pathOps(fake)[0] as {
       op: string;
       args: {
         pageId: string;
@@ -124,7 +129,7 @@ describe("selection → path (real engine wasm)", () => {
     session.selectAll();
     await session.selectionToPath();
     const args = (
-      fake.mutations[0] as {
+      pathOps(fake)[0] as {
         args: {
           anchors: Array<{
             anchor: [number, number];
@@ -146,7 +151,7 @@ describe("selection → path (real engine wasm)", () => {
     const { session, handle, fake } = await ingested();
     expect(await session.selectionToPath()).toBe(false);
     expect(session.state().status).toContain("Nothing selected");
-    expect(fake.mutations).toHaveLength(0);
+    expect(pathOps(fake)).toHaveLength(0);
     session.dispose();
     handle.dispose();
   });
@@ -160,7 +165,7 @@ describe("selection → path (real engine wasm)", () => {
     session.invertSelection();
     expect(await session.selectionToPath(128)).toBe(false);
     expect(session.state().status).toContain("128");
-    expect(fake.mutations).toHaveLength(0);
+    expect(pathOps(fake)).toHaveLength(0);
     session.dispose();
     handle.dispose();
   });

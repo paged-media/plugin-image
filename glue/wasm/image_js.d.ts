@@ -710,6 +710,13 @@ export function layers_composite(): Promise<Uint8Array>;
 export function layers_duplicate(index: number): number;
 
 /**
+ * The open stack as bytes for storing in the document: element 0
+ * is the manifest, the rest are the buffers it refers to by slot
+ * (`LayerStack::export`). The history is not included.
+ */
+export function layers_export(): Array<any>;
+
+/**
  * Toggle whether the attached mask applies, RETAINING it either way
  * — losing painted coverage to a toggle would be a real loss.
  * Clip a layer to the one beneath it — the mechanism "smart
@@ -728,6 +735,14 @@ export function layers_group(from: number, to: number, name: string): number;
  * discovered. `null` when no stack is open.
  */
 export function layers_history(): string;
+
+/**
+ * Replace the open stack with one stored by `layers_export`, then
+ * composite it into the bound image (GPU-only unless the stored stack
+ * is a single plain layer). The stored extent must equal the bound
+ * image's; the history starts empty.
+ */
+export function layers_import(manifest: Uint8Array, buffers: Array<any>): Promise<void>;
 
 /**
  * The stack as JSON, BOTTOM-first:
@@ -1219,8 +1234,10 @@ export interface InitOutput {
     readonly layers_close: () => void;
     readonly layers_composite: () => any;
     readonly layers_duplicate: (a: number) => [number, number, number];
+    readonly layers_export: () => [number, number, number];
     readonly layers_group: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly layers_history: () => [number, number];
+    readonly layers_import: (a: number, b: number, c: any) => any;
     readonly layers_list: () => [number, number];
     readonly layers_make_smart: (a: number) => [number, number];
     readonly layers_mask_from_selection: (a: number) => [number, number];

@@ -38,6 +38,12 @@ import type {
 import { latestWins } from "./coalesce";
 import { parseCube, toKernelCube } from "./cube";
 import {
+  readSession,
+  sha256Hex,
+  writeSession,
+  type CommittedMarker,
+} from "./session-store";
+import {
   averageRgba8,
   freshColors,
   swapped,
@@ -223,6 +229,12 @@ export interface ImageSessionState {
    *  they drive the preview/Apply chain. Selecting an adjustment layer
    *  this session created binds it; selecting any other layer unbinds. */
   editingAdjustment: { index: number; id: number } | null;
+  /** The last revision committed to the document for this frame (the
+   *  marker's `rev`), or null before the first commit. */
+  committedRev: number | null;
+  /** Pixel edits since ingest, reopen or the last commit — what a
+   *  commit would write. */
+  uncommitted: boolean;
   /** The SAVE-BACK bytes staged by `applyToFile` (null until asked
    *  for). The panel reports them; the Export Center delivers them —
    *  the host wires no save-FILE door (`shell.pickFile` reads, it does
@@ -472,6 +484,13 @@ export interface ImageSession {
    * Replaces the previous pattern. CPU only (a window copy).
    */
   definePattern(): boolean;
+  /**
+   * Write the image's layers into the document and put their composite
+   * in the frame, as ONE document undo step: the layer data is stored in
+   * the document's parts first, then the frame's image bytes and its
+   * marker change together. Reopening the frame restores the layers.
+   */
+  commitToDocument(): Promise<boolean>;
   /** NOISE ▸ Median (3×3). */
   applyMedian(): Promise<boolean>;
   /** OTHER ▸ Maximum ("max") / Minimum ("min"), 3×3. */
@@ -872,6 +891,8 @@ export function createImageSession(host: BundleHost): ImageSession {
     livePreview: true,
     wand: { tolerance: WAND_TOLERANCE_DEFAULT, contiguous: WAND_CONTIGUOUS_DEFAULT },
     editingAdjustment: null,
+    committedRev: null,
+    uncommitted: false,
     saveBack: null,
     brush: { ...DEFAULT_BRUSH_PARAMS, color: [...DEFAULT_BRUSH_PARAMS.color] },
     blendModes: [],
@@ -945,6 +966,51 @@ export function createImageSession(host: BundleHost): ImageSession {
     adjustmentParams.set(bound.id, structuredClone(state.params));
     void recomposite();
     return true;
+  };
+
+  /** The ingested frame's element id (the object form the metadata and
+   *  mutation doors need), or null for an import. */
+  let sourceRef: ElementId | null = null;
+
+  /** The largest PNG the bake sends: the image travels to the host as a
+   *  JSON number array today, and past this the transfer itself is the
+   *  problem. A binary transfer lifts it. */
+  const MAX_BAKED_BYTES = 8 * 1024 * 1024;
+
+  /** Reopen a committed frame: when the frame's image is EXACTLY what the
+   *  last commit baked, restore that commit's layers; otherwise the image
+   *  was changed outside this plugin and opens flat, saying so. */
+  const reopenFromDocument = async (ref: ElementId, placed: Uint8Array) => {
+    if (!engine) return;
+    type Marker = { v?: number; data?: Partial<CommittedMarker> } | null;
+    const marker = (await host.document.getMetadata(ref).catch(() => null)) as unknown as Marker;
+    if (marker?.v !== 2 || !marker.data?.record) return;
+    const data = marker.data as CommittedMarker;
+    if ((await sha256Hex(placed)) !== data.baked) {
+      state.layersNote =
+        "This frame's image was changed outside paged.image since its layers " +
+        "were stored, so it opens as one layer.";
+      return;
+    }
+    const stored = await readSession(host.parts, data.record);
+    if (!stored.ok) {
+      state.layersNote = `Stored layers could not be read (${stored.reason}); opened as one layer.`;
+      return;
+    }
+    try {
+      await engine.layersImport(stored.manifest, stored.buffers);
+    } catch (err) {
+      state.layersNote = `Stored layers could not be restored (${err instanceof Error ? err.message : err}); opened as one layer.`;
+      return;
+    }
+    state.committedRev = data.rev;
+    state.uncommitted = false;
+    refreshLayers();
+    refreshHistogram();
+    bumpTiles();
+    state.layersNote = `Reopened ${state.layers.layers.length} stored layer${
+      state.layers.layers.length === 1 ? "" : "s"
+    } (revision ${data.rev}).`;
   };
 
   /** The engine handle of the defined pattern (`definePattern`). */
@@ -1070,6 +1136,7 @@ export function createImageSession(host: BundleHost): ImageSession {
   const markPixelsEdited = () => {
     pixelEdits += 1;
     state.saveBack = null;
+    state.uncommitted = true;
   };
 
   /** Re-read the engine's layer stack + undo readout into state. */
@@ -1270,6 +1337,9 @@ export function createImageSession(host: BundleHost): ImageSession {
     sourceFormat = null;
     state.saveBack = null;
     pixelEdits = 0;
+    sourceRef = null;
+    state.committedRev = null;
+    state.uncommitted = false;
     freeProxy();
   };
 
@@ -1662,6 +1732,12 @@ export function createImageSession(host: BundleHost): ImageSession {
     if (!state.compositedFrame) return;
     const still = ids.some((id) => elementIdOf(id) === state.compositedFrame);
     if (!still) {
+      // Edits the document has not been given yet go into it first: a
+      // deselect must not be the moment work quietly stops existing.
+      if (state.uncommitted && sourceRef) {
+        void api.commitToDocument().then(() => clearLayer());
+        return;
+      }
       void clearLayer();
       setStatus("Frame deselected — in-frame preview cleared.");
     }
@@ -1738,6 +1814,11 @@ export function createImageSession(host: BundleHost): ImageSession {
           // host with no metadata door, or an engine that refuses the
           // write, leaves the image fully editable through the panel
           // exactly as before. It only ever costs the double-click.
+          sourceRef = ids[0] as ElementId;
+          // A frame committed by an earlier session: reopen its layers.
+          // Before the marker write, which must not replace a v2 marker
+          // (stampOwnership writes only where there is none).
+          await reopenFromDocument(sourceRef, asset.bytes);
           void stampOwnership(ids[0]);
         }
         return ok;
@@ -2259,6 +2340,83 @@ export function createImageSession(host: BundleHost): ImageSession {
       setStatus(`Sampled ${toHex(c)} at ${px}, ${py}${size > 1 ? ` (${size}×${size} average)` : ""}.`);
       emit();
       return c;
+    },
+
+    async commitToDocument() {
+      const src = state.source;
+      if (!src || !engine || !src.elementId || !sourceRef) {
+        setStatus("Commit needs an image ingested from a frame in the document.");
+        emit();
+        return false;
+      }
+      if (!host.supports("storage.parts@1")) {
+        setStatus(
+          "This host stores no plugin data in the document (storage.parts@1 " +
+            "is false) — the layers cannot be kept, so nothing was committed.",
+        );
+        emit();
+        return false;
+      }
+      state.busy = true;
+      setStatus("Committing the image to the document…");
+      emit();
+      try {
+        // The STACK's composite — what the layers show. Pending panel
+        // adjustments that were never applied are not part of it.
+        const rgba = engine.tile(src.handle, 0, 0, src.width, src.height);
+        const png = engine.encode(rgba, src.width, src.height, "png");
+        if (png.length > MAX_BAKED_BYTES) {
+          setStatus(
+            `The baked image is ${(png.length / 1048576).toFixed(1)} MB; the ` +
+              "host takes at most 8 MB per image until it accepts binary " +
+              "transfers. Nothing was committed.",
+          );
+          return false;
+        }
+        const baked = await sha256Hex(png);
+        const rev = (state.committedRev ?? 0) + 1;
+        const { path, written } = await writeSession(
+          host.parts,
+          src.elementId,
+          rev,
+          engine.layersExport(),
+          { width: src.width, height: src.height },
+          baked,
+        );
+        const marker: CommittedMarker = { owns: "pixels", rev, record: path, baked };
+        await host.document.mutate({
+          op: "batch",
+          args: {
+            ops: [
+              { op: "replaceImageBytes", args: { elementId: src.elementId, bytes: Array.from(png) } },
+              {
+                op: "setPluginMetadata",
+                args: {
+                  elementId: sourceRef,
+                  key: "x-paged:media.paged.image",
+                  value: JSON.stringify({ v: 2, data: marker }),
+                  caller: "media.paged.image",
+                },
+              },
+            ],
+          },
+        });
+        state.committedRev = rev;
+        state.uncommitted = false;
+        setStatus(
+          `Committed revision ${rev}: ${state.layers.layers.length} layer` +
+            `${state.layers.layers.length === 1 ? "" : "s"} stored in the document ` +
+            `(${written} new piece${written === 1 ? "" : "s"} of layer data), the ` +
+            "composite placed in the frame. Undo in the document reverts it.",
+        );
+        return true;
+      } catch (err) {
+        setStatus(`Commit failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      } finally {
+        state.busy = false;
+        emit();
+      }
     },
 
     definePattern() {

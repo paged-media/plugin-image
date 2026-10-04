@@ -1564,6 +1564,20 @@ export function layers_duplicate(index) {
 }
 
 /**
+ * The open stack as bytes for storing in the document: element 0
+ * is the manifest, the rest are the buffers it refers to by slot
+ * (`LayerStack::export`). The history is not included.
+ * @returns {Array<any>}
+ */
+export function layers_export() {
+    const ret = wasm.layers_export();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Toggle whether the attached mask applies, RETAINING it either way
  * — losing painted coverage to a toggle would be a real loss.
  * Clip a layer to the one beneath it — the mechanism "smart
@@ -1605,6 +1619,22 @@ export function layers_history() {
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
+}
+
+/**
+ * Replace the open stack with one stored by `layers_export`, then
+ * composite it into the bound image (GPU-only unless the stored stack
+ * is a single plain layer). The stored extent must equal the bound
+ * image's; the history starts empty.
+ * @param {Uint8Array} manifest
+ * @param {Array<any>} buffers
+ * @returns {Promise<void>}
+ */
+export function layers_import(manifest, buffers) {
+    const ptr0 = passArray8ToWasm0(manifest, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.layers_import(ptr0, len0, buffers);
+    return ret;
 }
 
 /**
@@ -2622,6 +2652,10 @@ function __wbg_get_imports() {
             const ret = Reflect.get(arg0, arg1);
             return ret;
         }, arguments); },
+        __wbg_get_unchecked_363572bdd397d473: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
         __wbg_gpu_a7c12045c25d009a: function(arg0) {
             const ret = arg0.gpu;
             return ret;
@@ -2648,6 +2682,10 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
         __wbg_length_31bdaf014f5fbde2: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
+        __wbg_length_4e1adc0d42e23620: function(arg0) {
             const ret = arg0.length;
             return ret;
         },
@@ -2785,6 +2823,10 @@ function __wbg_get_imports() {
         },
         __wbg_navigator_d25c0f071226f233: function(arg0) {
             const ret = arg0.navigator;
+            return ret;
+        },
+        __wbg_new_1da3429bc3c4541c: function(arg0) {
+            const ret = new Uint8Array(arg0);
             return ret;
         },
         __wbg_new_227d7c05414eb861: function() {
@@ -3190,12 +3232,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 760, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 766, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 776, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 782, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },

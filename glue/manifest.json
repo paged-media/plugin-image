@@ -73,6 +73,7 @@
       "media.paged.image.command.rotate180",
       "media.paged.image.command.flipHorizontal",
       "media.paged.image.command.flipVertical",
+      "media.paged.image.command.commitImage",
       "media.paged.image.command.convertLayerToSmart",
       "media.paged.image.command.definePattern",
       "media.paged.image.command.fillPattern",
@@ -107,6 +108,20 @@
       {
         "type": "rasterImage",
         "entry": "doubleClick"
+      }
+    ],
+    "partTypes": [
+      {
+        "type": "imageSession",
+        "role": "source",
+        "format": "json",
+        "linkable": false
+      },
+      {
+        "type": "imageLayerData",
+        "role": "source",
+        "format": "binary",
+        "linkable": false
       }
     ]
   }

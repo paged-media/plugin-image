@@ -65,6 +65,8 @@ const ENTRIES: [path: string, suffix: string, group: string][] = [
   ["Image/Set type", "setType", "type"],
   ["Image/Load brush library (.abr)…", "loadBrushLibrary", "brush"],
 
+  ["Image/Commit edits to the document", "commitImage", "commit"],
+
   ["Image/File/Apply adjustments to the file", "applyToFile", "file"],
   ["Image/File/Save the adjusted file", "saveToFile", "file"],
 

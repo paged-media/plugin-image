@@ -1159,6 +1159,10 @@ export interface ImageEngine {
   layersAddAdjustment(name: string, params: AdjustParams): number;
   /** Retune an adjustment layer in place (identity allowed). */
   layersSetAdjustment(index: number, params: AdjustParams): void;
+  /** The open stack as bytes: manifest first, then its buffers. */
+  layersExport(): Uint8Array[];
+  /** Replace the open stack with stored bytes and composite it. */
+  layersImport(manifest: Uint8Array, buffers: Uint8Array[]): Promise<void>;
   /** Apply a gradient map (luminance through a two-stop ramp) as a
    *  journaled, selection-masked pixel edit. */
   applyGradientMap(
@@ -1847,6 +1851,8 @@ export interface ImageWasmModule {
     invert: boolean,
     ext: Float32Array,
   ): Promise<Uint8Array>;
+  layers_export(): Uint8Array[];
+  layers_import(manifest: Uint8Array, buffers: Uint8Array[]): Promise<void>;
   layers_undo(): Promise<string>;
   layers_redo(): Promise<string>;
 }
@@ -2493,6 +2499,8 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.invert,
         packAdjustExt(p),
       ),
+    layersExport: () => Array.from(wasm.layers_export()),
+    layersImport: (manifest, buffers) => wasm.layers_import(manifest, buffers),
     layersSetAdjustment: (index, p) =>
       wasm.layers_set_adjustment(
         index,

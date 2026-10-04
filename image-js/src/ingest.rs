@@ -410,6 +410,109 @@ impl AdjustParams {
         Ok(())
     }
 
+    /// The EXTENDED block, the exact inverse of [`apply_extended`].
+    ///
+    /// [`apply_extended`]: Self::apply_extended
+    pub fn extended(&self) -> [f32; ADJUST_EXT_LEN] {
+        let mut e = [0f32; ADJUST_EXT_LEN];
+        let b = |v: bool| if v { 1.0 } else { 0.0 };
+        e[0] = self.vibrance;
+        e[1..4].copy_from_slice(&self.color_balance.shadows);
+        e[4..7].copy_from_slice(&self.color_balance.midtones);
+        e[7..10].copy_from_slice(&self.color_balance.highlights);
+        e[10] = b(self.black_white.enabled);
+        e[11..17].copy_from_slice(&self.black_white.weights);
+        e[17] = b(self.posterize.is_some());
+        e[18] = self.posterize.unwrap_or(0.0);
+        e[19] = b(self.threshold.is_some());
+        e[20] = self.threshold.unwrap_or(0.0);
+        e[21] = self.photo_filter.density;
+        e[22..25].copy_from_slice(&self.photo_filter.color);
+        e[25] = b(self.photo_filter.preserve_luminosity);
+        e[26..30].copy_from_slice(&self.channel_mixer.r);
+        e[30..34].copy_from_slice(&self.channel_mixer.g);
+        e[34..38].copy_from_slice(&self.channel_mixer.b);
+        e[38..41].copy_from_slice(&self.levels_rgb.r);
+        e[41..44].copy_from_slice(&self.levels_rgb.g);
+        e[44..47].copy_from_slice(&self.levels_rgb.b);
+        e
+    }
+
+    /// Every field as one flat f32 block (scalars, levels, the optional
+    /// curve as 256 values, then [`extended`]) — what an adjustment
+    /// layer is persisted as. [`from_wire`] reads it back exactly.
+    ///
+    /// [`extended`]: Self::extended
+    /// [`from_wire`]: Self::from_wire
+    pub fn to_wire(&self) -> Vec<f32> {
+        let b = |v: bool| if v { 1.0 } else { 0.0 };
+        let mut w = vec![
+            self.exposure_ev,
+            self.brightness,
+            self.contrast,
+            self.saturation,
+            self.temp,
+            self.tint,
+            self.levels.in_black,
+            self.levels.in_white,
+            self.levels.gamma,
+            self.levels.out_black,
+            self.levels.out_white,
+            self.blur_sigma,
+            self.sharpen_amount,
+            self.hue_degrees,
+            b(self.invert),
+            b(self.curve_lut.is_some()),
+        ];
+        w.extend(
+            self.curve_lut
+                .map_or([0u8; 256], |l| l)
+                .iter()
+                .map(|&v| f32::from(v)),
+        );
+        w.extend_from_slice(&self.extended());
+        w
+    }
+
+    /// The inverse of [`to_wire`](Self::to_wire).
+    pub fn from_wire(w: &[f32]) -> Result<Self, IngestError> {
+        const HEAD: usize = 16;
+        if w.len() != HEAD + 256 + ADJUST_EXT_LEN {
+            return Err(IngestError::Decode(format!(
+                "adjustment block: {} values, expected {}",
+                w.len(),
+                HEAD + 256 + ADJUST_EXT_LEN
+            )));
+        }
+        let mut lut = [0u8; 256];
+        for (d, s) in lut.iter_mut().zip(&w[HEAD..HEAD + 256]) {
+            *d = s.clamp(0.0, 255.0) as u8;
+        }
+        let mut p = AdjustParams {
+            exposure_ev: w[0],
+            brightness: w[1],
+            contrast: w[2],
+            saturation: w[3],
+            temp: w[4],
+            tint: w[5],
+            levels: LevelsParams {
+                in_black: w[6],
+                in_white: w[7],
+                gamma: w[8],
+                out_black: w[9],
+                out_white: w[10],
+            },
+            blur_sigma: w[11],
+            sharpen_amount: w[12],
+            hue_degrees: w[13],
+            invert: w[14] != 0.0,
+            curve_lut: (w[15] != 0.0).then_some(lut),
+            ..AdjustParams::default()
+        };
+        p.apply_extended(&w[HEAD + 256..])?;
+        Ok(p)
+    }
+
     /// Do any GPU adjust stages run (everything except the CPU curve LUT)?
     /// The curve LUT is a separate CPU pass that does NOT need the GPU.
     fn has_gpu_stage(&self) -> bool {

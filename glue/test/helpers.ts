@@ -159,6 +159,27 @@ export function makeFakeEditor() {
   const pathAnchors = new Map<string, unknown>();
   /** Every mutation the bundle sent, in order. */
   const mutations: unknown[] = [];
+  /** The document's parts (full paths, `paged/<plugin>/…`). */
+  const parts = new Map<string, Uint8Array>();
+  /** Plugin metadata per element id: key → JSON string. */
+  const metadata = new Map<string, Map<string, string>>();
+  /** Apply the mutations this fake models: a frame's image bytes and
+   *  plugin metadata (a batch applies its children in order). */
+  const applyMutation = (m: { op?: string; args?: Record<string, unknown> }) => {
+    if (m.op === "batch") {
+      for (const c of (m.args?.ops as unknown[]) ?? []) applyMutation(c as typeof m);
+    } else if (m.op === "replaceImageBytes") {
+      placed.set(m.args!.elementId as string, Uint8Array.from(m.args!.bytes as number[]));
+    } else if (m.op === "setPluginMetadata") {
+      const id = (m.args!.elementId as { id: string }).id;
+      const k = m.args!.key as string;
+      const v = m.args!.value as string | null;
+      const row = metadata.get(id) ?? new Map<string, string>();
+      if (v === null) row.delete(k);
+      else row.set(k, v);
+      metadata.set(id, row);
+    }
+  };
   const editor = {
     registries: { panels, commands, importers, exporters, tools },
     overlaySignals,
@@ -173,6 +194,7 @@ export function makeFakeEditor() {
     client: {
       mutate: async (m: unknown) => {
         mutations.push(m);
+        applyMutation(m as { op?: string });
         return { kind: "mutationApplied", payload: {} };
       },
       pathAnchors: async (id: { id?: string }) =>
@@ -215,6 +237,42 @@ export function makeFakeEditor() {
                 },
           };
         }
+        const p = msg.payload as {
+          path?: string;
+          bytes?: number[];
+          prefix?: string;
+          id?: { id: string };
+        };
+        if (msg.kind === "writePagedPart") {
+          parts.set(p.path!, Uint8Array.from(p.bytes!));
+          return { kind: "pagedPartWritten", payload: { path: p.path } };
+        }
+        if (msg.kind === "readPagedPart") {
+          const b = parts.get(p.path!);
+          return {
+            kind: "pagedPartRead",
+            payload: { path: p.path, found: !!b, bytes: b ? Array.from(b) : [] },
+          };
+        }
+        if (msg.kind === "listPagedParts") {
+          return {
+            kind: "pagedPartList",
+            payload: { paths: [...parts.keys()].filter((k) => k.startsWith(p.prefix ?? "")) },
+          };
+        }
+        if (msg.kind === "requestElementProperties") {
+          const row = metadata.get(p.id?.id ?? "") ?? new Map<string, string>();
+          return {
+            kind: "elementProperties",
+            payload: {
+              result: {
+                entries: [...row].map(([key, value]) => ({
+                  value: { type: "pluginMetadata", value: { key, value } },
+                })),
+              },
+            },
+          };
+        }
         throw new Error(`fake editor: unhandled ${msg.kind}`);
       },
     },
@@ -237,6 +295,8 @@ export function makeFakeEditor() {
     await new Promise((r) => setTimeout(r, 0));
   };
   return {
+    parts,
+    metadata,
     editor: editor as unknown as PagedEditor,
     panels,
     commands,

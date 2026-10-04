@@ -131,6 +131,10 @@ use image_gpu::selection::SelectionMask;
 use image_gpu::stroke::window_is_opaque;
 use image_gpu::{GpuContext, TileInput};
 use image_graph::journal::{FlatImage, RecordOutcome, TileJournal};
+
+// The stack as bytes (persistence); a child module so it reads the fields.
+#[path = "layers_persist.rs"]
+mod persist;
 use image_kernels::families::cast::{
     CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
 };
