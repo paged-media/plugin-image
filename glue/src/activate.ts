@@ -42,6 +42,8 @@ import { makeImagePanel } from "./panels/image-panel";
 import { makeCropGesture } from "./crop-tool";
 import { makeMoveGesture } from "./move-tool";
 import { makeBucketGesture } from "./bucket-tool";
+import { makeGradientGesture } from "./gradient-tool";
+import { makeRedEyeGesture } from "./red-eye-tool";
 import { makeSelectionGesture } from "./selection-tool";
 import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 import { makeTypeGesture } from "./type-tool";
@@ -52,6 +54,8 @@ const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
 const MOVE_TOOL_ID = "media.paged.image.tool.move";
 const BUCKET_TOOL_ID = "media.paged.image.tool.bucket";
+const GRADIENT_TOOL_ID = "media.paged.image.tool.gradient";
+const RED_EYE_TOOL_ID = "media.paged.image.tool.redEye";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -175,6 +179,27 @@ export function activate(host: BundleHost): BundleHandle {
     group: BRUSH_TOOL_ID,
     section: "drawType",
     gesture: () => makeBucketGesture(host, session),
+  });
+
+  // GRADIENT — drag to set the line; foreground → background. Shares the
+  // brush slot with the bucket (Photoshop pairs them).
+  contributeTool(host, {
+    id: GRADIENT_TOOL_ID,
+    title: "Gradient",
+    icon: "tool-gradient",
+    group: BRUSH_TOOL_ID,
+    section: "drawType",
+    gesture: () => makeGradientGesture(host, session),
+  });
+
+  // RED EYE — drag a box around the eye; shares the healing brush's slot.
+  contributeTool(host, {
+    id: RED_EYE_TOOL_ID,
+    title: "Red eye",
+    icon: "tool-heal",
+    group: HEAL_TOOL_ID,
+    section: "drawType",
+    gesture: () => makeRedEyeGesture(host, session),
   });
 
   // The crop commit command (also surfaced as the panel's "Apply crop"
@@ -802,6 +827,8 @@ export function activate(host: BundleHost): BundleHandle {
         CROP_TOOL_ID,
         MOVE_TOOL_ID,
         BUCKET_TOOL_ID,
+        GRADIENT_TOOL_ID,
+        RED_EYE_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host

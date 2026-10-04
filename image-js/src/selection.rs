@@ -238,6 +238,39 @@ impl SessionSelection {
     }
 }
 
+/// The red-eye mask: the ellipse `(cx, cy, rx, ry)` times each pixel's
+/// REDNESS — how far red exceeds the larger of green and blue, relative
+/// to red, as a soft 0–1 ramp — so inside the ellipse only the red pupil
+/// is selected and
+/// the iris, eyelid and skin stay out.
+pub fn red_eye_coverage(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    (cx, cy, rx, ry): (f32, f32, f32, f32),
+) -> SelectionCoverage {
+    let ellipse = SelectionCoverage::rasterize_ellipse(width, height, cx, cy, rx, ry);
+    let data = ellipse
+        .data()
+        .iter()
+        .enumerate()
+        .map(|(i, &e)| {
+            let px = &rgba[i * 4..i * 4 + 4];
+            let (r, g, b) = (f32::from(px[0]), f32::from(px[1]), f32::from(px[2]));
+            // RELATIVE excess: skin (230, 170, 140) scores 0.26, a red
+            // pupil (220, 30, 30) 0.86. Near-black pixels are never red.
+            let redness = if r < 40.0 {
+                0.0
+            } else {
+                (((r - g.max(b)) / r - 0.4) / 0.3).clamp(0.0, 1.0)
+            };
+            (f32::from(e) * redness).round() as u8
+        })
+        .collect();
+    SelectionCoverage::from_data(width, height, data)
+        .unwrap_or_else(|| SelectionCoverage::empty(width, height))
+}
+
 /// Select ▸ Modify operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModifyOp {
@@ -371,6 +404,35 @@ mod tests {
         assert_eq!(selected(&modify_coverage(&speck, ModifyOp::Smooth, 4.0)), 0);
         assert_eq!(ModifyOp::from_wire("border"), Some(ModifyOp::Border));
         assert_eq!(ModifyOp::from_wire("grow"), None);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn red_eye_selects_only_red_pixels_inside_the_ellipse__feat__image_editor_healing_brush() {
+        // 8×1: red, red, skin, white, red(outside), …
+        let mut rgba = Vec::new();
+        for (x, c) in [
+            [220u8, 30, 30],
+            [200, 40, 40],
+            [230, 170, 140],
+            [250, 250, 250],
+            [220, 30, 30],
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let _ = x;
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+        let cov = red_eye_coverage(&rgba, 8, 1, (2.0, 0.5, 2.0, 2.0));
+        assert!(cov.coverage_at(0, 0) > 200, "a red pupil pixel inside");
+        assert!(cov.coverage_at(1, 0) > 200);
+        assert_eq!(cov.coverage_at(2, 0), 0, "skin is not red enough");
+        assert_eq!(cov.coverage_at(3, 0), 0, "white is not red");
+        assert_eq!(cov.coverage_at(4, 0), 0, "red OUTSIDE the ellipse stays");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 // offers a colour-picker widget to plugins; Alt-click with a paint tool
 // samples the image into the foreground.
 
-import type { Rgba01 } from "../../engine";
+import { GRADIENT_KINDS, type GradientKind, type Rgba01 } from "../../engine";
 import { fromHex, toHex, type ColorPair } from "../../color-state";
 import type { ImageSession } from "../../session";
 import { mono, note, row, sectionTitle } from "./styles";
@@ -20,9 +20,12 @@ const swatch = (c: Rgba01) => ({
 export function ColorSection({
   session,
   colors,
+  gradientKind,
 }: {
   session: ImageSession;
   colors: ColorPair;
+  /** The gradient tool's shape. */
+  gradientKind: GradientKind;
 }) {
   const pick = (which: "fg" | "bg") => (hex: string) => {
     const c = fromHex(hex);
@@ -67,6 +70,21 @@ export function ColorSection({
         <button type="button" data-image-fill-fg onClick={() => void session.fillForeground()}>
           Fill
         </button>
+      </div>
+      <div style={row}>
+        <label htmlFor="pg-image-gradient-kind">Gradient tool</label>
+        <select
+          id="pg-image-gradient-kind"
+          data-image-gradient-kind
+          value={gradientKind}
+          onChange={(e) => session.setGradientKind(e.target.value as GradientKind)}
+        >
+          {GRADIENT_KINDS.map((k) => (
+            <option key={k} value={k}>
+              {k}
+            </option>
+          ))}
+        </select>
       </div>
       <div style={note}>
         The brush and pencil paint the foreground. Alt-click with either takes

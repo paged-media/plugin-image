@@ -107,6 +107,8 @@ describe("imageBundle.activate", () => {
       // The paint bucket (registered with the move tool; it shares the
       // brush's rail slot).
       "media.paged.image.tool.bucket",
+      "media.paged.image.tool.gradient",
+      "media.paged.image.tool.redEye",
       "media.paged.image.tool.marqueeRect",
       "media.paged.image.tool.marqueeEllipse",
       "media.paged.image.tool.lasso",

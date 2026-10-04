@@ -227,6 +227,8 @@ export interface ImageSessionState {
   livePreview: boolean;
   /** Magic wand + paint bucket tolerance / contiguity. */
   wand: WandOptions;
+  /** The gradient tool's shape. */
+  gradientKind: GradientKind;
   /** The adjustment layer the panel's sliders are bound to, or null when
    *  they drive the preview/Apply chain. Selecting an adjustment layer
    *  this session created binds it; selecting any other layer unbinds. */
@@ -493,12 +495,19 @@ export interface ImageSession {
    * marker change together. Reopening the frame restores the layers.
    */
   commitToDocument(): Promise<boolean>;
+  /** RED-EYE removal inside the ellipse that fits the box `(x, y, w, h)`
+   *  (image px); `darken` 0–1 (default 0.5). */
+  applyRedEye(box: { x: number; y: number; w: number; h: number }, darken?: number): Promise<boolean>;
   /** NOISE ▸ Median (3×3). */
   applyMedian(): Promise<boolean>;
   /** OTHER ▸ Maximum ("max") / Minimum ("min"), 3×3. */
   applyMorph(kind: "max" | "min"): Promise<boolean>;
   /** ADJUST ▸ Color Lookup from a .cube file's text. */
   applyColorLookup(cubeText: string, name?: string): Promise<boolean>;
+  /** The GRADIENT TOOL: foreground → background along the dragged line
+   *  (image px), in `state().gradientKind`. */
+  fillGradientLine(from: [number, number], to: [number, number]): Promise<boolean>;
+  setGradientKind(kind: GradientKind): void;
   /** Edit ▸ Fill with the foreground colour (the selection, or everything). */
   fillForeground(): Promise<boolean>;
   /** The paint bucket at image px `at`, in the foreground colour, using
@@ -895,6 +904,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     livePreview: true,
     wand: { tolerance: WAND_TOLERANCE_DEFAULT, contiguous: WAND_CONTIGUOUS_DEFAULT },
     editingAdjustment: null,
+    gradientKind: "linear",
     committedRev: null,
     uncommitted: false,
     saveBack: null,
@@ -1889,6 +1899,13 @@ export function createImageSession(host: BundleHost): ImageSession {
       emit();
     },
 
+    async applyRedEye(box, darken = 0.5) {
+      if (box.w < 1 || box.h < 1) return false;
+      return api.applyEffect("Red eye", (h) =>
+        engine!.applyRedEye(h, box.x + box.w / 2, box.y + box.h / 2, box.w / 2, box.h / 2, darken),
+      );
+    },
+
     async applyMedian() {
       return api.applyEffect("Median", (h) => engine!.applyMedian(h));
     },
@@ -1909,6 +1926,19 @@ export function createImageSession(host: BundleHost): ImageSession {
         return false;
       }
       return api.applyEffect(name, (h) => engine!.applyLut3d(h, cube));
+    },
+
+    async fillGradientLine(from, to) {
+      const { fg, bg } = state.colors;
+      const kind = state.gradientKind;
+      return api.applyEffect("Gradient", (h) =>
+        engine!.fillGradientLine(h, kind, fg, bg, from, to),
+      );
+    },
+
+    setGradientKind(kind) {
+      state.gradientKind = kind;
+      emit();
     },
 
     async fillForeground() {

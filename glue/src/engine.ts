@@ -1260,6 +1260,15 @@ export interface ImageEngine {
   ): Promise<DecodedInfo>;
   /** PIXELATE — mosaic. `cellPx <= 1` is the identity. */
   applyMosaic(handle: number, cellPx: number): Promise<DecodedInfo>;
+  /** RED-EYE removal in an ellipse (image px); `darken` 0–1. */
+  applyRedEye(
+    handle: number,
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    darken: number,
+  ): Promise<DecodedInfo>;
   /** NOISE — Median, 3×3 (the kernel's fixed comparator network). */
   applyMedian(handle: number): Promise<DecodedInfo>;
   /** OTHER — Maximum ("max") or Minimum ("min"), 3×3. */
@@ -1267,6 +1276,15 @@ export interface ImageEngine {
   /** ADJUST — Color Lookup through a 9×9×9 cube (729 rgb triples, red
    *  fastest; `cube.ts` resamples a .cube file to this edge). */
   applyLut3d(handle: number, cube: Float32Array): Promise<DecodedInfo>;
+  /** The GRADIENT TOOL: a two-stop gradient along a dragged line (image px). */
+  fillGradientLine(
+    handle: number,
+    kind: GradientKind,
+    c0: Rgba01,
+    c1: Rgba01,
+    from: [number, number],
+    to: [number, number],
+  ): Promise<DecodedInfo>;
   /** FILL the selection (whole image when none) with one straight-RGBA colour. */
   fillSolid(handle: number, color: Rgba01): Promise<DecodedInfo>;
   /** PAINT BUCKET: flood from image px (x, y) within `tolerance`
@@ -1778,9 +1796,27 @@ export interface ImageWasmModule {
   ): Promise<DecodedHandleWasm>;
   apply_mosaic(handle: number, cell_px: number): Promise<DecodedHandleWasm>;
   apply_median(handle: number): Promise<DecodedHandleWasm>;
+  apply_red_eye(
+    handle: number,
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    darken: number,
+  ): Promise<DecodedHandleWasm>;
   apply_morph(handle: number, kind: string): Promise<DecodedHandleWasm>;
   apply_lut3d(handle: number, cube: Float32Array): Promise<DecodedHandleWasm>;
   fill_solid(handle: number, color: Float32Array): Promise<DecodedHandleWasm>;
+  fill_gradient_line(
+    handle: number,
+    kind: string,
+    c0: Float32Array,
+    c1: Float32Array,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+  ): Promise<DecodedHandleWasm>;
   bucket_fill(
     handle: number,
     x: number,
@@ -2363,6 +2399,9 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         await wasm.apply_radial_blur(handle, cx, cy, amount, spin),
       );
     },
+    async applyRedEye(handle, cx, cy, rx, ry, darken) {
+      return decodedInfoOf(await wasm.apply_red_eye(handle, cx, cy, rx, ry, darken));
+    },
     async applyMedian(handle) {
       return decodedInfoOf(await wasm.apply_median(handle));
     },
@@ -2371,6 +2410,20 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     },
     async applyLut3d(handle, cube) {
       return decodedInfoOf(await wasm.apply_lut3d(handle, cube));
+    },
+    async fillGradientLine(handle, kind, c0, c1, from, to) {
+      return decodedInfoOf(
+        await wasm.fill_gradient_line(
+          handle,
+          kind,
+          Float32Array.from(c0),
+          Float32Array.from(c1),
+          from[0],
+          from[1],
+          to[0],
+          to[1],
+        ),
+      );
     },
     async fillSolid(handle, color) {
       return decodedInfoOf(await wasm.fill_solid(handle, Float32Array.from(color)));

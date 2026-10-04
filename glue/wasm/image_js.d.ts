@@ -251,6 +251,15 @@ export function apply_offset(handle: number, dx: number, dy: number, edge: numbe
 export function apply_radial_blur(handle: number, cx: number, cy: number, amount: number, spin: boolean): Promise<DecodedHandle>;
 
 /**
+ * RED-EYE removal inside the ellipse `(cx, cy, rx, ry)` (image px):
+ * only RED pixels change — the mask is the ellipse times each
+ * pixel's redness — and they become the average of their green and
+ * blue, darkened by `darken` (0–1). The channel mixer does the
+ * colour work under that mask; no new kernel.
+ */
+export function apply_red_eye(handle: number, cx: number, cy: number, rx: number, ry: number, darken: number): Promise<DecodedHandle>;
+
+/**
  * NOISE — reduce noise (bilateral). `amount` 0 is the identity, and
  * so is a `sigma_range` small enough that only the centre tap
  * carries weight.
@@ -502,6 +511,13 @@ export function fill_content_aware(handle: number): Promise<DecodedHandle>;
  * engine-held image's handle.
  */
 export function fill_gradient(handle: number, kind: string, c0: Float32Array, c1: Float32Array): Promise<DecodedHandle>;
+
+/**
+ * The GRADIENT TOOL: fill the selection (the whole image when none)
+ * with a two-stop gradient along the dragged line `(x0, y0)` →
+ * `(x1, y1)` in image pixels (`FillSpec::GradientLine`).
+ */
+export function fill_gradient_line(handle: number, kind: string, c0: Float32Array, c1: Float32Array, x0: number, y0: number, x1: number, y1: number): Promise<DecodedHandle>;
 
 /**
  * FILL the current selection (the whole image when none) with
@@ -1195,6 +1211,7 @@ export interface InitOutput {
     readonly apply_move_selection: (a: number, b: number, c: number, d: number) => any;
     readonly apply_offset: (a: number, b: number, c: number, d: number) => any;
     readonly apply_radial_blur: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly apply_red_eye: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly apply_reduce_noise: (a: number, b: number, c: number, d: number) => any;
     readonly apply_selective_color: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly apply_shape_blur: (a: number, b: number, c: number, d: number) => any;
@@ -1220,6 +1237,7 @@ export interface InitOutput {
     readonly engine_source_hash: () => [number, number];
     readonly fill_content_aware: (a: number) => any;
     readonly fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+    readonly fill_gradient_line: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => any;
     readonly fill_noise: (a: number, b: number, c: number) => any;
     readonly fill_pattern: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly fill_solid: (a: number, b: number, c: number) => any;

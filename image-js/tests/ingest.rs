@@ -742,3 +742,41 @@ fn image_editor_crop_straighten_small_angle_keeps_a_flat_field_flat() {
         );
     }
 }
+
+// feat: image.editor.filters — the GRADIENT TOOL's dragged line sets the
+// ramp's direction and extent (FillSpec::GradientLine).
+#[test]
+fn image_editor_gradient_tool_follows_the_dragged_line() {
+    use image_js::fill::{FillSpec, GradientKind};
+    let Some(ctx) = device() else { return };
+    let (w, h) = (32u32, 4u32);
+    let img = image_js::ingest::DecodedImage::from_rgba8(w, h, vec![128; (w * h * 4) as usize])
+        .expect("img");
+    let run = |from: (f32, f32), to: (f32, f32)| {
+        let spec = FillSpec::GradientLine {
+            kind: GradientKind::Linear,
+            c0: [0.0, 0.0, 0.0, 1.0],
+            c1: [1.0, 1.0, 1.0, 1.0],
+            from,
+            to,
+        };
+        pollster::block_on(image_js::fill::fill_rgba8(ctx, &img, &spec, None)).expect("fill")
+    };
+    let red = |px: &[u8], x: u32| px[((h / 2 * w + x) * 4) as usize];
+    let ltr = run((0.0, 2.0), (32.0, 2.0));
+    assert!(
+        red(&ltr, 0) < 16 && red(&ltr, 31) > 239,
+        "dark → light, left to right"
+    );
+    let rtl = run((32.0, 2.0), (0.0, 2.0));
+    assert!(
+        red(&rtl, 0) > 239 && red(&rtl, 31) < 16,
+        "reversed drag, reversed ramp"
+    );
+    // A short drag in the middle: flat beyond its ends.
+    let mid = run((12.0, 2.0), (20.0, 2.0));
+    assert!(
+        red(&mid, 2) < 8 && red(&mid, 29) > 247,
+        "clamped outside the drag"
+    );
+}

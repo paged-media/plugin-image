@@ -627,6 +627,25 @@ export function apply_radial_blur(handle, cx, cy, amount, spin) {
 }
 
 /**
+ * RED-EYE removal inside the ellipse `(cx, cy, rx, ry)` (image px):
+ * only RED pixels change — the mask is the ellipse times each
+ * pixel's redness — and they become the average of their green and
+ * blue, darkened by `darken` (0–1). The channel mixer does the
+ * colour work under that mask; no new kernel.
+ * @param {number} handle
+ * @param {number} cx
+ * @param {number} cy
+ * @param {number} rx
+ * @param {number} ry
+ * @param {number} darken
+ * @returns {Promise<DecodedHandle>}
+ */
+export function apply_red_eye(handle, cx, cy, rx, ry, darken) {
+    const ret = wasm.apply_red_eye(handle, cx, cy, rx, ry, darken);
+    return ret;
+}
+
+/**
  * NOISE — reduce noise (bilateral). `amount` 0 is the identity, and
  * so is a `sigma_range` small enough that only the centre tap
  * carries weight.
@@ -1137,6 +1156,31 @@ export function fill_gradient(handle, kind, c0, c1) {
     const ptr2 = passArrayF32ToWasm0(c1, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.fill_gradient(handle, ptr0, len0, ptr1, len1, ptr2, len2);
+    return ret;
+}
+
+/**
+ * The GRADIENT TOOL: fill the selection (the whole image when none)
+ * with a two-stop gradient along the dragged line `(x0, y0)` →
+ * `(x1, y1)` in image pixels (`FillSpec::GradientLine`).
+ * @param {number} handle
+ * @param {string} kind
+ * @param {Float32Array} c0
+ * @param {Float32Array} c1
+ * @param {number} x0
+ * @param {number} y0
+ * @param {number} x1
+ * @param {number} y1
+ * @returns {Promise<DecodedHandle>}
+ */
+export function fill_gradient_line(handle, kind, c0, c1, x0, y0, x1, y1) {
+    const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(c0, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayF32ToWasm0(c1, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.fill_gradient_line(handle, ptr0, len0, ptr1, len1, ptr2, len2, x0, y0, x1, y1);
     return ret;
 }
 
@@ -3260,12 +3304,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 764, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 778, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 780, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 794, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },

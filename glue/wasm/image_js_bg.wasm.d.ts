@@ -43,6 +43,7 @@ export const apply_motion_blur: (a: number, b: number, c: number) => any;
 export const apply_move_selection: (a: number, b: number, c: number, d: number) => any;
 export const apply_offset: (a: number, b: number, c: number, d: number) => any;
 export const apply_radial_blur: (a: number, b: number, c: number, d: number, e: number) => any;
+export const apply_red_eye: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const apply_reduce_noise: (a: number, b: number, c: number, d: number) => any;
 export const apply_selective_color: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const apply_shape_blur: (a: number, b: number, c: number, d: number) => any;
@@ -68,6 +69,7 @@ export const encode_image_opt: (a: number, b: number, c: number, d: number, e: n
 export const engine_source_hash: () => [number, number];
 export const fill_content_aware: (a: number) => any;
 export const fill_gradient: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+export const fill_gradient_line: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => any;
 export const fill_noise: (a: number, b: number, c: number) => any;
 export const fill_pattern: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const fill_solid: (a: number, b: number, c: number) => any;

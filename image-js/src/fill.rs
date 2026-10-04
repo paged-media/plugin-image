@@ -178,6 +178,17 @@ pub enum FillSpec {
     /// two-stop gradient with identical stops would produce the same
     /// pixels and read as a bug.
     Solid { color: [f32; 4] },
+    /// A two-stop gradient along a DRAGGED line (the gradient tool):
+    /// linear and reflected run from `from` to `to`; radial, angular and
+    /// diamond are centred on `from`, with `to` giving the radius and
+    /// (angular, diamond) the rotation.
+    GradientLine {
+        kind: GradientKind,
+        c0: [f32; 4],
+        c1: [f32; 4],
+        from: (f32, f32),
+        to: (f32, f32),
+    },
 }
 
 /// The pixel-space frame the gradient geometry is derived from: the
@@ -363,6 +374,42 @@ pub async fn fill_rgba8(
                 GradientKind::Diamond => {
                     let p =
                         GenDiamondGradientParams::new(0, 0, cx, cy, 0.0, geom.half_extent(), a, b);
+                    dispatch_unary(ctx, &GEN_DIAMOND_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                }
+            }
+        }
+        FillSpec::GradientLine {
+            kind,
+            c0,
+            c1,
+            from,
+            to,
+        } => {
+            let (a, b) = (premul(c0), premul(c1));
+            let (fx, fy) = from;
+            let (tx, ty) = to;
+            let radius = ((tx - fx).powi(2) + (ty - fy).powi(2)).sqrt().max(1.0);
+            let angle = (ty - fy).atan2(tx - fx);
+            match kind {
+                GradientKind::Linear => {
+                    let p = GenLinearGradientParams::new(0, 0, fx, fy, tx, ty, a, b);
+                    dispatch_unary(ctx, &GEN_LINEAR_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                }
+                GradientKind::Radial => {
+                    let p = GenRadialGradientParams::new(0, 0, fx, fy, radius, a, b);
+                    dispatch_unary(ctx, &GEN_RADIAL_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                }
+                GradientKind::Angular => {
+                    let p = GenAngularGradientParams::new(0, 0, fx, fy, angle, a, b);
+                    dispatch_unary(ctx, &GEN_ANGULAR_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
+                }
+                GradientKind::Reflected => {
+                    let p = GenReflectedGradientParams::new(0, 0, fx, fy, tx, ty, a, b);
+                    dispatch_unary(ctx, &GEN_REFLECTED_GRADIENT, p.as_bytes(), &src_f16, w, h)
+                        .await?
+                }
+                GradientKind::Diamond => {
+                    let p = GenDiamondGradientParams::new(0, 0, fx, fy, angle, radius, a, b);
                     dispatch_unary(ctx, &GEN_DIAMOND_GRADIENT, p.as_bytes(), &src_f16, w, h).await?
                 }
             }

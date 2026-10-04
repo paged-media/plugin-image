@@ -2804,7 +2804,7 @@ export function makeImagePanel(session: ImageSession) {
           onRedo={() => void session.redo()}
         />
 
-        <ColorSection session={session} colors={s.colors} />
+        <ColorSection session={session} colors={s.colors} gradientKind={s.gradientKind} />
 
         {/* BRUSH — the paint tools' frozen-at-pointer-down parameters
             (paged.image's RASTER brush/pencil/eraser, distinct from

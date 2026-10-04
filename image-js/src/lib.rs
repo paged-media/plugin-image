@@ -1548,6 +1548,45 @@ mod wasm {
         land_fill(img.width, img.height, out, layered).await
     }
 
+    /// The GRADIENT TOOL: fill the selection (the whole image when none)
+    /// with a two-stop gradient along the dragged line `(x0, y0)` →
+    /// `(x1, y1)` in image pixels (`FillSpec::GradientLine`).
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fill_gradient_line(
+        handle: u32,
+        kind: String,
+        c0: Vec<f32>,
+        c1: Vec<f32>,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        let kind = GradientKind::from_wire(&kind).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown gradient kind \"{kind}\" (linear | radial | angular | reflected | diamond)"
+            ))
+        })?;
+        if c0.len() != 4 || c1.len() != 4 {
+            return Err(JsValue::from_str(
+                "gradient stops must be 4 floats each (straight RGBA in [0,1])",
+            ));
+        }
+        let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        let spec = FillSpec::GradientLine {
+            kind,
+            c0: [c0[0], c0[1], c0[2], c0[3]],
+            c1: [c1[0], c1[1], c1[2], c1[3]],
+            from: (x0, y0),
+            to: (x1, y1),
+        };
+        let out = fill_rgba8(&ctx, &img, &spec, sel)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        land_fill(img.width, img.height, out, layered).await
+    }
+
     /// FILL the current selection (the whole image when none) with
     /// deterministic monochrome noise — `amount` scales the hash
     /// amplitude, `seed` makes a repeat reproducible. Returns the NEW
@@ -1950,6 +1989,45 @@ mod wasm {
             *e = [cube[i * 3], cube[i * 3 + 1], cube[i * 3 + 2], 0.0];
         }
         apply_point_kernel(handle, &ADJUST_LUT3D, p.as_bytes()).await
+    }
+
+    /// RED-EYE removal inside the ellipse `(cx, cy, rx, ry)` (image px):
+    /// only RED pixels change — the mask is the ellipse times each
+    /// pixel's redness — and they become the average of their green and
+    /// blue, darkened by `darken` (0–1). The channel mixer does the
+    /// colour work under that mask; no new kernel.
+    #[wasm_bindgen]
+    pub async fn apply_red_eye(
+        handle: u32,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        darken: f32,
+    ) -> Result<DecodedHandle, JsValue> {
+        use image_kernels::families::adjust::{AdjustChannelMixerParams, ADJUST_CHANNEL_MIXER};
+        let img = IMAGES
+            .with(|m| m.borrow().get(&handle).cloned())
+            .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {handle}")))?;
+        let cov = crate::selection::red_eye_coverage(
+            &img.rgba.to_rgba8(),
+            img.width,
+            img.height,
+            (cx, cy, rx, ry),
+        );
+        let k = 1.0 - darken.clamp(0.0, 1.0);
+        let params = AdjustChannelMixerParams::new(
+            [0.0, 0.5 * k, 0.5 * k, 0.0],
+            [0.0, k, 0.0, 0.0],
+            [0.0, 0.0, k, 0.0],
+        );
+        apply_point_kernel_masked(
+            handle,
+            &ADJUST_CHANNEL_MIXER,
+            params.as_bytes(),
+            Some(Arc::new(cov)),
+        )
+        .await
     }
 
     /// ADJUST — selective colour. `range` 0..8; all-zero deltas are the
@@ -2486,8 +2564,21 @@ mod wasm {
         def: &'static image_kernels::KernelDef,
         params: &[u8],
     ) -> Result<DecodedHandle, JsValue> {
+        apply_point_kernel_masked(handle, def, params, None).await
+    }
+
+    /// [`apply_point_kernel`] under a mask of the caller's own instead of
+    /// the session selection (a tool that makes its own coverage, such as
+    /// red-eye removal).
+    async fn apply_point_kernel_masked(
+        handle: u32,
+        def: &'static image_kernels::KernelDef,
+        params: &[u8],
+        mask_override: Option<Arc<SelectionCoverage>>,
+    ) -> Result<DecodedHandle, JsValue> {
         use half::f16;
         let (img, ctx, sel, layered) = fill_prelude(handle)?;
+        let sel = mask_override.or(sel);
         let mask = sel.as_ref().map(|cov| {
             image_gpu::selection::SelectionMask::from_fn(img.width, img.height, |x, y| {
                 f32::from(cov.coverage_at(x, y)) / 255.0
