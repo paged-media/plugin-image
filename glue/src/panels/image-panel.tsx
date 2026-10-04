@@ -61,6 +61,7 @@ import type { AspectPreset } from "../crop-machine";
 
 import { CanvasSection, type CanvasSize } from "./sections/canvas-section";
 import { HueSatSection } from "./sections/hue-sat-section";
+import { ToneSection } from "./sections/tone-section";
 import { ColorSection } from "./sections/color-section";
 import { RankLookupSection } from "./sections/rank-lookup-section";
 import { SelectModifySection } from "./sections/select-modify-section";
@@ -2868,6 +2869,13 @@ export function makeImagePanel(session: ImageSession) {
           gpu={s.gpu}
           disabled={disabled}
           onChange={(patch) => session.setBrushParams(patch)}
+        />
+
+        {/* TONING — the dodge / burn / sponge options. */}
+        <ToneSection
+          tone={s.tone}
+          disabled={disabled}
+          onChange={(patch) => session.setTone(patch)}
         />
 
         {/* RASTER TYPE — the string, face and size the type tool paints

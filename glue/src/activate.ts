@@ -58,6 +58,9 @@ const MOVE_TOOL_ID = "media.paged.image.tool.move";
 const BUCKET_TOOL_ID = "media.paged.image.tool.bucket";
 const GRADIENT_TOOL_ID = "media.paged.image.tool.gradient";
 const RED_EYE_TOOL_ID = "media.paged.image.tool.redEye";
+const DODGE_TOOL_ID = "media.paged.image.tool.dodge";
+const BURN_TOOL_ID = "media.paged.image.tool.burn";
+const SPONGE_TOOL_ID = "media.paged.image.tool.sponge";
 const MARQUEE_RECT_TOOL_ID = "media.paged.image.tool.marqueeRect";
 const MARQUEE_ELLIPSE_TOOL_ID = "media.paged.image.tool.marqueeEllipse";
 const LASSO_TOOL_ID = "media.paged.image.tool.lasso";
@@ -418,6 +421,28 @@ export function activate(host: BundleHost): BundleHandle {
     cursor: PAINT_CURSOR,
     gesture: () => makeBrushGesture(host, session, "heal"),
   });
+
+  // ── TONING: dodge / burn / sponge ──
+  //
+  // FILTER STROKES: the same gesture, tip, spacing, pressure and
+  // selection masking as the brush, but the dabs deposit no paint — their
+  // coverage masks `adjust.dodge_burn` on the layer. They share the clone
+  // stamp's rail slot (the retouching slot) and take no shortcut.
+  for (const [id, title, tool] of [
+    [DODGE_TOOL_ID, "Dodge", "dodge"],
+    [BURN_TOOL_ID, "Burn", "burn"],
+    [SPONGE_TOOL_ID, "Sponge", "sponge"],
+  ] as const) {
+    contributeTool(host, {
+      id,
+      title,
+      icon: "tool-clone",
+      group: CLONE_TOOL_ID,
+      section: "drawType",
+      cursor: PAINT_CURSOR,
+      gesture: () => makeBrushGesture(host, session, tool),
+    });
+  }
 
   // GENERATE — the `gen.*` family's editor reach. Fills the CURRENT
   // SELECTION (the whole image when there is none) with a fixed
@@ -894,6 +919,9 @@ export function activate(host: BundleHost): BundleHandle {
         BUCKET_TOOL_ID,
         GRADIENT_TOOL_ID,
         RED_EYE_TOOL_ID,
+        DODGE_TOOL_ID,
+        BURN_TOOL_ID,
+        SPONGE_TOOL_ID,
       ],
       // The context's OWN panel. Deliberately NOT the host panels it
       // serves (Layers, Character) — naming those here would put host

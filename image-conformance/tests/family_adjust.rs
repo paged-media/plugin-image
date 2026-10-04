@@ -50,15 +50,16 @@ use image_conformance::harness::{assert_within, parity, RefTile};
 use image_conformance::Px;
 use image_kernels::families::adjust::{
     adjust_invert_rgb, AdjustBlackWhiteParams, AdjustBrightnessContrastParams,
-    AdjustChannelMixerParams, AdjustColorBalanceParams, AdjustExposureParams,
-    AdjustGradientMapParams, AdjustHueRotateParams, AdjustHueSaturationParams,
-    AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams, AdjustLut1dParams,
-    AdjustLut3dParams, AdjustPhotoFilterParams, AdjustPosterizeParams, AdjustSaturationParams,
-    AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE,
-    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE,
-    ADJUST_GRADIENT_MAP, ADJUST_HUE_ROTATE, ADJUST_HUE_SATURATION, ADJUST_INVERT_RGB,
-    ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_LUT1D, ADJUST_LUT3D, ADJUST_PHOTO_FILTER,
-    ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE, ADJUST_WHITE_BALANCE,
+    AdjustChannelMixerParams, AdjustColorBalanceParams, AdjustDodgeBurnParams,
+    AdjustExposureParams, AdjustGradientMapParams, AdjustHueRotateParams,
+    AdjustHueSaturationParams, AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams,
+    AdjustLut1dParams, AdjustLut3dParams, AdjustPhotoFilterParams, AdjustPosterizeParams,
+    AdjustSaturationParams, AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams,
+    ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE,
+    ADJUST_DODGE_BURN, ADJUST_EXPOSURE, ADJUST_GRADIENT_MAP, ADJUST_HUE_ROTATE,
+    ADJUST_HUE_SATURATION, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_LUT1D,
+    ADJUST_LUT3D, ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD,
+    ADJUST_VIBRANCE, ADJUST_WHITE_BALANCE,
 };
 
 /// `unpremul_rgb` — the module preamble helper (a==0 → 0).
@@ -376,6 +377,88 @@ fn hue_saturation_ref(a: Px, _b: Px, p: &AdjustHueSaturationParams) -> Px {
     Px([o[0] * al, o[1] * al, o[2] * al, al])
 }
 
+/// Mirrors `DODGE_BURN_WGSL` term for term: Rec. 601 luma, the three
+/// Bernstein range weights, dodge c + k(1 − c), burn c(1 − k), and the
+/// sponge's linear saturation about the luma.
+fn dodge_burn_ref(a: Px, _b: Px, p: &AdjustDodgeBurnParams) -> Px {
+    let al = a.0[3];
+    let u = unpremul(a);
+    let c = [
+        u[0].clamp(0.0, 1.0),
+        u[1].clamp(0.0, 1.0),
+        u[2].clamp(0.0, 1.0),
+    ];
+    let y = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    let mut o = c;
+    if p.mode >= 2 {
+        let f = if p.mode == 2 {
+            1.0 + p.amount
+        } else {
+            1.0 - p.amount
+        };
+        for i in 0..3 {
+            o[i] = (y + (c[i] - y) * f).clamp(0.0, 1.0);
+        }
+    } else {
+        let w = match p.range {
+            0 => (1.0 - y) * (1.0 - y),
+            1 => 4.0 * y * (1.0 - y),
+            _ => y * y,
+        };
+        let k = p.amount * w;
+        for i in 0..3 {
+            o[i] = if p.mode == 0 {
+                c[i] + (1.0 - c[i]) * k
+            } else {
+                c[i] * (1.0 - k)
+            };
+        }
+    }
+    Px([o[0] * al, o[1] * al, o[2] * al, al])
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn dodge_burn_reference_is_the_identity_at_zero_and_moves_the_right_way__feat__image_editor_dodge_burn(
+) {
+    let px = Px([0.3, 0.5, 0.2, 1.0]);
+    for mode in 0..4 {
+        for range in 0..3 {
+            let p = AdjustDodgeBurnParams::new(mode, range, 0.0);
+            let o = dodge_burn_ref(px, px, &p);
+            for i in 0..4 {
+                assert!((o.0[i] - px.0[i]).abs() < 1e-6, "amount 0 is the identity");
+            }
+        }
+    }
+    let lum = |p: Px| 0.299 * p.0[0] + 0.587 * p.0[1] + 0.114 * p.0[2];
+    let dodge = dodge_burn_ref(px, px, &AdjustDodgeBurnParams::new(0, 1, 0.5));
+    let burn = dodge_burn_ref(px, px, &AdjustDodgeBurnParams::new(1, 1, 0.5));
+    assert!(lum(dodge) > lum(px) && lum(burn) < lum(px));
+    // The range decides WHERE: a dark pixel moves most under "shadows",
+    // a light one under "highlights".
+    let dark = Px([0.1, 0.1, 0.1, 1.0]);
+    let light = Px([0.9, 0.9, 0.9, 1.0]);
+    let lift = |p: Px, range| {
+        lum(dodge_burn_ref(
+            p,
+            p,
+            &AdjustDodgeBurnParams::new(0, range, 0.5),
+        )) - lum(p)
+    };
+    assert!(lift(dark, 0) > lift(dark, 2));
+    assert!(lift(light, 2) > lift(light, 0));
+    // The sponge moves chroma, not luma.
+    let sat = dodge_burn_ref(px, px, &AdjustDodgeBurnParams::new(2, 0, 0.5));
+    let desat = dodge_burn_ref(px, px, &AdjustDodgeBurnParams::new(3, 0, 1.0));
+    assert!((sat.0[1] - sat.0[2]) > (px.0[1] - px.0[2]));
+    assert!(
+        (desat.0[0] - desat.0[1]).abs() < 1e-6,
+        "full desaturation is grey"
+    );
+    assert!((lum(desat) - lum(px)).abs() < 1e-5);
+}
+
 fn hue_sat_master_and_ranges() -> AdjustHueSaturationParams {
     let mut p = AdjustHueSaturationParams::identity();
     p.master = [20.0, 0.2, -0.1, 0.0];
@@ -541,6 +624,7 @@ macro_rules! parity_test {
     };
     ($name:ident, $def:expr, $ref:expr, $params:expr, $tile:ident) => {
         #[test]
+        #[allow(non_snake_case)]
         fn $name() {
             let t = $tile(TILE, TILE);
             match parity(&$def, $ref, &[&t], &$params) {
@@ -619,6 +703,36 @@ parity_test!(
     ADJUST_HUE_SATURATION,
     hue_saturation_ref,
     hue_sat_colorize()
+);
+parity_test!(
+    dodge_shadows_parity__feat__image_editor_dodge_burn,
+    ADJUST_DODGE_BURN,
+    dodge_burn_ref,
+    AdjustDodgeBurnParams::new(0, 0, 0.7)
+);
+parity_test!(
+    dodge_midtones_parity__feat__image_editor_dodge_burn,
+    ADJUST_DODGE_BURN,
+    dodge_burn_ref,
+    AdjustDodgeBurnParams::new(0, 1, 0.5)
+);
+parity_test!(
+    burn_highlights_parity__feat__image_editor_dodge_burn,
+    ADJUST_DODGE_BURN,
+    dodge_burn_ref,
+    AdjustDodgeBurnParams::new(1, 2, 0.6)
+);
+parity_test!(
+    sponge_saturate_parity__feat__image_editor_dodge_burn,
+    ADJUST_DODGE_BURN,
+    dodge_burn_ref,
+    AdjustDodgeBurnParams::new(2, 0, 0.8)
+);
+parity_test!(
+    sponge_desaturate_parity__feat__image_editor_dodge_burn,
+    ADJUST_DODGE_BURN,
+    dodge_burn_ref,
+    AdjustDodgeBurnParams::new(3, 0, 0.5)
 );
 parity_test!(
     color_balance_parity,

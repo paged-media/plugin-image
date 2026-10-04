@@ -579,7 +579,14 @@ export type StrokeTool =
   /** A clone whose source is TONE-MATCHED to its destination, by a
    *  gradient-domain (membrane) solve over the dab's boundary — so it
    *  follows a ramp rather than shifting the patch by one number. */
-  | "heal";
+  | "heal"
+  /** FILTER STROKES: no paint — the dabs' coverage masks a kernel's
+   *  effect (`adjust.dodge_burn`). Dodge lightens and burn darkens the
+   *  chosen tonal range by the exposure; the sponge (de)saturates at the
+   *  brush's flow. */
+  | "dodge"
+  | "burn"
+  | "sponge";
 
 export const STROKE_TOOLS: StrokeTool[] = [
   "brush",
@@ -587,7 +594,33 @@ export const STROKE_TOOLS: StrokeTool[] = [
   "eraser",
   "clone",
   "heal",
+  "dodge",
+  "burn",
+  "sponge",
 ];
+
+/** The filter strokes that take tone options (`brush_stroke_set_tone`). */
+export const TONE_TOOLS: readonly StrokeTool[] = ["dodge", "burn", "sponge"];
+
+/** The tonal range dodge and burn act on. */
+export type ToneRange = "shadows" | "midtones" | "highlights";
+export const TONE_RANGES: readonly ToneRange[] = ["shadows", "midtones", "highlights"];
+
+/** The dodge / burn / sponge options, frozen into each stroke. */
+export interface ToneOptions {
+  range: ToneRange;
+  /** Dodge / burn strength, 0..1 ("Exposure"). */
+  exposure: number;
+  /** Sponge direction: saturate (true) or desaturate. */
+  saturate: boolean;
+}
+
+/** Midtones at 50%, the sponge desaturating — the engine's defaults. */
+export const DEFAULT_TONE: ToneOptions = {
+  range: "midtones",
+  exposure: 0.5,
+  saturate: false,
+};
 
 /** The tools that read their paint from the image rather than from a
  *  colour, and therefore need a source anchor before they deposit
@@ -1161,6 +1194,9 @@ export interface ImageEngine {
    *  THROWS for a non-sampling tool rather than no-op'ing, so a caller
    *  cannot believe the brush is cloning when it is not. */
   brushSetSource(x: number, y: number, aligned: boolean): void;
+  /** Set the in-flight dodge / burn / sponge stroke's options (between
+   *  `brushBegin` and the first extend). THROWS for any other tool. */
+  brushSetTone(tone: ToneOptions): void;
   brushExtend(x: number, y: number, pressure: number): Promise<Uint8Array>;
   /** CLOSE the stroke. With a layer stack bound the painted pixels go
    *  into the ACTIVE LAYER (journaled — undoable), the stack is
@@ -1714,6 +1750,7 @@ export interface ImageWasmModule {
     pressure: number,
   ): Promise<Uint8Array>;
   brush_stroke_set_source(x: number, y: number, aligned: boolean): void;
+  brush_stroke_set_tone(range: string, exposure: number, saturate: boolean): void;
   brush_stroke_commit(): Promise<DecodedHandleWasm>;
   brush_stroke_cancel(): void;
   brush_stroke_active(): boolean;
@@ -2321,6 +2358,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
       ),
     brushSetSource: (x, y, aligned) =>
       wasm.brush_stroke_set_source(x, y, aligned),
+    brushSetTone: (t) => wasm.brush_stroke_set_tone(t.range, t.exposure, t.saturate),
     brushExtend: (x, y, pressure) => wasm.brush_stroke_extend(x, y, pressure),
     async brushCommit() {
       const h = await wasm.brush_stroke_commit();

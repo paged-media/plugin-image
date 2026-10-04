@@ -395,6 +395,16 @@ export function brush_stroke_extend(x: number, y: number, pressure: number): Pro
 export function brush_stroke_set_source(x: number, y: number, aligned: boolean): void;
 
 /**
+ * Set the IN-FLIGHT dodge / burn / sponge stroke's options:
+ * `range` ∈ `shadows | midtones | highlights` and `exposure` 0–1 for
+ * dodge and burn; `saturate` picks the sponge's direction (false =
+ * desaturate). Call between `brush_stroke_begin` and the first
+ * extend — the options are frozen with the stroke. An error for any
+ * other tool, so a caller cannot believe a brush is dodging.
+ */
+export function brush_stroke_set_tone(range: string, exposure: number, saturate: boolean): void;
+
+/**
  * The in-flight stroke's readout for the panel:
  * `[dabs, x, y, w, h]` — the dab count and the stroke's bounding
  * box in image px. Empty when no stroke is in progress or nothing
@@ -1249,6 +1259,7 @@ export interface InitOutput {
     readonly brush_stroke_dirty_rect: () => [number, number];
     readonly brush_stroke_extend: (a: number, b: number, c: number) => any;
     readonly brush_stroke_set_source: (a: number, b: number, c: number) => [number, number];
+    readonly brush_stroke_set_tone: (a: number, b: number, c: number, d: number) => [number, number];
     readonly brush_stroke_stats: () => [number, number];
     readonly bucket_fill: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly crop_apply_drag: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number];

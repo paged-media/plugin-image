@@ -107,6 +107,14 @@ pub enum StrokeTool {
     /// the follow-up, and pretending it is already here would be the one
     /// unrecoverable mistake.
     Heal,
+    /// DODGE: a FILTER STROKE that lightens the chosen tonal range by the
+    /// EXPOSURE (`adjust.dodge_burn` mode 0) wherever the dabs land.
+    Dodge,
+    /// BURN: the darkening twin (`adjust.dodge_burn` mode 1).
+    Burn,
+    /// SPONGE: saturates or desaturates under the dabs (modes 2 / 3);
+    /// the brush's FLOW is its strength.
+    Sponge,
 }
 
 impl StrokeTool {
@@ -118,6 +126,9 @@ impl StrokeTool {
             "eraser" => StrokeTool::Eraser,
             "clone" => StrokeTool::Clone,
             "heal" => StrokeTool::Heal,
+            "dodge" => StrokeTool::Dodge,
+            "burn" => StrokeTool::Burn,
+            "sponge" => StrokeTool::Sponge,
             _ => return None,
         })
     }
@@ -129,7 +140,19 @@ impl StrokeTool {
             StrokeTool::Eraser => "eraser",
             StrokeTool::Clone => "clone",
             StrokeTool::Heal => "heal",
+            StrokeTool::Dodge => "dodge",
+            StrokeTool::Burn => "burn",
+            StrokeTool::Sponge => "sponge",
         }
+    }
+
+    /// Is this a FILTER STROKE — one that deposits no paint and instead
+    /// masks a kernel's effect by its coverage?
+    pub fn filters(self) -> bool {
+        matches!(
+            self,
+            StrokeTool::Dodge | StrokeTool::Burn | StrokeTool::Sponge
+        )
     }
 
     /// Does this tool paint from a SAMPLED window rather than a colour?
@@ -312,7 +335,87 @@ impl StrokeParams {
                 color: self.color,
             }),
             StrokeTool::Clone | StrokeTool::Heal => None,
+            StrokeTool::Dodge | StrokeTool::Burn | StrokeTool::Sponge => None,
         }
+    }
+}
+
+/// The dodge / burn / sponge options (Photoshop's options bar). Frozen at
+/// the stroke's first sample like every other stroke parameter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneOptions {
+    /// Which tonal range dodge and burn act on.
+    pub range: ToneRange,
+    /// Dodge / burn strength, `0..1` (Photoshop's "Exposure").
+    pub exposure: f32,
+    /// Sponge mode: saturate (`true`) or desaturate.
+    pub saturate: bool,
+}
+
+impl Default for ToneOptions {
+    /// Midtones at 50% exposure; the sponge desaturates — the tools'
+    /// customary defaults.
+    fn default() -> Self {
+        ToneOptions {
+            range: ToneRange::Midtones,
+            exposure: 0.5,
+            saturate: false,
+        }
+    }
+}
+
+/// The tonal range dodge and burn weight their effect by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneRange {
+    Shadows,
+    Midtones,
+    Highlights,
+}
+
+impl ToneRange {
+    pub fn from_wire(s: &str) -> Option<ToneRange> {
+        Some(match s {
+            "shadows" => ToneRange::Shadows,
+            "midtones" => ToneRange::Midtones,
+            "highlights" => ToneRange::Highlights,
+            _ => return None,
+        })
+    }
+
+    fn code(self) -> u32 {
+        match self {
+            ToneRange::Shadows => 0,
+            ToneRange::Midtones => 1,
+            ToneRange::Highlights => 2,
+        }
+    }
+}
+
+impl ToneOptions {
+    /// The `adjust.dodge_burn` parameter block for `tool`, or `None` for a
+    /// tool that is not one of the three.
+    pub fn kernel_params(
+        &self,
+        tool: StrokeTool,
+    ) -> Option<image_kernels::families::adjust::AdjustDodgeBurnParams> {
+        use image_kernels::families::adjust::AdjustDodgeBurnParams as P;
+        let exposure = self.exposure.clamp(0.0, 1.0);
+        Some(match tool {
+            StrokeTool::Dodge => P::new(P::DODGE, self.range.code(), exposure),
+            StrokeTool::Burn => P::new(P::BURN, self.range.code(), exposure),
+            // The sponge's strength is the brush FLOW (the dabs' deposit),
+            // so the kernel runs at full strength under full coverage.
+            StrokeTool::Sponge => P::new(
+                if self.saturate {
+                    P::SPONGE_SATURATE
+                } else {
+                    P::SPONGE_DESATURATE
+                },
+                0,
+                1.0,
+            ),
+            _ => return None,
+        })
     }
 }
 
@@ -396,6 +499,8 @@ pub struct StrokeSession {
     /// aligned clone track the brush rigidly; recomputing per dab would
     /// let the offset drift with the cursor and smear the copy.
     clone_offset: Option<(f32, f32)>,
+    /// The dodge / burn / sponge options.
+    tone: ToneOptions,
 }
 
 impl StrokeSession {
@@ -460,6 +565,7 @@ impl StrokeSession {
             walk: image_gpu::StrokeWalk::new(),
             clone_source: None,
             clone_offset: None,
+            tone: ToneOptions::default(),
         })
     }
 
@@ -489,6 +595,16 @@ impl StrokeSession {
 
     pub fn clone_source(&self) -> Option<CloneSource> {
         self.clone_source
+    }
+
+    /// Set the dodge / burn / sponge options. Call before the first
+    /// sample: a stroke whose exposure changed halfway would not replay.
+    pub fn set_tone(&mut self, tone: ToneOptions) {
+        self.tone = tone;
+    }
+
+    pub fn tone(&self) -> ToneOptions {
+        self.tone
     }
 
     pub fn dab_count(&self) -> u64 {
@@ -599,6 +715,9 @@ impl StrokeSession {
             return Ok(());
         };
         self.last_dirty = Some(region);
+        if self.params.tool.filters() {
+            return self.composite_filter(ctx, region).await;
+        }
         let (w, h) = (region.w, region.h);
         let base_window = self.window_rgba8(region);
         let base_f16 = rgba8_to_f16(&base_window);
@@ -648,6 +767,53 @@ impl StrokeSession {
             .map_err(|e| IngestError::Pipeline(e.to_string()))?;
         let out = f16_to_rgba8(&out_f16);
         self.splice(region, &out);
+        Ok(())
+    }
+
+    /// A FILTER STROKE's composite: the tool's kernel over the base window,
+    /// masked by the coverage, spliced back into `region`.
+    ///
+    /// A windowed kernel needs real neighbours, so the window is EXPANDED
+    /// by the mode's halo (clipped to the canvas) and the result cropped
+    /// back to `region`; the coverage outside `region` is zero anyway, so
+    /// the halo only feeds the kernel and never lands.
+    async fn composite_filter(
+        &mut self,
+        ctx: &GpuContext,
+        region: Region,
+    ) -> Result<(), IngestError> {
+        let params = self.tone.kernel_params(self.params.tool);
+        let mode = match &params {
+            Some(p) => PaintMode::Filter {
+                kernel: &image_kernels::families::adjust::ADJUST_DODGE_BURN,
+                params: p.as_bytes(),
+            },
+            None => return Ok(()),
+        };
+        let halo = mode.halo() as i32;
+        let big = Region::new(
+            region.x - halo,
+            region.y - halo,
+            region.w + 2 * halo as u32,
+            region.h + 2 * halo as u32,
+        )
+        .intersect(Region::new(0, 0, self.width, self.height))
+        .unwrap_or(region);
+        let base_f16 = rgba8_to_f16(&self.window_rgba8(big));
+        let mask =
+            self.accumulator
+                .mask_window_f16(big, self.params.opacity, self.selection.as_deref());
+        let out_f16 = composite_stroke_window(ctx, &mode, &base_f16, &mask, big.w, big.h)
+            .await
+            .map_err(|e| IngestError::Pipeline(e.to_string()))?;
+        let out = f16_to_rgba8(&out_f16);
+        let mut cropped = Vec::with_capacity((region.w as usize) * (region.h as usize) * 4);
+        for y in 0..region.h as i32 {
+            let row = (region.y - big.y + y) as usize;
+            let start = (row * big.w as usize + (region.x - big.x) as usize) * 4;
+            cropped.extend_from_slice(&out[start..start + region.w as usize * 4]);
+        }
+        self.splice(region, &cropped);
         Ok(())
     }
 
@@ -832,6 +998,9 @@ mod tests {
             StrokeTool::Eraser,
             StrokeTool::Clone,
             StrokeTool::Heal,
+            StrokeTool::Dodge,
+            StrokeTool::Burn,
+            StrokeTool::Sponge,
         ] {
             assert_eq!(StrokeTool::from_wire(t.as_wire()), Some(t));
         }
@@ -1671,5 +1840,156 @@ mod tests {
             at(r),
             want(r)
         );
+    }
+
+    // ── dodge / burn / sponge: filter strokes ────────────────────────
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_tone_options_build_the_kernel_block_per_tool__feat__image_editor_dodge_burn() {
+        use image_kernels::families::adjust::AdjustDodgeBurnParams as P;
+        let t = ToneOptions {
+            range: ToneRange::Highlights,
+            exposure: 1.7,
+            saturate: true,
+        };
+        assert_eq!(t.kernel_params(StrokeTool::Dodge), Some(P::new(0, 2, 1.0)));
+        assert_eq!(t.kernel_params(StrokeTool::Burn), Some(P::new(1, 2, 1.0)));
+        assert_eq!(t.kernel_params(StrokeTool::Sponge), Some(P::new(2, 0, 1.0)));
+        let d = ToneOptions::default();
+        assert_eq!(d.kernel_params(StrokeTool::Sponge), Some(P::new(3, 0, 1.0)));
+        assert_eq!(d.kernel_params(StrokeTool::Dodge), Some(P::new(0, 1, 0.5)));
+        assert_eq!(d.kernel_params(StrokeTool::Brush), None);
+        assert!(StrokeTool::Dodge.filters() && !StrokeTool::Heal.filters());
+        assert!(params(StrokeTool::Burn).solid_paint_mode().is_none());
+        assert_eq!(ToneRange::from_wire("shadows"), Some(ToneRange::Shadows));
+        assert_eq!(ToneRange::from_wire("darks"), None);
+    }
+
+    /// Run a filter stroke across the middle of `image`.
+    fn filter_stroke(
+        ctx: &GpuContext,
+        image: &DecodedImage,
+        tool: StrokeTool,
+        tone: ToneOptions,
+        selection: Option<Arc<SelectionCoverage>>,
+    ) -> Vec<u8> {
+        let mut p = params(tool);
+        p.size = 10.0;
+        p.hardness = 1.0;
+        let mut s = StrokeSession::begin(1, image, p, selection).expect("begin");
+        s.set_tone(tone);
+        for x in [10.0f32, 20.0, 30.0, 40.0, 50.0] {
+            pollster::block_on(s.extend(ctx, StrokeSample::new(x, 16.0, 1.0))).expect("extend");
+        }
+        s.commit()
+    }
+
+    fn luma_at(px: &[u8], w: u32, x: u32, y: u32) -> f32 {
+        let i = ((y * w + x) * 4) as usize;
+        0.299 * px[i] as f32 + 0.587 * px[i + 1] as f32 + 0.114 * px[i + 2] as f32
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn dodge_lightens_and_burn_darkens_only_under_the_stroke__feat__image_editor_dodge_burn() {
+        let Some(ctx) = device() else { return };
+        let image = ramp(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let tone = ToneOptions::default();
+        let dodged = filter_stroke(ctx, &image, StrokeTool::Dodge, tone, None);
+        let burned = filter_stroke(ctx, &image, StrokeTool::Burn, tone, None);
+        assert!(luma_at(&dodged, 64, 30, 16) > luma_at(&base, 64, 30, 16) + 2.0);
+        assert!(luma_at(&burned, 64, 30, 16) < luma_at(&base, 64, 30, 16) - 2.0);
+        // Away from the stroke, the bytes are the base's bytes.
+        for (x, y) in [(2u32, 2u32), (62, 30), (30, 2)] {
+            let i = ((y * 64 + x) * 4) as usize;
+            assert_eq!(dodged[i..i + 4], base[i..i + 4], "({x},{y}) untouched");
+            assert_eq!(burned[i..i + 4], base[i..i + 4], "({x},{y}) untouched");
+        }
+        // Zero exposure is the identity even under the stroke.
+        let none = filter_stroke(
+            ctx,
+            &image,
+            StrokeTool::Dodge,
+            ToneOptions {
+                exposure: 0.0,
+                ..tone
+            },
+            None,
+        );
+        let i = ((16 * 64 + 30) * 4) as usize;
+        for c in 0..3 {
+            assert!((none[i + c] as i32 - base[i + c] as i32).abs() <= 1);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_tonal_range_decides_where_dodge_acts__feat__image_editor_dodge_burn() {
+        // A dark half and a light half; a stroke across both. "Shadows"
+        // moves the dark half more than the light half, "highlights" the
+        // reverse.
+        let Some(ctx) = device() else { return };
+        let image = two_tone(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let lift = |px: &[u8], x| luma_at(px, 64, x, 16) - luma_at(&base, 64, x, 16);
+        let run = |range| {
+            filter_stroke(
+                ctx,
+                &image,
+                StrokeTool::Dodge,
+                ToneOptions {
+                    range,
+                    exposure: 0.8,
+                    saturate: false,
+                },
+                None,
+            )
+        };
+        let sh = run(ToneRange::Shadows);
+        let hi = run(ToneRange::Highlights);
+        assert!(
+            lift(&sh, 20) > lift(&sh, 44),
+            "shadows lifts the dark side more"
+        );
+        assert!(
+            lift(&hi, 44) > lift(&hi, 20),
+            "highlights lifts the light side more"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn the_sponge_desaturates_and_a_selection_clips_it__feat__image_editor_dodge_burn() {
+        let Some(ctx) = device() else { return };
+        let image = ramp(64, 32);
+        let base = image.rgba.to_rgba8().into_owned();
+        let sel = Arc::new(SelectionCoverage::rasterize_rect(
+            64, 32, 0.0, 0.0, 32.0, 32.0,
+        ));
+        let out = filter_stroke(
+            ctx,
+            &image,
+            StrokeTool::Sponge,
+            ToneOptions::default(),
+            Some(sel),
+        );
+        let spread = |px: &[u8], x: u32| {
+            let i = ((16 * 64 + x) * 4) as usize;
+            let (r, g, b) = (px[i] as i32, px[i + 1] as i32, px[i + 2] as i32);
+            r.max(g).max(b) - r.min(g).min(b)
+        };
+        assert!(spread(&out, 20) < spread(&base, 20), "desaturated inside");
+        for y in 0..32u32 {
+            for x in 32..64u32 {
+                let i = ((y * 64 + x) * 4) as usize;
+                assert_eq!(
+                    out[i..i + 4],
+                    base[i..i + 4],
+                    "({x},{y}) outside the selection"
+                );
+            }
+        }
     }
 }

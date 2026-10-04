@@ -3778,7 +3778,7 @@ mod wasm {
         let tool = StrokeTool::from_wire(tool).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "unknown paint tool \"{tool}\" \
-                 (brush | pencil | eraser | clone | heal)"
+                 (brush | pencil | eraser | clone | heal | dodge | burn | sponge)"
             ))
         })?;
         let blend_kernel = blend_kernel(blend).ok_or_else(|| {
@@ -3995,6 +3995,42 @@ mod wasm {
                 ));
             }
             session.set_clone_source(crate::stroke::CloneSource { x, y, aligned });
+            Ok(())
+        })
+    }
+
+    /// Set the IN-FLIGHT dodge / burn / sponge stroke's options:
+    /// `range` ∈ `shadows | midtones | highlights` and `exposure` 0–1 for
+    /// dodge and burn; `saturate` picks the sponge's direction (false =
+    /// desaturate). Call between `brush_stroke_begin` and the first
+    /// extend — the options are frozen with the stroke. An error for any
+    /// other tool, so a caller cannot believe a brush is dodging.
+    #[wasm_bindgen]
+    pub fn brush_stroke_set_tone(
+        range: &str,
+        exposure: f32,
+        saturate: bool,
+    ) -> Result<(), JsValue> {
+        let range = crate::stroke::ToneRange::from_wire(range).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "unknown tonal range \"{range}\" (shadows | midtones | highlights)"
+            ))
+        })?;
+        STROKE.with(|s| {
+            let mut slot = s.borrow_mut();
+            let session = slot
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("no stroke in progress"))?;
+            if !session.params().tool.filters() {
+                return Err(JsValue::from_str(
+                    "only the dodge, burn and sponge tools take tone options",
+                ));
+            }
+            session.set_tone(crate::stroke::ToneOptions {
+                range,
+                exposure,
+                saturate,
+            });
             Ok(())
         })
     }

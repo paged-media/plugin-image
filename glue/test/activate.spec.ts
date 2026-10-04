@@ -128,6 +128,10 @@ describe("imageBundle.activate", () => {
       // The retouching pair — the brush with a sampled paint layer.
       "media.paged.image.tool.clone",
       "media.paged.image.tool.heal",
+      // The toning tools share the clone stamp's slot.
+      "media.paged.image.tool.dodge",
+      "media.paged.image.tool.burn",
+      "media.paged.image.tool.sponge",
       "media.paged.image.tool.type",
     ]);
     expect(fake.importers.ids()).toEqual(["media.paged.image.importer.raster"]);

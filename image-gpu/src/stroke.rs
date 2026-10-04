@@ -71,6 +71,21 @@
 //! `unpremultiply` maps zero alpha to zero RGB and would discard the
 //! colour under a fully erased pixel.
 //!
+//! ## Filter strokes ([`PaintMode::Filter`], [`PaintMode::Unsharp`])
+//!
+//! The dodge, burn, sponge, blur and sharpen brushes deposit no paint at
+//! all: the dab's coverage MASKS A KERNEL'S EFFECT on the window. A point
+//! kernel (`adjust.dodge_burn`) is one masked dispatch — the ABI already
+//! stores `mix(a, f(a), m)`. Blur and sharpen are the existing unsharp
+//! chain: `conv.gaussian_h` → `conv.gaussian_v` → `conv.unsharp` with
+//! the original window as `in0`, the blur as `in1` and the coverage as
+//! the mask, so `mix(a, a + amount·(a − blur), m)`. A NEGATIVE amount of
+//! −1 is exactly the blur (`a − (a − blur) = blur`), which is why the blur
+//! brush needs no kernel of its own and why its mask lands on the
+//! ORIGINAL window rather than on an intermediate pass. The Gaussian is
+//! windowed, so the caller hands over a window with a halo of the blur's
+//! radius and crops the result.
+//!
 //! ## The premultiply bracket, and when it is skipped
 //!
 //! The engine's working buffers are STRAIGHT RGBA (the decode bridge
@@ -100,6 +115,9 @@ use image_kernels::families::cast::{
     CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
 };
 use image_kernels::families::compose::ComposeParams;
+use image_kernels::families::conv::{
+    ConvGaussianParams, ConvUnsharpParams, CONV_GAUSSIAN_H, CONV_GAUSSIAN_V, CONV_UNSHARP,
+};
 use image_kernels::families::gen::{GenSolidParams, GEN_SOLID};
 use image_kernels::KernelDef;
 
@@ -147,6 +165,22 @@ pub enum PaintMode<'a> {
         source_f16: &'a [u8],
         correction_f16: Option<&'a [u8]>,
     },
+    /// A FILTER STROKE through one single-input POINT kernel (dodge /
+    /// burn / sponge): the coverage masks `kernel(base)` against the
+    /// base. `params` is the kernel's parameter block.
+    Filter {
+        kernel: &'static KernelDef,
+        params: &'a [u8],
+    },
+    /// A FILTER STROKE through the unsharp chain: `amount` −1 is the
+    /// BLUR brush, a positive amount the SHARPEN brush. `radius` is the
+    /// Gaussian's half-width, which is also the halo the caller's window
+    /// must carry.
+    Unsharp {
+        sigma: f32,
+        radius: u32,
+        amount: f32,
+    },
 }
 
 impl PaintMode<'_> {
@@ -181,6 +215,16 @@ impl PaintMode<'_> {
                 ids.push(CAST_UNPREMULTIPLY.id);
                 ids
             }
+            PaintMode::Filter { kernel, .. } => {
+                vec![CAST_PREMULTIPLY.id, kernel.id, CAST_UNPREMULTIPLY.id]
+            }
+            PaintMode::Unsharp { .. } => vec![
+                CAST_PREMULTIPLY.id,
+                CONV_GAUSSIAN_H.id,
+                CONV_GAUSSIAN_V.id,
+                CONV_UNSHARP.id,
+                CAST_UNPREMULTIPLY.id,
+            ],
         }
     }
 
@@ -203,7 +247,21 @@ impl PaintMode<'_> {
                 ids.push(blend.id);
                 ids
             }
+            PaintMode::Filter { kernel, .. } if opaque_window => vec![kernel.id],
+            PaintMode::Unsharp { .. } if opaque_window => {
+                vec![CONV_GAUSSIAN_H.id, CONV_GAUSSIAN_V.id, CONV_UNSHARP.id]
+            }
             _ => self.kernel_ids(),
+        }
+    }
+
+    /// The halo (px) a window must carry around the region it writes, so
+    /// a windowed filter sees real neighbours instead of the window's
+    /// edge. Zero for every per-texel mode.
+    pub fn halo(&self) -> u32 {
+        match self {
+            PaintMode::Unsharp { radius, .. } => *radius,
+            _ => 0,
         }
     }
 }
@@ -391,6 +449,77 @@ pub async fn composite_stroke_window(
             }
         }
 
+        // ── filter strokes: the coverage masks a kernel's effect ─────
+        PaintMode::Filter { kernel, params } => {
+            if kernel.inputs != 1 {
+                return Err(GpuError::Kernel {
+                    kernel: kernel.id,
+                    detail: "a filter stroke takes a single-input kernel".into(),
+                });
+            }
+            let opaque = window_is_opaque(base_f16);
+            let bp = if opaque {
+                base.clone()
+            } else {
+                unary(
+                    &mut b,
+                    &CAST_PREMULTIPLY,
+                    CastPremultiplyParams::new().as_bytes(),
+                    &base,
+                )?
+            };
+            let out = b.target(w, h);
+            b.dispatch(kernel, &[&bp], params, Some(&mask), &out)?;
+            if opaque {
+                out
+            } else {
+                unary(
+                    &mut b,
+                    &CAST_UNPREMULTIPLY,
+                    CastUnpremultiplyParams::new().as_bytes(),
+                    &out,
+                )?
+            }
+        }
+        PaintMode::Unsharp {
+            sigma,
+            radius,
+            amount,
+        } => {
+            let opaque = window_is_opaque(base_f16);
+            let bp = if opaque {
+                base.clone()
+            } else {
+                unary(
+                    &mut b,
+                    &CAST_PREMULTIPLY,
+                    CastPremultiplyParams::new().as_bytes(),
+                    &base,
+                )?
+            };
+            let g = ConvGaussianParams::new(sigma, radius);
+            let gh = unary(&mut b, &CONV_GAUSSIAN_H, g.as_bytes(), &bp)?;
+            let gv = unary(&mut b, &CONV_GAUSSIAN_V, g.as_bytes(), &gh)?;
+            let out = b.target(w, h);
+            b.dispatch(
+                &CONV_UNSHARP,
+                &[&bp, &gv],
+                ConvUnsharpParams::new(amount, 0.0).as_bytes(),
+                Some(&mask),
+                &out,
+            )?;
+            if opaque {
+                out
+            } else {
+                unary(
+                    &mut b,
+                    &CAST_UNPREMULTIPLY,
+                    CastUnpremultiplyParams::new().as_bytes(),
+                    &out,
+                )?
+            }
+        }
+
         // ── paint: solid → premultiply → blend under the mask → back ─
         PaintMode::Paint { blend, color } => {
             let c = premul(color);
@@ -504,6 +633,30 @@ mod tests {
             PaintMode::Erase.kernel_ids_for(false),
             vec!["band.set_alpha"]
         );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn filter_strokes_name_their_chain_and_their_halo__feat__image_editor_dodge_burn() {
+        use image_kernels::families::adjust::{AdjustDodgeBurnParams, ADJUST_DODGE_BURN};
+        let p = AdjustDodgeBurnParams::new(0, 1, 0.5);
+        let f = PaintMode::Filter {
+            kernel: &ADJUST_DODGE_BURN,
+            params: p.as_bytes(),
+        };
+        assert_eq!(f.kernel_ids_for(true), vec!["adjust.dodge_burn"]);
+        assert_eq!(f.kernel_ids_for(false).len(), 3, "bracketed over alpha");
+        assert_eq!(f.halo(), 0, "a point kernel needs no neighbours");
+        let u = PaintMode::Unsharp {
+            sigma: 2.0,
+            radius: 6,
+            amount: -1.0,
+        };
+        assert_eq!(
+            u.kernel_ids_for(true),
+            vec!["conv.gaussian_h", "conv.gaussian_v", "conv.unsharp"]
+        );
+        assert_eq!(u.halo(), 6);
     }
 
     #[test]

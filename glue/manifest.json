@@ -98,6 +98,9 @@
       "media.paged.image.tool.eraser",
       "media.paged.image.tool.clone",
       "media.paged.image.tool.heal",
+      "media.paged.image.tool.dodge",
+      "media.paged.image.tool.burn",
+      "media.paged.image.tool.sponge",
       "media.paged.image.tool.type"
     ],
     "importers": [

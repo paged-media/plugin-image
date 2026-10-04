@@ -893,6 +893,26 @@ export function brush_stroke_set_source(x, y, aligned) {
 }
 
 /**
+ * Set the IN-FLIGHT dodge / burn / sponge stroke's options:
+ * `range` ∈ `shadows | midtones | highlights` and `exposure` 0–1 for
+ * dodge and burn; `saturate` picks the sponge's direction (false =
+ * desaturate). Call between `brush_stroke_begin` and the first
+ * extend — the options are frozen with the stroke. An error for any
+ * other tool, so a caller cannot believe a brush is dodging.
+ * @param {string} range
+ * @param {number} exposure
+ * @param {boolean} saturate
+ */
+export function brush_stroke_set_tone(range, exposure, saturate) {
+    const ptr0 = passStringToWasm0(range, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.brush_stroke_set_tone(ptr0, len0, exposure, saturate);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * The in-flight stroke's readout for the panel:
  * `[dabs, x, y, w, h]` — the dab count and the stroke's bounding
  * box in image px. Empty when no stroke is in progress or nothing
@@ -3351,12 +3371,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 787, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 785, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 803, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 801, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },
