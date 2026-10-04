@@ -470,6 +470,22 @@ export function activate(host: BundleHost): BundleHandle {
       void session.addLayer();
     },
   });
+  // ADD LAYER MASK, Photoshop's two forms. The mask becomes the paint
+  // tools' target (the panel's M toggle switches back to pixels).
+  for (const [suffix, title, reveal] of [
+    ["addLayerMask", "Add layer mask (reveal all)", true],
+    ["addLayerMaskHideAll", "Add layer mask (hide all)", false],
+  ] as const) {
+    host.contribute.command({
+      id: `media.paged.image.command.${suffix}`,
+      title,
+      category: "Image",
+      handler: () => {
+        host.shell.openPanel(PANEL_ID);
+        void session.addLayerMask(session.state().layers.active, reveal);
+      },
+    });
+  }
   host.contribute.command({
     id: "media.paged.image.command.bakeAdjustToLayer",
     title: "Bake adjustments into the active layer",

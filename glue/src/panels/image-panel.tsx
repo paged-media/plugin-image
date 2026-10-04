@@ -40,6 +40,7 @@ import type {
   BrushStats,
   ChannelStatsInfo,
   LayerGroupInfo,
+  EditTarget,
   GradientKind,
   ImageHistogram,
   LayerHistory,
@@ -1112,6 +1113,9 @@ export function LayersSection({
   onGroupOpacity,
   onGroupPassThrough,
   onMaskClear,
+  editTarget = "pixels",
+  onAddMask,
+  onEditTarget,
   onBake,
   onUndoTo,
   onRedoTo,
@@ -1151,6 +1155,12 @@ export function LayersSection({
   onGroupPassThrough: (id: number, passThrough: boolean) => void;
   /** Delete the mask outright. */
   onMaskClear: (index: number) => void;
+  /** What the paint tools write on the ACTIVE layer. */
+  editTarget?: EditTarget;
+  /** Add Layer Mask: reveal all (click) or hide all (Alt-click). */
+  onAddMask?: (index: number, revealAll: boolean) => void;
+  /** Paint the layer's pixels or its mask. */
+  onEditTarget?: (index: number, target: EditTarget) => void;
   /** Walk BACK `n` journal steps (n undos — the journal is a stack). */
   onUndoTo: (n: number) => void;
   /** Walk FORWARD `n` journal steps. */
@@ -1318,6 +1328,31 @@ export function LayersSection({
                 rely on: a disabled mask KEEPS its coverage. */}
             {l.hasMask ? (
               <>
+                {/* THE EDIT TARGET: pixels or mask. Photoshop's two
+                    thumbnails, as one toggle — bold M means the paint
+                    tools write the mask of this (active) layer. */}
+                <button
+                  type="button"
+                  title={
+                    l.index === active && editTarget === "mask"
+                      ? "Painting the MASK (brush = foreground grey, eraser reveals) — click to paint the pixels"
+                      : "Paint this layer's mask instead of its pixels"
+                  }
+                  data-image-layer-edit-target={l.index}
+                  data-target={l.index === active ? editTarget : "pixels"}
+                  disabled={disabled || !onEditTarget}
+                  onClick={() =>
+                    onEditTarget?.(
+                      l.index,
+                      l.index === active && editTarget === "mask" ? "pixels" : "mask",
+                    )
+                  }
+                  style={{
+                    fontWeight: l.index === active && editTarget === "mask" ? 700 : undefined,
+                  }}
+                >
+                  M
+                </button>
                 <input
                   type="checkbox"
                   title={
@@ -1341,15 +1376,26 @@ export function LayersSection({
                 </button>
               </>
             ) : (
-              <button
-                type="button"
-                title="Make the current selection this layer's mask"
-                data-image-layer-mask-add={l.index}
-                disabled={disabled}
-                onClick={() => onMaskFromSelection(l.index)}
-              >
-                ⬚
-              </button>
+              <>
+                <button
+                  type="button"
+                  title="Make the current selection this layer's mask"
+                  data-image-layer-mask-add={l.index}
+                  disabled={disabled}
+                  onClick={() => onMaskFromSelection(l.index)}
+                >
+                  ⬚
+                </button>
+                <button
+                  type="button"
+                  title="Add layer mask — reveal all (Alt-click: hide all)"
+                  data-image-layer-mask-new={l.index}
+                  disabled={disabled || !onAddMask}
+                  onClick={(e) => onAddMask?.(l.index, !e.altKey)}
+                >
+                  ◐
+                </button>
+              </>
             )}
             <button
               type="button"
@@ -2797,6 +2843,9 @@ export function makeImagePanel(session: ImageSession) {
             void session.setGroupPassThrough(id, pt)
           }
           onMaskClear={(i) => void session.clearLayerMask(i)}
+          editTarget={s.layers.editTarget}
+          onAddMask={(i, reveal) => void session.addLayerMask(i, reveal)}
+          onEditTarget={(i, t) => session.setEditTarget(i, t)}
           onUndoTo={(n) => void session.undoSteps(n)}
           onRedoTo={(n) => void session.redoSteps(n)}
           onBake={() => void session.bakeAdjustToLayer()}

@@ -163,6 +163,15 @@ keeps addressing one image. Pixel edits to the active layer are recorded in the 
 journal, at most 32 entries and 256 MiB (`image-graph/src/journal.rs:101-106`). Undo and
 redo are the plugin's own commands and act on this journal, not on the host's history.
 
+The active layer has an edit target, its pixels or its mask (`LayerStack::set_edit_target`).
+With the mask as target a stroke paints the mask as an opaque grey plate through the same
+stroke compositor (`StrokeParams::for_mask_target`: the paint colour becomes the
+foreground's grey, the eraser paints white), previews by folding the stack with that plate
+standing in for the mask, and commits through `LayerStack::edit_active_mask`. The mask edit
+is journaled one byte per texel under the scope `layer id | MASK_SCOPE_BIT`, so it is one
+step on the same undo list and replays into the mask of the right layer. The fold itself is
+unchanged: a painted mask is an ordinary mask.
+
 The selection is an 8-bit coverage field at image resolution (`image-gpu/src/coverage.rs`),
 rasterised on the CPU and passed to the kernels as the group-2 mask. A brush stroke keeps a
 base snapshot and a coverage accumulator in the engine (`image-js/src/stroke.rs`).

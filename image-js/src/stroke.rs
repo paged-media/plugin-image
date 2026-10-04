@@ -244,6 +244,34 @@ impl StrokeParams {
         self
     }
 
+    /// The same stroke, re-aimed at a LAYER MASK.
+    ///
+    /// A mask stroke paints an opaque grey plate (see
+    /// `layers::mask_to_grey`), so the paint colour becomes a GREY: the
+    /// foreground's luma (Rec. 601 weights, the conventional
+    /// colour-to-grey conversion), fully opaque — the stroke's own
+    /// opacity and flow still decide how much of it lands. The ERASER on
+    /// a mask paints WHITE, i.e. it REVEALS, which is what erasing a
+    /// mask means; it becomes a brush stroke in white with the eraser's
+    /// own (antialiased) tip, flow and opacity. Every other tool is
+    /// unchanged — clone, heal and the filter strokes work on the grey
+    /// plate exactly as on any other image.
+    pub fn for_mask_target(mut self) -> StrokeParams {
+        match self.tool {
+            StrokeTool::Eraser => {
+                self.tool = StrokeTool::Brush;
+                self.color = [1.0, 1.0, 1.0, 1.0];
+            }
+            StrokeTool::Brush | StrokeTool::Pencil => {
+                let [r, g, b, _] = self.color;
+                let l = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 1.0);
+                self.color = [l, l, l, 1.0];
+            }
+            _ => {}
+        }
+        self
+    }
+
     /// The tip for a dab at `pressure` (the size half of the pressure
     /// mapping; the flow half is [`Self::flow_at`]).
     pub fn tip_at(&self, pressure: f32) -> BrushTip {

@@ -693,9 +693,16 @@ export interface LayerInfo {
   group: number | null;
 }
 
+/** What the paint tools write on the active layer (`layers_list`'s
+ *  `editTarget`): its pixels, or its layer MASK. */
+export type EditTarget = "pixels" | "mask";
+
 export interface LayerStackInfo {
   /** Index of the layer edits land in; -1 when no stack is open. */
   active: number;
+  /** Where paint lands on the active layer. "mask" only while that layer
+   *  has a mask (the engine resets it otherwise). */
+  editTarget: EditTarget;
   layers: LayerInfo[];
   /** Groups, keyed by the `group` field on each layer. */
   groups: LayerGroupInfo[];
@@ -752,6 +759,7 @@ export interface LayerGroupInfo {
 
 export const EMPTY_LAYER_STACK: LayerStackInfo = {
   active: -1,
+  editTarget: "pixels",
   layers: [],
   groups: [],
 };
@@ -1414,6 +1422,13 @@ export interface ImageEngine {
   layerMaskFromSelection(index: number): void;
   /** DELETE the mask; distinct from disabling it. */
   layerClearMask(index: number): void;
+  /** ADD LAYER MASK: reveal all (white) or hide all (black). One undo
+   *  step; the new mask becomes the edit target. THROWS when the layer
+   *  already has a mask. */
+  layerAddMask(index: number, revealAll: boolean): void;
+  /** Make `index` active and point the paint tools at its pixels or its
+   *  MASK. THROWS for the mask of a layer that has none. */
+  layerSetEditTarget(index: number, target: EditTarget): void;
   /** Toggle whether the mask applies, retaining the coverage. */
   layerSetMaskEnabled(index: number, enabled: boolean): void;
   /** Clip a layer to the one beneath it — the mechanism smart filters
@@ -1918,6 +1933,8 @@ export interface ImageWasmModule {
   layers_render_smart(index: number, scale: number): Promise<void>;
   layers_mask_from_selection(index: number): void;
   layers_clear_mask(index: number): void;
+  layers_add_mask(index: number, reveal_all: boolean): void;
+  layers_set_edit_target(index: number, mask: boolean): void;
   layers_set_mask_enabled(index: number, enabled: boolean): void;
   layers_set_clipped(index: number, clipped: boolean): void;
   layers_group(from: number, to: number, name: string): number;
@@ -2343,7 +2360,9 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layersBound: () => wasm.layers_bound(),
     layers() {
       const parsed = JSON.parse(wasm.layers_list()) as LayerStackInfo;
-      return parsed.layers.length > 0 ? parsed : EMPTY_LAYER_STACK;
+      if (parsed.layers.length === 0) return EMPTY_LAYER_STACK;
+      // An engine older than the edit target has no field: pixels.
+      return { ...parsed, editTarget: parsed.editTarget === "mask" ? "mask" : "pixels" };
     },
     layersHistory() {
       // The engine answers the JSON literal `null` when no stack is open.
@@ -2583,6 +2602,9 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
     layerRenderSmart: (index, scale) => wasm.layers_render_smart(index, scale),
     layerMaskFromSelection: (index) => wasm.layers_mask_from_selection(index),
     layerClearMask: (index) => wasm.layers_clear_mask(index),
+    layerAddMask: (index, revealAll) => wasm.layers_add_mask(index, revealAll),
+    layerSetEditTarget: (index, target) =>
+      wasm.layers_set_edit_target(index, target === "mask"),
     layerSetMaskEnabled: (index, enabled) =>
       wasm.layers_set_mask_enabled(index, enabled),
     layerSetClipped: (index, clipped) => wasm.layers_set_clipped(index, clipped),

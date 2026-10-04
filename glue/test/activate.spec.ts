@@ -64,6 +64,9 @@ describe("imageBundle.activate", () => {
       // The LAYER GRAPH's command-palette reach (the panel carries the
       // full palette).
       "media.paged.image.command.addLayer",
+      // Add Layer Mask, reveal-all and hide-all.
+      "media.paged.image.command.addLayerMask",
+      "media.paged.image.command.addLayerMaskHideAll",
       "media.paged.image.command.bakeAdjustToLayer",
       "media.paged.image.command.undo",
       "media.paged.image.command.redo",

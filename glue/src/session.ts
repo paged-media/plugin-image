@@ -78,6 +78,7 @@ import {
   type ImageHistogram,
   type LayerHistory,
   type LayerStackInfo,
+  type EditTarget,
   type PsdLayerInfo,
   type RasterFormat,
   type ResampleFilter,
@@ -796,6 +797,14 @@ export interface ImageSession {
   setGroupPassThrough(id: number, passThrough: boolean): Promise<boolean>;
   /** Delete the mask outright. */
   clearLayerMask(index: number): Promise<boolean>;
+  /** ADD LAYER MASK to `index` — reveal all (white, nothing changes until
+   *  it is painted) or hide all (black). The mask becomes the paint
+   *  tools' target, so the next stroke paints it. One undo step. */
+  addLayerMask(index: number, revealAll: boolean): Promise<boolean>;
+  /** Point the paint tools at `index`'s pixels or at its layer MASK (and
+   *  make it active). On the mask the brush paints the foreground's grey
+   *  and the eraser paints white (reveals). */
+  setEditTarget(index: number, target: EditTarget): boolean;
   /** Convert a pixel layer into a smart object (one-way — the source is
    *  preserved and going back would discard it). */
   makeLayerSmart(index: number): Promise<boolean>;
@@ -3728,6 +3737,40 @@ export function createImageSession(host: BundleHost): ImageSession {
         );
       }
       return ok;
+    },
+
+    async addLayerMask(index, revealAll) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerAddMask(index, revealAll);
+      } catch (err) {
+        setStatus(`Add layer mask failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      const ok = await finishMaskEdit();
+      if (ok) {
+        setStatus(
+          (revealAll
+            ? "Added a reveal-all mask"
+            : "Added a hide-all mask — the layer is hidden until you paint it back in") +
+            ". Paint tools now edit the mask: the brush paints the foreground's grey, " +
+            "the eraser reveals.",
+        );
+      }
+      return ok;
+    },
+
+    setEditTarget(index, target) {
+      if (!engine || !state.source) return false;
+      try {
+        engine.layerSetEditTarget(index, target);
+      } catch (err) {
+        setStatus(`Edit target failed: ${err instanceof Error ? err.message : err}`);
+        return false;
+      }
+      refreshLayers();
+      emit();
+      return true;
     },
 
     async clearLayerMask(index) {

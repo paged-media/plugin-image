@@ -680,6 +680,15 @@ export function layers_add(name: string): number;
 export function layers_add_adjustment(name: string, exposure_ev: number, brightness: number, contrast: number, saturation: number, temp: number, tint: number, in_black: number, in_white: number, gamma: number, out_black: number, out_white: number, curve_lut: Uint8Array, blur_sigma: number, sharpen_amount: number, hue_degrees: number, invert: boolean, ext: Float32Array): number;
 
 /**
+ * ADD LAYER MASK — REVEAL ALL (`reveal_all`, an all-white mask that
+ * changes nothing until painted) or HIDE ALL (all-black, the layer
+ * vanishes until painted back in). One undo step. The new mask
+ * becomes the EDIT TARGET, as Photoshop does, so the next stroke
+ * paints it. Refused when the layer already has a mask.
+ */
+export function layers_add_mask(index: number, reveal_all: boolean): void;
+
+/**
  * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
  * per-layer adjustment (the panel's chain is otherwise a re-runnable
  * PREVIEW of the composite and mutates nothing). Journaled over the
@@ -868,6 +877,14 @@ export function layers_set_adjustment(index: number, exposure_ev: number, bright
 export function layers_set_blend(index: number, blend: string): void;
 
 export function layers_set_clipped(index: number, clipped: boolean): void;
+
+/**
+ * Make `index` active and choose what the paint tools write on it:
+ * its pixels, or (`mask`) its layer MASK. Selecting the mask of a
+ * layer with none is an error. Not an undo step — choosing a target
+ * changes nothing in the document.
+ */
+export function layers_set_edit_target(index: number, mask: boolean): void;
 
 export function layers_set_group_blend(id: number, blend: string): void;
 
@@ -1262,6 +1279,7 @@ export interface InitOutput {
     readonly kernel_count: () => number;
     readonly layers_add: (a: number, b: number) => [number, number, number];
     readonly layers_add_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number) => [number, number, number];
+    readonly layers_add_mask: (a: number, b: number) => [number, number];
     readonly layers_bake_adjust: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => any;
     readonly layers_bound: () => number;
     readonly layers_canvas_op: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
@@ -1286,6 +1304,7 @@ export interface InitOutput {
     readonly layers_set_adjustment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => [number, number];
     readonly layers_set_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_clipped: (a: number, b: number) => [number, number];
+    readonly layers_set_edit_target: (a: number, b: number) => [number, number];
     readonly layers_set_group_blend: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_group_name: (a: number, b: number, c: number) => [number, number];
     readonly layers_set_group_opacity: (a: number, b: number) => [number, number];

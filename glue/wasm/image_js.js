@@ -1508,6 +1508,22 @@ export function layers_add_adjustment(name, exposure_ev, brightness, contrast, s
 }
 
 /**
+ * ADD LAYER MASK — REVEAL ALL (`reveal_all`, an all-white mask that
+ * changes nothing until painted) or HIDE ALL (all-black, the layer
+ * vanishes until painted back in). One undo step. The new mask
+ * becomes the EDIT TARGET, as Photoshop does, so the next stroke
+ * paints it. Refused when the layer already has a mask.
+ * @param {number} index
+ * @param {boolean} reveal_all
+ */
+export function layers_add_mask(index, reveal_all) {
+    const ret = wasm.layers_add_mask(index, reveal_all);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * BAKE the adjustment chain into the ACTIVE layer — the DESTRUCTIVE
  * per-layer adjustment (the panel's chain is otherwise a re-runnable
  * PREVIEW of the composite and mutates nothing). Journaled over the
@@ -1906,6 +1922,21 @@ export function layers_set_blend(index, blend) {
  */
 export function layers_set_clipped(index, clipped) {
     const ret = wasm.layers_set_clipped(index, clipped);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Make `index` active and choose what the paint tools write on it:
+ * its pixels, or (`mask`) its layer MASK. Selecting the mask of a
+ * layer with none is an error. Not an undo step — choosing a target
+ * changes nothing in the document.
+ * @param {number} index
+ * @param {boolean} mask
+ */
+export function layers_set_edit_target(index, mask) {
+    const ret = wasm.layers_set_edit_target(index, mask);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
