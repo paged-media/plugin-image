@@ -1159,6 +1159,9 @@ export interface ImageEngine {
   layersAddAdjustment(name: string, params: AdjustParams): number;
   /** Retune an adjustment layer in place (identity allowed). */
   layersSetAdjustment(index: number, params: AdjustParams): void;
+  /** Write the open layer stack into the retained PSD as its layers;
+   *  returns the description. Throws for adjustment layers / non-RGB-8. */
+  psdSaveLayers(psdHandle: number): string;
   /** The open stack as bytes: manifest first, then its buffers. */
   layersExport(): Uint8Array[];
   /** Replace the open stack with stored bytes and composite it. */
@@ -1853,6 +1856,7 @@ export interface ImageWasmModule {
   ): Promise<Uint8Array>;
   layers_export(): Uint8Array[];
   layers_import(manifest: Uint8Array, buffers: Uint8Array[]): Promise<void>;
+  psd_save_layers(psd_handle: number): string;
   layers_undo(): Promise<string>;
   layers_redo(): Promise<string>;
 }
@@ -2499,6 +2503,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.invert,
         packAdjustExt(p),
       ),
+    psdSaveLayers: (psdHandle) => wasm.psd_save_layers(psdHandle),
     layersExport: () => Array.from(wasm.layers_export()),
     layersImport: (manifest, buffers) => wasm.layers_import(manifest, buffers),
     layersSetAdjustment: (index, p) =>

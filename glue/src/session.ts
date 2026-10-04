@@ -22,12 +22,11 @@
 // (Engine A, GPU-only) → composite the RGBA8 result back IN-FRAME via
 // the C-1 Stage-A image scene item (host.contribute.sceneLayer).
 //
-// Stage-A contract honesty: re-submission happens on COMMITTED changes
-// (the panel's Apply), never per-drag — the retained-image lane is
-// static quality by design (the interactive path is Stage B / M2). The
-// layer clears on deselect of the composited frame and on Reset; the
-// DOCUMENT is never mutated (the original placed bytes stay the truth —
-// adjusted-pixel save-back is a later milestone, stated in the panel).
+// The in-frame layer is a preview: sliders preview live on a proxy and
+// at full resolution once they rest; it clears on deselect and Reset.
+// The DOCUMENT changes only on a COMMIT (`commitToDocument`, ADR 462):
+// the layers go into the document's parts and their composite replaces
+// the frame's placed image, as one document undo step.
 
 import type {
   BundleHost,
@@ -2156,7 +2155,26 @@ export function createImageSession(host: BundleHost): ImageSession {
       // the retained parse never sees — re-emitting it would hand back
       // the original file with every one of those edits missing.
       if (isIdentity(state.params) && pixelEdits === 0) return api.psdExport();
+      // LAYERED save when the stack has more than its one layer and no
+      // pending panel adjustments (those only exist as a chain over the
+      // composite, which only the flattened save can apply).
+      let layeredRefusal: string | null = null;
+      if (isIdentity(state.params) && state.layers.layers.length > 1) {
+        try {
+          const note = engine.psdSaveLayers(psdHandle);
+          refreshPsdLayers();
+          setStatus(`PSD export — ${note}.`);
+          emit();
+          return api.psdExport();
+        } catch (err) {
+          layeredRefusal = err instanceof Error ? err.message : String(err);
+        }
+      }
       const back = await api.applyToFile();
+      if (back && layeredRefusal) {
+        setStatus(`PSD export flattened: ${layeredRefusal}. ${state.status}`);
+        emit();
+      }
       if (back && back.mimeType === "image/vnd.adobe.photoshop") {
         return { bytes: back.bytes, fileName: back.fileName };
       }

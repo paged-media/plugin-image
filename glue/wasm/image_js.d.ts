@@ -953,6 +953,15 @@ export function psd_remove_layer(handle: number, layer: number): void;
 export function psd_save(handle: number): Uint8Array;
 
 /**
+ * Write the open LAYER STACK into the retained PSD as its layers
+ * (`saveback::psd_write_stack`), with the bound image (the stack's
+ * composite) as the merged image. Refuses stacks with adjustment
+ * layers and non-8-bit-RGB files, so the caller can fall back to the
+ * flattened save. Returns the user-facing description.
+ */
+export function psd_save_layers(psd_handle: number): string;
+
+/**
  * Rename a layer (updates the legacy Pascal name AND the canonical
  * `luni` block).
  */
@@ -1271,6 +1280,7 @@ export interface InitOutput {
     readonly psd_open: (a: number, b: number) => [number, number, number];
     readonly psd_remove_layer: (a: number, b: number) => [number, number];
     readonly psd_save: (a: number) => [number, number, number];
+    readonly psd_save_layers: (a: number) => [number, number, number, number];
     readonly psd_set_layer_name: (a: number, b: number, c: number, d: number) => [number, number];
     readonly psd_set_layer_opacity: (a: number, b: number, c: number) => [number, number];
     readonly resize_image: (a: number, b: number, c: number, d: number, e: number) => any;

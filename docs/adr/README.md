@@ -23,8 +23,10 @@ stood, for decisions made earlier; their status says so.
 | [457](457-colour-management.md) | Colour management: one seam, one engine for display and one for print | Accepted, recorded retroactively 2026-10-02 |
 | [458](458-psd-preservation.md) | PSD is read and written by an own parser under a preservation rule | Accepted, recorded retroactively 2026-10-02 |
 | [459](459-scene-layer-image-and-tiles.md) | Results reach the page as a retained scene-layer image plus a tile provider | Accepted, recorded retroactively 2026-10-02 |
-| [460](460-document-is-not-the-store.md) | The document is not the store: edits live in the session and leave through save-back | Accepted, recorded retroactively 2026-10-02 |
+| [460](460-document-is-not-the-store.md) | The document is not the store: edits live in the session and leave through save-back | Superseded by 462 (2026-10-04) |
 | [461](461-clean-room-protocol.md) | The clean-room two-role protocol | Accepted, recorded retroactively 2026-10-02 |
+| [462](462-sessions-persist-in-parts.md) | Raster sessions persist in container parts and bake into the frame | Accepted 2026-10-04 |
+| [463](463-one-undo-list.md) | One undo list for pixels and the layer stack, reachable from the host | Accepted 2026-10-04 |
 
 Decisions made in other repositories that this plugin's code rests on are listed in
 [`../README.md`](../README.md).

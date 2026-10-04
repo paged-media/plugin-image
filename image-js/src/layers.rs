@@ -1217,6 +1217,11 @@ impl LayerStack {
         n
     }
 
+    /// [`chain_of`](Self::chain_of) for the PSD writer.
+    pub(crate) fn group_chain(&self, gid: Option<u32>) -> Vec<u32> {
+        self.chain_of(gid)
+    }
+
     /// The enclosing chain of `gid`, OUTERMOST first — what the fold
     /// compares against to decide which groups to open and close.
     fn chain_of(&self, gid: Option<u32>) -> Vec<u32> {

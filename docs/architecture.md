@@ -115,8 +115,13 @@ surface.submit(frame, { kind: "image", rgba, ... })               session.ts (su
    for the next Apply. The layer is cleared when the frame leaves the selection and on
    Reset ([ADR 459](adr/459-scene-layer-image-and-tiles.md)).
 4. **Save-back.** "Apply to file" runs the same chain and encodes the result into the
-   retained PSD parse, or as PNG, or as JPEG when the source was a JPEG. The bytes leave
-   through `host.shell.saveFile` or an exporter ([ADR 460](adr/460-document-is-not-the-store.md)).
+   retained PSD parse, or as PNG, or as JPEG when the source was a JPEG; a session with more
+   than one layer exports as a layered PSD (`image-js/src/saveback.rs`, `psd_write_stack`).
+   The bytes leave through `host.shell.saveFile` or an exporter.
+5. **Commit.** "Commit image edits to the document" writes the layer stack into the
+   plugin's container parts and replaces the frame's placed image with the composite, in
+   one batch mutation; reopening the frame restores the layers
+   ([ADR 462](adr/462-sessions-persist-in-parts.md)).
 
 ## Kernels and how they run
 
@@ -173,18 +178,21 @@ writes unmodified blocks back byte for byte ([ADR 458](adr/458-psd-preservation.
 
 ## Where data is stored
 
-Nothing the plugin edits is stored in the document. Images, layers, the selection, the
-undo journal and the PSD parse live in the wasm module's memory for the session; the
-panel's parameters live in the session object. The plugin writes to the document in two
-cases: a marker, `{ v: 1, data: { owns: "pixels" } }`, as its metadata on a frame whose
-placed image it has ingested, which the `rasterImage` edit context matches on; and paths
-inserted by "Selection to path". It uses no container parts and no host storage.
+During a session, images, layers, the selection, the undo list and the PSD parse live in
+the wasm module's memory, and the panel's parameters in the session object. A COMMIT
+(ADR 462) writes the layer stack into the plugin's container parts (`px/<sha256>.bin`
+buffers, shared across revisions, and `f/<frame>/r<n>.json` records;
+`glue/src/session-store.ts`), replaces the frame's placed image with the composite, and sets
+the frame's marker to `{ v: 2, data: { owns: "pixels", rev, record, baked } }`. Before a
+commit the marker is `{ v: 1, data: { owns: "pixels" } }`, written at ingest so the
+`rasterImage` edit context matches. "Selection to path" inserts paths. The undo history is
+not stored.
 
 ## Host doors
 
 | Door | What the plugin uses it for |
 |---|---|
-| `contributePanel`, `host.contribute.command`, `contributeTool`, `host.contribute.menu` | one panel ("Image"), 23 commands, 13 tools, 20 menu entries |
+| `contributePanel`, `host.contribute.command`, `contributeTool`, `host.contribute.menu` | one panel ("Image"), 37 commands, 15 tools, 34 menu entries |
 | `host.contribute.importer`, `host.contribute.exporter` | one importer for `.psd .psb .png .jpg .jpeg`; exporters for PSD, PNG and JPEG |
 | `host.contribute.editContext`, `host.contribute.bindingProvider` | the `rasterImage` context, entered by double-click; two providers that make the host's Layers and Character panels show the raster stack and the raster type settings |
 | `host.assets.getPlacedImage`, `host.assets.getFontFace` | original bytes of a placed image; font bytes for raster type |

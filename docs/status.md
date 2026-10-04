@@ -1,7 +1,8 @@
 # Status
 
 What `paged.image` ships and what it does not, read from the code at commit `f7d21e5`
-(`@paged-media/image` 0.1.0-canary.16). How the parts fit is in
+(`@paged-media/image` 0.1.0-canary.16), with the changes of 2026-10-04 noted where they
+landed. How the parts fit is in
 [`architecture.md`](architecture.md).
 
 ## Shipped
@@ -15,26 +16,40 @@ What `paged.image` ships and what it does not, read from the code at commit `f7d
   channel), a tone curve, vibrance, colour balance, black and white, posterize, threshold,
   photo filter, channel mixer, blur, sharpen, hue rotate, invert, and "Auto-enhance". Apply
   runs it on the GPU, within the selection if there is one, and shows it inside the frame.
+  Sliders preview live on a resampled proxy; full resolution follows when they rest.
 - **Filters and fills.** One-shot kernels from the panel: gradient map, warp, emboss, find
   edges, motion and radial blur, mosaic, twelve gallery effects, despeckle, dust and
-  scratches, offset, lens blur, reduce noise, smart sharpen, selective colour; gradient,
-  noise and content-aware fills.
+  scratches, offset, lens blur, reduce noise, smart sharpen, selective colour, median,
+  maximum and minimum (3×3), colour lookup from a `.cube` file, shape blur; gradient (foreground
+  to background), noise, solid, pattern and content-aware fills; Define pattern; the paint
+  bucket.
 - **Selection.** Rectangle and ellipse marquee, lasso, polygonal lasso, magic wand and
   quick selection, combined by add, subtract and intersect; select all, deselect, invert,
-  feather; a channel as selection; selection to path and path to selection.
+  feather; expand, contract, border and smooth; wand and bucket tolerance and contiguity;
+  a channel as selection; selection to path and path to selection.
+- **Colour.** Foreground and background colour, swap, black and white, a picker; Alt-click
+  with a paint tool samples the image.
 - **Paint, retouch, type.** Brush, pencil, eraser, clone stamp and healing brush on the
   active layer, with size, hardness, opacity, flow, spacing, blend mode and pen pressure;
   presets from an `.abr` brush library. The type tool paints a shaped run of text into the
   active layer with font bytes the host serves for the document's fonts.
 - **Layers.** Add, duplicate, remove, reorder; visibility, lock, opacity and 26 blend modes;
-  a mask from the selection; groups; clipping; adjustment layers; bake the chain into a
-  layer; undo and redo of pixel edits. In the `rasterImage` context, entered by
-  double-clicking an ingested frame, the host's Layers panel shows this stack.
-- **Crop, straighten, resize.** A crop tool with aspect presets and a straighten angle;
-  resize with a nearest, Mitchell or Lanczos 3 filter.
+  a mask from the selection; groups; clipping; editable adjustment layers; smart objects
+  (convert, re-render at a scale); bake the chain into a layer. One undo list covers pixel
+  edits and every change to the stack ([ADR 463](adr/463-one-undo-list.md)); in the
+  `rasterImage` context, entered by double-clicking an ingested frame, the host's undo
+  reaches it and the host's Layers panel shows this stack.
+- **Commit and reopen.** "Commit image edits to the document" stores the layers in the
+  document's parts and puts their composite in the frame, as one document undo step;
+  reopening the frame restores the layers ([ADR 462](adr/462-sessions-persist-in-parts.md)).
+- **Canvas.** A crop tool with aspect presets and a straighten angle; resize with a
+  nearest, Mitchell or Lanczos 3 filter; rotate 90°/180°, flip, and Canvas Size with an
+  anchor over all layers; a Move tool and nudges for the selected pixels or the layer.
 - **PSD.** A PSD whose layers the model reproduces opens as layers. Layers of the retained
   file can be renamed, removed and given another opacity before export. With no edit the
-  writer reproduces the input bytes (`image-psd/tests/roundtrip.rs`).
+  writer reproduces the input bytes (`image-psd/tests/roundtrip.rs`). A session with more
+  than one layer exports as a layered PSD (pixel layers, masks, groups, opacity, blend,
+  visibility, clipping); with adjustment layers it is flattened, and says so.
 - **Save-back and tiles.** "Apply to file" encodes the adjusted result as PSD, PNG or JPEG
   and "Save the adjusted file" hands it to the host's save door; three exporters offer the
   same formats. "Serve image tiles to the renderer" claims the frame's image resource.
@@ -44,9 +59,11 @@ What `paged.image` ships and what it does not, read from the code at commit `f7d
 - **A GPU is required.** No kernel has a CPU path. Without WebGPU, adjustments, filters,
   generator fills, painting, resize and the composite of more than one layer return an
   error; decode, the identity composite, selection and histograms still work.
-- **The result on the page is a session preview**: one scene-layer image item, sent as RGBA8 in a JavaScript number array. It is
-  cleared when the frame leaves the selection and on Reset, is not written to the document, and no code restores it in a later session.
-  Save-back writes a separate file and does not change the frame's placed image ([ADR 460](adr/460-document-is-not-the-store.md)).
+- **The preview on the page** is one scene-layer image item, sent as RGBA8 in a JavaScript
+  number array, cleared when the frame leaves the selection and on Reset. Edits reach the
+  document only by a commit (ADR 462), whose baked PNG is capped at 8 MB while images cross
+  as number arrays; stored revisions are never deleted yet; saving the document does not
+  trigger a commit.
 - **Tiles** are level 0 only, served only after the command, and cut from the held image
   without the panel's chain. The mip export `image_tile_rgba8_level` has no TypeScript caller.
 - **Colour.** Transforms run once, on the CPU, at decode: RGB with an embedded profile to
@@ -86,7 +103,6 @@ What `paged.image` ships and what it does not, read from the code at commit `f7d
 
 ## Not built
 
-- Storing edits in the document ([ADR 460](adr/460-document-is-not-the-store.md)).
 - Handing a GPU texture to the host ([ADR 459](adr/459-scene-layer-image-and-tiles.md)).
 - A colour-transform kernel on the GPU ([ADR 457](adr/457-colour-management.md)).
 - Image formats other than PNG, JPEG and PSD/PSB. `registry/codecs.yaml` records AVIF and

@@ -3960,6 +3960,37 @@ mod wasm {
         Ok(js_sys::Uint8Array::from(&bytes[..]))
     }
 
+    /// Write the open LAYER STACK into the retained PSD as its layers
+    /// (`saveback::psd_write_stack`), with the bound image (the stack's
+    /// composite) as the merged image. Refuses stacks with adjustment
+    /// layers and non-8-bit-RGB files, so the caller can fall back to the
+    /// flattened save. Returns the user-facing description.
+    #[wasm_bindgen]
+    pub fn psd_save_layers(psd_handle: u32) -> Result<String, JsValue> {
+        LAYERS.with(|l| {
+            let b = l.borrow();
+            let doc = b
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("no layer stack is open"))?;
+            let composite = IMAGES
+                .with(|m| {
+                    m.borrow()
+                        .get(&doc.handle)
+                        .map(|i| i.rgba.to_rgba8().into_owned())
+                })
+                .ok_or_else(|| JsValue::from_str("the layer stack's image is gone"))?;
+            PSDS.with(|m| {
+                let mut map = m.borrow_mut();
+                let file = map.get_mut(&psd_handle).ok_or_else(|| {
+                    JsValue::from_str(&format!("unknown psd handle {psd_handle}"))
+                })?;
+                let shape = crate::saveback::psd_write_stack(file, &doc.stack, &composite)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                Ok(shape.describe().to_string())
+            })
+        })
+    }
+
     /// PSD SAVE-BACK: write the ADJUSTED full-resolution `rgba` into the
     /// retained parse behind `psd_handle` (the merged composite is always
     /// rewritten; the layer structure is handled per the returned shape)

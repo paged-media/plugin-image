@@ -88,3 +88,11 @@ while `glue/src/session.ts:1721` calls `host.shell.saveFile`.
 - [ADR 459](459-scene-layer-image-and-tiles.md) — the in-frame preview; [ADR 458](458-psd-preservation.md), [ADR 456](456-codecs.md) — what the saved bytes contain
 - [ADR 017](https://github.com/paged-media/plugin-sdk/blob/main/docs/adr/017-importer-exporter-door-shape.md) — the importer and exporter doors
 - [ADR 311](https://github.com/paged-media/plugin-sdk/blob/main/docs/adr/311-plugin-state-under-own-id.md), [ADR 316](https://github.com/paged-media/plugin-sdk/blob/main/docs/adr/316-native-content-and-baking.md) — where the contract expects plugin state and content to live
+
+## Amendment — 2026-10-04
+
+Superseded by [ADR 462](462-sessions-persist-in-parts.md). A session is now committed to the
+document: the layers are stored in the plugin's container parts and their composite replaces
+the frame's placed image in one undoable step (`glue/src/session.ts:2363-2438`); reopening the
+frame restores the layers (`glue/src/session.ts:982-1013`). The decision above described the
+code before that commit path existed.

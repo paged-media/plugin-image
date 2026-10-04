@@ -68,8 +68,8 @@ use image_core::{
     TileSliceRef, Transfer,
 };
 use image_psd::model::{
-    BlendRanges, ChannelData, ChannelInfo, ColorMode, Compression, GlobalImageData, LayerRecord,
-    PascalString, PsdFile,
+    AdditionalLayerInfo, AddlBody, BlendRanges, ChannelData, ChannelInfo, ColorMode, Compression,
+    GlobalImageData, LayerMaskData, LayerRecord, LsctData, PascalString, PsdFile, SectionKind,
 };
 
 use crate::ingest::IngestError;
@@ -88,6 +88,10 @@ pub enum PsdSaveBackShape {
     /// adjusted composite was written into a NEW single-layer PSD. Any
     /// original layer structure is GONE — the caller MUST say so.
     Flattened,
+    /// The session's layer STACK was written as the file's layers: pixel
+    /// layers (smart objects as their rendered pixels), masks, groups,
+    /// opacity, blend, visibility and clipping, plus a fresh composite.
+    Layered,
 }
 
 impl PsdSaveBackShape {
@@ -101,6 +105,11 @@ impl PsdSaveBackShape {
             PsdSaveBackShape::Flattened => {
                 "the adjusted composite was FLATTENED into a NEW single-layer PSD — \
                  any original layer structure is NOT in this file"
+            }
+            PsdSaveBackShape::Layered => {
+                "the layers were written as the file's layers (smart objects as their \
+                 rendered pixels), with masks, groups, opacity, blend, visibility and \
+                 clipping"
             }
         }
     }
@@ -575,6 +584,280 @@ pub fn psd_write_adjusted(
     Ok(PsdSaveBackShape::Flattened)
 }
 
+/// The PSD blend-mode key for a `compose.*` name — the inverse of
+/// `layers::psd_blend_kernel` (same 26 modes, Adobe's keys).
+fn psd_blend_key(name: &str) -> [u8; 4] {
+    match name.strip_prefix("compose.").unwrap_or(name) {
+        "multiply" => *b"mul ",
+        "screen" => *b"scrn",
+        "overlay" => *b"over",
+        "darken" => *b"dark",
+        "lighten" => *b"lite",
+        "color_dodge" => *b"div ",
+        "color_burn" => *b"idiv",
+        "hard_light" => *b"hLit",
+        "soft_light" => *b"sLit",
+        "difference" => *b"diff",
+        "exclusion" => *b"smud",
+        "hue" => *b"hue ",
+        "saturation" => *b"sat ",
+        "color" => *b"colr",
+        "luminosity" => *b"lum ",
+        "linear_burn" => *b"lbrn",
+        "linear_dodge" => *b"lddg",
+        "darker_color" => *b"dkCl",
+        "lighter_color" => *b"lgCl",
+        "vivid_light" => *b"vLit",
+        "linear_light" => *b"lLit",
+        "pin_light" => *b"pLit",
+        "hard_mix" => *b"hMix",
+        "subtract" => *b"fsub",
+        "divide" => *b"fdiv",
+        _ => *b"norm",
+    }
+}
+
+fn opacity_u8(o: f32) -> u8 {
+    (o.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn named_record(name: &str, kind: Option<LsctData>) -> (PascalString, Vec<AdditionalLayerInfo>) {
+    let mut addl = Vec::new();
+    if let Some(l) = kind {
+        addl.push(AdditionalLayerInfo {
+            sig: *b"8BIM",
+            key: *b"lsct",
+            body: AddlBody::SectionDivider(l),
+            raw_block: None,
+        });
+    }
+    // The Unicode name, which every modern reader prefers over the
+    // legacy Pascal one (that one is truncated, and not Unicode).
+    addl.push(AdditionalLayerInfo {
+        sig: *b"8BIM",
+        key: *b"luni",
+        body: AddlBody::UnicodeName(name.to_string()),
+        raw_block: None,
+    });
+    let legacy: String = name.chars().filter(char::is_ascii).collect();
+    (PascalString::new(&legacy), addl)
+}
+
+/// A group's opening (`OpenFolder`, above its members) or closing
+/// (`BoundingDivider`, below them) record: no pixels, four empty
+/// channels.
+fn section_record(
+    name: &str,
+    lsct: LsctData,
+    opacity: u8,
+    flags: u8,
+    blend_key: [u8; 4],
+    container: image_psd::Container,
+) -> Result<LayerRecord, IngestError> {
+    let mut channels = Vec::new();
+    let mut channel_data = Vec::new();
+    for id in [-1i16, 0, 1, 2] {
+        let cd = ChannelData::encode_rle(&[], container, 0, 0)
+            .map_err(|e| IngestError::Decode(e.to_string()))?;
+        channels.push(ChannelInfo {
+            id,
+            data_len: 2 + cd.bytes.len() as u64,
+        });
+        channel_data.push(cd);
+    }
+    let (name_legacy, addl) = named_record(name, Some(lsct));
+    Ok(LayerRecord {
+        top: 0,
+        left: 0,
+        bottom: 0,
+        right: 0,
+        channels,
+        blend_sig: *b"8BIM",
+        blend_key,
+        opacity,
+        clipping: 0,
+        flags,
+        filler: 0,
+        mask: None,
+        blend_ranges: BlendRanges::default(),
+        name_legacy,
+        addl,
+        extra_raw: None,
+        channel_data,
+    })
+}
+
+/// Write the session's layer STACK into the retained PSD as its layers,
+/// with `composite` (straight RGBA8, the stack's fold) as the merged
+/// image. Refuses — so the caller can fall back to the flattened save —
+/// a stack holding adjustment layers (PSD adjustment blocks are not
+/// written yet), a file that is not 8-bit RGB, or a size mismatch.
+pub fn psd_write_stack(
+    file: &mut PsdFile,
+    stack: &crate::layers::LayerStack,
+    composite: &[u8],
+) -> Result<PsdSaveBackShape, IngestError> {
+    use crate::layers::LayerKind;
+    let (width, height) = (stack.width(), stack.height());
+    if file.header.depth != 8 || file.header.color_mode != ColorMode::Rgb {
+        return Err(IngestError::Unsupported(
+            "a layered PSD save writes 8-bit RGB files only".into(),
+        ));
+    }
+    if file.header.width != width || file.header.height != height {
+        return Err(IngestError::Unsupported(format!(
+            "layered PSD save: the layers are {width}×{height}, the file is {}×{}",
+            file.header.width, file.header.height
+        )));
+    }
+    if stack
+        .layers()
+        .iter()
+        .any(|l| matches!(l.kind, LayerKind::Adjustment(_)))
+    {
+        return Err(IngestError::Unsupported(
+            "the stack has adjustment layers, which are not written as PSD adjustment \
+             layers yet"
+                .into(),
+        ));
+    }
+    let n = width as usize * height as usize;
+    if composite.len() != n * 4 {
+        return Err(IngestError::Decode(
+            "layered PSD save: composite is mis-sized".into(),
+        ));
+    }
+    let container = file.container;
+    let group = |id: u32| stack.groups().iter().find(|g| g.id == id);
+    let mut records: Vec<LayerRecord> = Vec::new();
+    // Bottom-first, opening and closing groups as the chain changes. A
+    // group CLOSES (its folder record goes above its members) when a
+    // layer leaves it, and OPENS (its divider goes below) when one enters.
+    let mut open: Vec<u32> = Vec::new();
+    let close = |records: &mut Vec<LayerRecord>, id: u32| -> Result<(), IngestError> {
+        let g = group(id).ok_or_else(|| IngestError::Decode(format!("no group {id}")))?;
+        let blend = psd_blend_key(g.blend.id);
+        let (key, lsct_blend) = if g.pass_through {
+            (*b"pass", *b"pass")
+        } else {
+            (blend, blend)
+        };
+        records.push(section_record(
+            &g.name,
+            LsctData {
+                kind: SectionKind::OpenFolder,
+                blend_key: Some(lsct_blend),
+                sub_kind: None,
+            },
+            opacity_u8(g.opacity),
+            if g.visible { 0 } else { 0x02 },
+            key,
+            container,
+        )?);
+        Ok(())
+    };
+    for layer in stack.layers() {
+        let want = stack.group_chain(layer.group);
+        while let Some(&top) = open.last() {
+            if want.starts_with(&open) {
+                break;
+            }
+            open.pop();
+            close(&mut records, top)?;
+        }
+        for &g in &want[open.len()..] {
+            records.push(section_record(
+                "</Layer group>",
+                LsctData {
+                    kind: SectionKind::BoundingDivider,
+                    blend_key: None,
+                    sub_kind: None,
+                },
+                255,
+                0,
+                *b"norm",
+                container,
+            )?);
+            open.push(g);
+        }
+        // Pixels: straight RGBA8 (a 16-bit layer narrows; the file is 8-bit).
+        let rgba = layer.rgba.to_rgba8();
+        let planes = planes_from_rgba8(&rgba, n, true);
+        let mut channels = Vec::new();
+        let mut channel_data = Vec::new();
+        for (id, plane) in [(-1i16, 3usize), (0, 0), (1, 1), (2, 2)] {
+            let cd = ChannelData::encode_rle(&planes[plane], container, height, width)
+                .map_err(|e| IngestError::Decode(e.to_string()))?;
+            channels.push(ChannelInfo {
+                id,
+                data_len: 2 + cd.bytes.len() as u64,
+            });
+            channel_data.push(cd);
+        }
+        let mask = match &layer.mask {
+            Some(cov) => {
+                let cd = ChannelData::encode_rle(cov.data(), container, height, width)
+                    .map_err(|e| IngestError::Decode(e.to_string()))?;
+                channels.push(ChannelInfo {
+                    id: -2,
+                    data_len: 2 + cd.bytes.len() as u64,
+                });
+                channel_data.push(cd);
+                // Rect (the canvas), default colour 0 (outside the rect is
+                // hidden), flags bit 1 = mask disabled, two pad bytes.
+                let flags = if layer.mask_enabled { 0 } else { 0x02 };
+                let mut raw = Vec::with_capacity(20);
+                for v in [0i32, 0, height as i32, width as i32] {
+                    raw.extend_from_slice(&v.to_be_bytes());
+                }
+                raw.extend_from_slice(&[0, flags, 0, 0]);
+                Some(LayerMaskData {
+                    top: 0,
+                    left: 0,
+                    bottom: height as i32,
+                    right: width as i32,
+                    default_color: 0,
+                    flags,
+                    raw,
+                })
+            }
+            None => None,
+        };
+        let (name_legacy, addl) = named_record(&layer.name, None);
+        records.push(LayerRecord {
+            top: 0,
+            left: 0,
+            bottom: height as i32,
+            right: width as i32,
+            channels,
+            blend_sig: *b"8BIM",
+            blend_key: psd_blend_key(layer.blend.id),
+            opacity: opacity_u8(layer.opacity),
+            clipping: u8::from(layer.clipped),
+            flags: if layer.visible { 0 } else { 0x02 },
+            filler: 0,
+            mask,
+            blend_ranges: BlendRanges::default(),
+            name_legacy,
+            addl,
+            extra_raw: None,
+            channel_data,
+        });
+    }
+    while let Some(top) = open.pop() {
+        close(&mut records, top)?;
+    }
+
+    // The merged composite (with transparency), and a header that says so.
+    let planes = planes_from_rgba8(composite, n, true);
+    file.composite = encode_composite_rle(&planes, file, width, height)?;
+    file.header.channels = 4;
+    file.layer_mask.layers = records;
+    file.layer_mask.transparency_in_merged = true;
+    file.layer_mask.section_raw = None;
+    Ok(PsdSaveBackShape::Layered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,5 +973,177 @@ mod tests {
         assert_eq!(RasterFormat::from_wire("webp"), None);
         assert_eq!(RasterFormat::Png.extension(), ".png");
         assert_eq!(RasterFormat::Jpeg.mime(), "image/jpeg");
+    }
+
+    /// A 4×2 stack: background, a grouped + clipped + masked layer, a
+    /// hidden one — every property the layered save writes.
+    fn layered_stack() -> crate::layers::LayerStack {
+        use crate::layers::LayerStack;
+        use image_core::Region;
+        let solid = |v: u8| std::sync::Arc::from(vec![v; 4 * 2 * 4].into_boxed_slice());
+        let mut s = LayerStack::from_image(4, 2, solid(40)).expect("stack");
+        s.add("Grain ✓");
+        s.edit_active(
+            "p",
+            Region::new(0, 0, 4, 2),
+            crate::pixels::Pixels::from_rgba8(solid(200)),
+        )
+        .expect("paint");
+        s.set_opacity(1, 0.5).expect("o");
+        s.set_blend(1, "multiply").expect("b");
+        s.set_clipped(1, true).expect("c");
+        let cov =
+            image_gpu::SelectionCoverage::from_data(4, 2, vec![255, 0, 255, 0, 255, 0, 255, 0])
+                .expect("cov");
+        s.set_mask(1, std::sync::Arc::new(cov)).expect("m");
+        s.add("Hidden");
+        s.set_visible(2, false).expect("v");
+        s.group_range(1, 2, "Look").expect("g");
+        s
+    }
+
+    fn psd_4x2() -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"8BPS");
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&[0u8; 6]);
+        b.extend_from_slice(&3u16.to_be_bytes());
+        b.extend_from_slice(&2u32.to_be_bytes()); // height
+        b.extend_from_slice(&4u32.to_be_bytes()); // width
+        b.extend_from_slice(&8u16.to_be_bytes());
+        b.extend_from_slice(&3u16.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&0u16.to_be_bytes());
+        b.extend_from_slice(&[9u8; 24]);
+        b
+    }
+
+    fn write_layered() -> Vec<u8> {
+        let s = layered_stack();
+        let mut f = PsdFile::parse(&psd_4x2()).expect("parse");
+        let composite = vec![77u8; 4 * 2 * 4];
+        assert_eq!(
+            psd_write_stack(&mut f, &s, &composite).expect("write"),
+            PsdSaveBackShape::Layered
+        );
+        f.write().expect("serialize")
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_layer_stack_is_written_as_psd_layers__feat__image_io_save_back() {
+        let bytes = write_layered();
+        let f = PsdFile::parse(&bytes).expect("the written file parses");
+        let names: Vec<String> = f
+            .layer_mask
+            .layers
+            .iter()
+            .map(|l| {
+                l.addl
+                    .iter()
+                    .find_map(|a| a.unicode_name())
+                    .unwrap_or_default()
+            })
+            .collect();
+        // Bottom-first: background, the group's closing divider, its
+        // members, then the folder record above them.
+        assert_eq!(
+            names,
+            vec!["Background", "</Layer group>", "Grain ✓", "Hidden", "Look"]
+        );
+        let kinds: Vec<Option<SectionKind>> = f
+            .layer_mask
+            .layers
+            .iter()
+            .map(|l| l.addl.iter().find_map(|a| a.lsct()).map(|d| d.kind))
+            .collect();
+        assert_eq!(kinds[1], Some(SectionKind::BoundingDivider));
+        assert_eq!(kinds[4], Some(SectionKind::OpenFolder));
+        let grain = &f.layer_mask.layers[2];
+        assert_eq!(grain.opacity, 128);
+        assert_eq!(&grain.blend_key, b"mul ");
+        assert_eq!(grain.clipping, 1);
+        assert!(grain.mask.is_some());
+        assert!(
+            grain.channels.iter().any(|c| c.id == -2),
+            "the mask channel"
+        );
+        assert_eq!(f.layer_mask.layers[3].flags & 0x02, 0x02, "hidden");
+        assert_eq!(
+            &f.layer_mask.layers[4].blend_key, b"pass",
+            "pass-through group"
+        );
+        assert!(f.layer_mask.transparency_in_merged);
+        // Writing the parsed file again changes nothing.
+        assert_eq!(f.write().expect("rewrite"), bytes);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_stack_with_adjustment_layers_is_refused_for_the_flatten_fallback__feat__image_io_save_back(
+    ) {
+        let mut s = layered_stack();
+        s.add_adjustment(
+            "Grade",
+            crate::ingest::AdjustParams {
+                exposure_ev: 0.2,
+                ..crate::ingest::AdjustParams::default()
+            },
+        );
+        let mut f = PsdFile::parse(&psd_4x2()).expect("parse");
+        let err = psd_write_stack(&mut f, &s, &[0u8; 32]).expect_err("refused");
+        assert!(err.to_string().contains("adjustment layers"));
+    }
+
+    /// psd-tools (an independent reader) sees the same layer tree. Opt in:
+    /// `PAGED_PSD_ORACLE=1` with the repo's `.venv` (see CLAUDE.md).
+    #[test]
+    #[ignore = "needs PAGED_PSD_ORACLE=1 and .venv with psd-tools"]
+    #[allow(non_snake_case)]
+    fn psd_tools_reads_the_layered_save__feat__image_io_save_back() {
+        if std::env::var("PAGED_PSD_ORACLE").as_deref() != Ok("1") {
+            return;
+        }
+        let path = std::env::temp_dir().join("paged-layered-save-oracle.psd");
+        std::fs::write(&path, write_layered()).expect("write");
+        let py = concat!(env!("CARGO_MANIFEST_DIR"), "/../.venv/bin/python");
+        let script = r#"
+import sys
+from psd_tools import PSDImage
+psd = PSDImage.open(sys.argv[1])
+def walk(layers, depth):
+    for l in layers:
+        print(f"{depth}|{l.name}|{l.kind}|{l.visible}|{l.opacity}|{l.blend_mode}|{l.clipping}|{l.has_mask()}")
+        if l.is_group():
+            walk(l, depth + 1)
+walk(psd, 0)
+"#;
+        let out = std::process::Command::new(py)
+            .args(["-c", script, path.to_str().expect("path")])
+            .output()
+            .expect("run psd-tools");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(
+            lines[0].starts_with("0|Background|pixel|True|255|"),
+            "{text}"
+        );
+        assert!(
+            lines[1].starts_with("0|Look|group|True|255|BlendMode.PASS_THROUGH"),
+            "{text}"
+        );
+        assert!(
+            lines[2].starts_with("1|Grain ✓|pixel|True|128|BlendMode.MULTIPLY|True|True"),
+            "{text}"
+        );
+        assert!(lines[3].starts_with("1|Hidden|pixel|False|"), "{text}");
     }
 }

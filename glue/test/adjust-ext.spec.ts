@@ -296,6 +296,24 @@ describe("the save-back lane (real engine wasm)", () => {
     handle.dispose();
   });
 
+  it("a layered session exports as a LAYERED PSD (not a flatten)", async () => {
+    const fake = makeFakeEditor();
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+    expect(await session.importBytes("layers.psd", psdBytes())).toBe(true);
+    expect(await session.addLayer("Notes")).toBe(true);
+    const exported = await session.psdExportBytes();
+    expect(exported).not.toBeNull();
+    expect(session.state().status).toMatch(/written as the file's layers/);
+    // Reading it back: two layer records, by name.
+    const round = createImageSession(handle.host);
+    expect(await round.importBytes("again.psd", exported!.bytes)).toBe(true);
+    expect(round.state().psd?.layers.map((l) => l.name)).toEqual(["Background", "Notes"]);
+    round.dispose();
+    session.dispose();
+    handle.dispose();
+  });
+
   it("an edit the PSD save-back cannot write is refused, not exported as the original", async () => {
     const fake = makeFakeEditor();
     const handle = makeHost(fake);

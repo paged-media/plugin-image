@@ -128,6 +128,7 @@ export const psd_layer_list: (a: number) => [number, number, number, number];
 export const psd_open: (a: number, b: number) => [number, number, number];
 export const psd_remove_layer: (a: number, b: number) => [number, number];
 export const psd_save: (a: number) => [number, number, number];
+export const psd_save_layers: (a: number) => [number, number, number, number];
 export const psd_set_layer_name: (a: number, b: number, c: number, d: number) => [number, number];
 export const psd_set_layer_opacity: (a: number, b: number, c: number) => [number, number];
 export const resize_image: (a: number, b: number, c: number, d: number, e: number) => any;
