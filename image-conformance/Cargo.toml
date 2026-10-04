@@ -16,7 +16,7 @@ workspace = true
 # proves no production crate reaches it via cargo-tree).
 image-core = { path = "../image-core" }
 image-kernels = { path = "../image-kernels", features = ["reference"] }
-image-gpu = { path = "../image-gpu" }
+image-gpu = { path = "../image-gpu", features = ["test-support"] }
 image-pipeline = { path = "../image-pipeline" }
 image-codecs = { path = "../image-codecs" }
 image-psd = { path = "../image-psd" }

@@ -86,6 +86,10 @@ pub mod stroke;
 // per-texel WGSL ABI kernel row.
 pub mod distance;
 
+// The shared test device (dev-dependency feature only; see the module).
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 pub use coverage::{CombineMode, SelectionCoverage};
 pub use dab::{
     plan_segment, BrushTip, Dab, PressureTarget, SampledTip, StrokeAccumulator, StrokeSample,

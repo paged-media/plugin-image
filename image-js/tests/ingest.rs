@@ -305,17 +305,17 @@ fn image_editor_ingest_adjust_identity_needs_no_gpu() {
     // path (params identity ⇒ decode verbatim).
     let params = AdjustParams::default();
     assert!(params.is_identity());
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter (identity path covered via parity test)");
         return;
     };
-    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("identity adjust");
+    let out = pollster::block_on(adjust_rgba8(ctx, &img, &params, None)).expect("identity adjust");
     assert_eq!(&out[..], &img.rgba.to_rgba8()[..]);
 }
 
 #[test]
 fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -325,7 +325,7 @@ fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
         exposure_ev: 1.0, // exp2(1) = ×2 on rgb, alpha preserved
         ..AdjustParams::default()
     };
-    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("adjust");
+    let out = pollster::block_on(adjust_rgba8(ctx, &img, &params, None)).expect("adjust");
     assert_eq!(out.len(), img.rgba.len());
     for (i, (&got, &src)) in out.iter().zip(img.rgba.to_rgba8().iter()).enumerate() {
         let expect = if i % 4 == 3 {
@@ -340,8 +340,10 @@ fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
     }
 }
 
-async fn maybe_device() -> Option<GpuContext> {
-    GpuContext::new().await.ok()
+/// The shared test device; skips where there is no adapter unless
+/// `REQUIRE_GPU=1` is set (then it fails instead).
+fn device() -> Option<&'static GpuContext> {
+    image_gpu::test_support::device_or_skip("ingest")
 }
 
 /// Encode a true-ink CMYK buffer (`4·n` bytes, C,M,Y,K) as an Adobe CMYK
@@ -454,7 +456,7 @@ fn image_editor_adjust_extended_block_rejects_a_wrong_length() {
 
 #[test]
 fn image_editor_adjust_threshold_runs_through_the_chain_on_gpu() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -463,7 +465,7 @@ fn image_editor_adjust_threshold_runs_through_the_chain_on_gpu() {
         threshold: Some(0.5),
         ..AdjustParams::default()
     };
-    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("threshold");
+    let out = pollster::block_on(adjust_rgba8(ctx, &img, &params, None)).expect("threshold");
     // px0 luma = 0.5 (≥ 0.5) → white; px1 luma ≈ 0.3·.157+0.59·.353+0.11·.784 ≈ 0.34 → black.
     assert_eq!(&out[0..3], &[255, 255, 255], "px0 above the cut");
     assert_eq!(&out[4..7], &[0, 0, 0], "px1 below the cut");
@@ -472,7 +474,7 @@ fn image_editor_adjust_threshold_runs_through_the_chain_on_gpu() {
 
 #[test]
 fn image_editor_adjust_black_white_runs_through_the_chain_on_gpu() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -484,7 +486,7 @@ fn image_editor_adjust_black_white_runs_through_the_chain_on_gpu() {
         },
         ..AdjustParams::default()
     };
-    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, None)).expect("black&white");
+    let out = pollster::block_on(adjust_rgba8(ctx, &img, &params, None)).expect("black&white");
     for px in out.chunks_exact(4) {
         assert!(
             (px[0] as i32 - px[1] as i32).abs() <= 1 && (px[1] as i32 - px[2] as i32).abs() <= 1,
@@ -495,7 +497,7 @@ fn image_editor_adjust_black_white_runs_through_the_chain_on_gpu() {
 
 #[test]
 fn image_selection_extended_stage_is_masked_like_the_others() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -508,7 +510,7 @@ fn image_selection_extended_stage_is_masked_like_the_others() {
         threshold: Some(0.5),
         ..AdjustParams::default()
     };
-    let out = pollster::block_on(adjust_rgba8(&ctx, &img, &params, Some(cov))).expect("masked");
+    let out = pollster::block_on(adjust_rgba8(ctx, &img, &params, Some(cov))).expect("masked");
     assert_eq!(&out[0..3], &[255, 255, 255], "selected pixel thresholded");
     for (i, (&got, &src)) in out[4..8]
         .iter()
@@ -524,7 +526,7 @@ fn image_selection_extended_stage_is_masked_like_the_others() {
 
 #[test]
 fn image_editor_generate_gradient_fills_through_the_selection() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -538,7 +540,7 @@ fn image_editor_generate_gradient_fills_through_the_selection() {
         c1: [1.0, 0.0, 0.0, 1.0], // both stops red ⇒ a flat fill, easy to assert
     };
     let out =
-        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, Some(cov))).expect("fill");
+        pollster::block_on(image_js::fill::fill_rgba8(ctx, &img, &spec, Some(cov))).expect("fill");
     assert_eq!(out.len(), img.rgba.len());
     assert!(
         out[0] > 250 && out[1] < 5 && out[2] < 5,
@@ -559,7 +561,7 @@ fn image_editor_generate_gradient_fills_through_the_selection() {
 
 #[test]
 fn image_editor_generate_noise_fills_the_whole_image_without_a_selection() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -570,8 +572,8 @@ fn image_editor_generate_noise_fills_the_whole_image_without_a_selection() {
         amount: 1.0,
         seed: 7,
     };
-    let out = pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None))
-        .expect("noise fill");
+    let out =
+        pollster::block_on(image_js::fill::fill_rgba8(ctx, &img, &spec, None)).expect("noise fill");
     let distinct: std::collections::BTreeSet<u8> = out.chunks_exact(4).map(|p| p[0]).collect();
     assert!(
         distinct.len() > 4,
@@ -580,7 +582,7 @@ fn image_editor_generate_noise_fills_the_whole_image_without_a_selection() {
     );
     // Determinism: the same (seed, amount) yields the same field.
     let again =
-        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None)).expect("repeat");
+        pollster::block_on(image_js::fill::fill_rgba8(ctx, &img, &spec, None)).expect("repeat");
     assert_eq!(out, again, "same seed ⇒ same noise");
 }
 
@@ -594,7 +596,7 @@ fn image_editor_generate_fill_composites_through_the_premultiply_bracket() {
     // straight bytes to `in0` reads the backdrop back too bright and then
     // returns the composite's premultiplied output as if it were
     // straight. This asserts the CORRECT source-over, not "it changed".
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -608,8 +610,7 @@ fn image_editor_generate_fill_composites_through_the_premultiply_bracket() {
         c0: [0.0, 0.0, 1.0, 0.5],
         c1: [0.0, 0.0, 1.0, 0.5],
     };
-    let out =
-        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None)).expect("fill");
+    let out = pollster::block_on(image_js::fill::fill_rgba8(ctx, &img, &spec, None)).expect("fill");
 
     // Source-over of s = (0,0,1) @ 0.5 onto b = (1,0,0) @ 128/255:
     //   αo = αs + αb(1 − αs)               = 0.5 + 0.50196·0.5 = 0.75098
@@ -636,7 +637,7 @@ fn image_editor_generate_fill_leaves_an_opaque_backdrop_on_the_fast_path() {
     // fully-opaque backdrop composites identically with or without the
     // `cast.*` steps (premultiply IS the identity there), so an opaque
     // fill lands exactly on the fill colour.
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -647,8 +648,7 @@ fn image_editor_generate_fill_leaves_an_opaque_backdrop_on_the_fast_path() {
         c0: [0.0, 0.0, 1.0, 1.0],
         c1: [0.0, 0.0, 1.0, 1.0],
     };
-    let out =
-        pollster::block_on(image_js::fill::fill_rgba8(&ctx, &img, &spec, None)).expect("fill");
+    let out = pollster::block_on(image_js::fill::fill_rgba8(ctx, &img, &spec, None)).expect("fill");
     for (i, (&got, &want)) in out.iter().zip([0u8, 0, 255, 255].iter()).enumerate() {
         assert!(
             (got as i32 - want as i32).abs() <= 2,
@@ -672,12 +672,12 @@ fn image_editor_crop_straighten_at_zero_degrees_needs_no_gpu_and_never_resamples
     let img = image_js::ingest::DecodedImage::from_rgba8(4, 2, (0..32u8).collect::<Vec<u8>>())
         .expect("valid");
     let cut = image_js::ingest::crop_rgba8(&img, 1, 0, 2, 2).expect("crop");
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter (0° path is pure CPU windowing anyway)");
         return;
     };
     let straight = pollster::block_on(image_js::ingest::straighten_crop_rgba8(
-        &ctx, &img, 1, 0, 2, 2, 0.0,
+        ctx, &img, 1, 0, 2, 2, 0.0,
     ))
     .expect("0° straighten");
     assert_eq!(
@@ -689,7 +689,7 @@ fn image_editor_crop_straighten_at_zero_degrees_needs_no_gpu_and_never_resamples
 
 #[test]
 fn image_editor_crop_straighten_180_degrees_reverses_the_full_frame() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -705,7 +705,7 @@ fn image_editor_crop_straighten_180_degrees_reverses_the_full_frame() {
     }
     let img = image_js::ingest::DecodedImage::from_rgba8(4, 2, px.clone()).expect("valid");
     let out = pollster::block_on(image_js::ingest::straighten_crop_rgba8(
-        &ctx, &img, 0, 0, 4, 2, 180.0,
+        ctx, &img, 0, 0, 4, 2, 180.0,
     ))
     .expect("180° straighten");
     assert_eq!((out.width, out.height), (4, 2));
@@ -721,7 +721,7 @@ fn image_editor_crop_straighten_180_degrees_reverses_the_full_frame() {
 
 #[test]
 fn image_editor_crop_straighten_small_angle_keeps_a_flat_field_flat() {
-    let Some(ctx) = pollster::block_on(maybe_device()) else {
+    let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
     };
@@ -731,7 +731,7 @@ fn image_editor_crop_straighten_small_angle_keeps_a_flat_field_flat() {
     let img =
         image_js::ingest::DecodedImage::from_rgba8(16, 16, vec![77u8; 16 * 16 * 4]).expect("valid");
     let out = pollster::block_on(image_js::ingest::straighten_crop_rgba8(
-        &ctx, &img, 2, 2, 12, 12, 7.5,
+        ctx, &img, 2, 2, 12, 12, 7.5,
     ))
     .expect("7.5° straighten");
     assert_eq!((out.width, out.height), (12, 12));

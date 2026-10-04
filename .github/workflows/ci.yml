@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -52,11 +53,11 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # GPU parity tests self-skip when no wgpu adapter is present (no GPU
-      # on ubuntu-latest), so this exercises the CPU-side logic + the
-      # scalar reference twins only. The pinned-swrast lane that would make
-      # the GPU↔ref parity tests actually execute headless is a follow-up
-      # (spec §9.3).
+      # GPU device tests self-skip here (no adapter on ubuntu-latest): on
+      # 2026-10-04, 224 of 1,034 tests reported "passed" this way without
+      # running. This step covers the CPU logic and the scalar reference
+      # twins; the gpu-sw and gpu-metal jobs below run the device tests
+      # with REQUIRE_GPU=1, where a skip is a failure.
       - name: test
         run: cargo test --workspace
 
@@ -146,6 +147,67 @@ jobs:
           if [ "$RAW" -gt "$BUDGET" ]; then
             echo "::warning title=wasm budget::raw image_js.wasm ($RAW bytes) exceeds the 100 MB app wasm budget — see BREAKAGE I-07"
           fi
+
+  # The GPU device tests on a SOFTWARE Vulkan adapter (Mesa lavapipe),
+  # on every PR. WGPU_FALLBACK=1 selects the CPU-type adapter, which is
+  # lavapipe; REQUIRE_GPU=1 makes a missing adapter fail every device test
+  # instead of skipping it (image-gpu/src/test_support.rs). The first test
+  # step prints the adapter, so the log says what the tests ran on.
+  gpu-sw:
+    name: rust GPU tests (lavapipe)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      WGPU_BACKEND: vulkan
+      WGPU_FALLBACK: "1"
+      REQUIRE_GPU: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0" # mirrors rust-toolchain.toml
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gpu-sw
+      - name: install lavapipe (Mesa software Vulkan)
+        # Bounded, and off the Azure mirror first (the brotli step above
+        # explains why both are needed).
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+              /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+              /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+      - name: adapter
+        run: cargo test -p image-gpu --features test-support --lib test_support -- --nocapture
+      - name: test (REQUIRE_GPU=1)
+        run: cargo test --workspace --no-fail-fast
+
+  # The same tests on real hardware (Apple silicon, Metal) after every
+  # merge to main and on demand: lavapipe is a conformant Vulkan driver,
+  # but it is not the class of device the bundle runs on.
+  gpu-metal:
+    name: rust GPU tests (Metal)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      WGPU_BACKEND: metal
+      REQUIRE_GPU: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0" # mirrors rust-toolchain.toml
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gpu-metal
+      - name: adapter
+        run: cargo test -p image-gpu --features test-support --lib test_support -- --nocapture
+      - name: test (REQUIRE_GPU=1)
+        run: cargo test --workspace --no-fail-fast
 
   # The TS bundle: the contract-import lint (isolation §2.1), typecheck,
   # vitest, and manifest validation. The link: chain (glue/manifest →

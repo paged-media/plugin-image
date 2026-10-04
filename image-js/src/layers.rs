@@ -1711,17 +1711,7 @@ mod tests {
     }
 
     fn device() -> Option<&'static GpuContext> {
-        use std::sync::OnceLock;
-        static DEVICE: OnceLock<Option<GpuContext>> = OnceLock::new();
-        DEVICE
-            .get_or_init(|| match pollster::block_on(GpuContext::new()) {
-                Ok(ctx) => Some(ctx),
-                Err(e) => {
-                    eprintln!("layers GPU unavailable: {e} — device tests will skip");
-                    None
-                }
-            })
-            .as_ref()
+        image_gpu::test_support::device_or_skip("layers")
     }
 
     // ── smart objects ────────────────────────────────────────────────

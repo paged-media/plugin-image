@@ -63,7 +63,9 @@ impl GpuContext {
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
-                force_fallback_adapter: std::env::var("WGPU_FALLBACK").is_ok(),
+                // `=1` only: `WGPU_FALLBACK=0` used to force the
+                // fallback too, because any value counted as set.
+                force_fallback_adapter: std::env::var("WGPU_FALLBACK").is_ok_and(|v| v == "1"),
             })
             .await
             .map_err(|_| GpuError::NoAdapter(format!("{backends:?}")))?;

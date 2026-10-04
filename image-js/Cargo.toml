@@ -49,6 +49,9 @@ getrandom = { workspace = true }
 zune-png = { workspace = true }
 zune-core = { workspace = true }
 pollster = { workspace = true }
+# The shared test device (REQUIRE_GPU=1 turns its skip into a failure).
+# Dev-only: the shipped wasm never sees the feature.
+image-gpu = { path = "../image-gpu", features = ["test-support"] }
 # CMYK-JPEG fixture builder for the ingest cast test (the codec adapter
 # only encodes RGB/Gray; jpeg-encoder writes the Adobe-APP14 CMYK form
 # zune-jpeg re-inverts on decode). Dev-only — never in the wasm artifact.

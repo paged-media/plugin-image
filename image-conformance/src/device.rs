@@ -31,33 +31,16 @@
  */
 
 //! The shared test GPU device. Local runs hit the machine adapter
-//! (Metal on macOS); CI selects the pinned software adapter via
-//! `WGPU_BACKEND` / `WGPU_FALLBACK` (spec §9.3). Tests that need a
-//! device call [`test_device`] and SKIP (not fail) when no adapter
-//! exists — the merge gate's GPU lane runs where one is guaranteed.
-
-use std::sync::OnceLock;
+//! (Metal on macOS); CI selects the software adapter via
+//! `WGPU_BACKEND` / `WGPU_FALLBACK=1` (spec §9.3). Tests that need a
+//! device call [`test_device`] and SKIP when no adapter exists — unless
+//! `REQUIRE_GPU=1`, which the GPU lanes set, and which turns the skip
+//! into a failure (`image_gpu::test_support`).
 
 use image_gpu::GpuContext;
 
-static DEVICE: OnceLock<Option<GpuContext>> = OnceLock::new();
-
 /// The process-wide test device, or `None` when the environment has no
-/// usable adapter.
+/// usable adapter and does not require one.
 pub fn test_device() -> Option<&'static GpuContext> {
-    DEVICE
-        .get_or_init(|| match pollster::block_on(GpuContext::new()) {
-            Ok(ctx) => {
-                eprintln!(
-                    "conformance GPU: {} ({:?})",
-                    ctx.adapter_info.name, ctx.adapter_info.backend
-                );
-                Some(ctx)
-            }
-            Err(e) => {
-                eprintln!("conformance GPU unavailable: {e} — GPU parity tests will skip");
-                None
-            }
-        })
-        .as_ref()
+    image_gpu::test_support::device_or_skip("conformance")
 }

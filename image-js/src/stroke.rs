@@ -1061,20 +1061,10 @@ mod tests {
 
     // ── end-to-end on the device ─────────────────────────────────────
 
-    /// The test GPU device, or `None` where there is no adapter (the
-    /// conformance harness's skip-don't-fail convention).
+    /// The test GPU device, or `None` where there is no adapter and
+    /// `REQUIRE_GPU=1` is not set (then it fails instead of skipping).
     fn device() -> Option<&'static GpuContext> {
-        use std::sync::OnceLock;
-        static DEVICE: OnceLock<Option<GpuContext>> = OnceLock::new();
-        DEVICE
-            .get_or_init(|| match pollster::block_on(GpuContext::new()) {
-                Ok(ctx) => Some(ctx),
-                Err(e) => {
-                    eprintln!("stroke GPU unavailable: {e} — device tests will skip");
-                    None
-                }
-            })
-            .as_ref()
+        image_gpu::test_support::device_or_skip("stroke")
     }
 
     /// A deterministic non-uniform base.
