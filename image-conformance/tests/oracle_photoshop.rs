@@ -154,6 +154,9 @@ fn dist(ours: &[[f64; 3]], theirs: &[[f64; 3]]) -> Dist {
 /// (`None` = no engine counterpart / no device for its only path).
 type Ours = Option<Vec<[f64; 3]>>;
 
+/// A probe's engine side: case id -> our render.
+type Engine = fn(&str) -> Ours;
+
 // ─────────────────────────────── blends ──────────────────────────────
 
 const BLENDS: [(&str, Blend); 26] = [
@@ -416,9 +419,9 @@ fn filter_case(id: &str) -> Ours {
 // ─────────────────────────────── replay ──────────────────────────────
 
 /// Every probe this file replays, with its engine side.
-fn probes() -> Vec<(&'static str, fn(&str) -> Ours)> {
+fn probes() -> Vec<(&'static str, Engine)> {
     vec![
-        ("blend-modes", blend_case as fn(&str) -> Ours),
+        ("blend-modes", blend_case as Engine),
         ("adjustments", adjust_case),
         ("filters", filter_case),
     ]
@@ -515,9 +518,9 @@ fn write_ledger(measured: &[Measured], old: &BTreeMap<String, (String, String, O
             ),
             None => String::new(),
         };
-        let _ = write!(
+        let _ = writeln!(
             rows,
-            "    \"{}\": {{\"class\": \"{class}\"{metrics}, \"note\": \"{}\"}}{}\n",
+            "    \"{}\": {{\"class\": \"{class}\"{metrics}, \"note\": \"{}\"}}{}",
             m.key,
             esc(&note),
             if i + 1 < measured.len() { "," } else { "" }
