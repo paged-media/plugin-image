@@ -487,13 +487,31 @@ impl DecodedImage {
         let th = y1 - y0;
         crate::counters::bump(|c| c.tiles_cut += 1);
         let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
-        let stride = self.width as usize * 4;
-        for row in 0..th as usize {
-            let src_off = (y0 as usize + row) * stride + x0 as usize * 4;
-            let dst_off = row * tw as usize * 4;
-            let len = tw as usize * 4;
-            let src8 = self.rgba.to_rgba8();
-            out[dst_off..dst_off + len].copy_from_slice(&src8[src_off..src_off + len]);
+        let len = tw as usize * 4;
+        if self.rgba.is_16bit() {
+            // Narrow only the window's own samples, by the high byte
+            // exactly as `Pixels::to_rgba8` does. Narrowing the whole
+            // image here (once per ROW, as this used to) made every tile
+            // cost the image squared.
+            let raw = self.rgba.raw();
+            let stride = self.width as usize * 8;
+            for row in 0..th as usize {
+                let src_off = (y0 as usize + row) * stride + x0 as usize * 8;
+                let dst = &mut out[row * len..(row + 1) * len];
+                for (d, s) in dst
+                    .iter_mut()
+                    .zip(raw[src_off..src_off + len * 2].chunks_exact(2))
+                {
+                    *d = u16::from_ne_bytes([s[0], s[1]]).to_be_bytes()[0];
+                }
+            }
+        } else {
+            let src8 = self.rgba.raw();
+            let stride = self.width as usize * 4;
+            for row in 0..th as usize {
+                let src_off = (y0 as usize + row) * stride + x0 as usize * 4;
+                out[row * len..(row + 1) * len].copy_from_slice(&src8[src_off..src_off + len]);
+            }
         }
         (out, tw, th)
     }

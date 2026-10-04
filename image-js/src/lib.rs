@@ -2295,8 +2295,10 @@ mod wasm {
             let a = buf[i + 3] as f32 / 255.0;
             f16::from_f32(if associate && c < 3 { v * a } else { v }).to_le_bytes()
         };
-        let mut win = Vec::with_capacity(img.rgba.len() * 2);
-        for i in (0..img.rgba.len()).step_by(4) {
+        // Over the 8-bit VIEW's length: on a 16-bit store `img.rgba.len()`
+        // is twice as long, and indexing `img8` with it ran off the end.
+        let mut win = Vec::with_capacity(img8.len() * 2);
+        for i in (0..img8.len()).step_by(4) {
             for c in 0..4 {
                 win.extend_from_slice(&assoc(&img8, i, c));
             }

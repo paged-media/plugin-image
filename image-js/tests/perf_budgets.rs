@@ -118,12 +118,11 @@ fn stack(w: u32, h: u32, n: usize) -> LayerStack {
 
 // ── 16-bit tile cut ──────────────────────────────────────────────────
 
-/// BUDGET (2026-10-04): cutting ONE 64×64 tile out of a 16-bit
-/// 256×256 image narrows the WHOLE image once per row of the tile —
-/// `to_rgba8()` sits inside the row loop (`ingest.rs`,
-/// `tile_window_rgba8`). Quadratic in the image for every tile.
-const TILE16_NARROWINGS: u64 = 64;
-const TILE16_NARROWED_BYTES: u64 = 64 * 256 * 256 * 4;
+/// BUDGET: cutting ONE 64×64 tile out of a 16-bit 256×256 image
+/// narrows nothing but the tile. Was 64 whole-image narrowings (16 MiB)
+/// when measured on 2026-10-04: `to_rgba8()` sat inside the row loop.
+const TILE16_NARROWINGS: u64 = 0;
+const TILE16_NARROWED_BYTES: u64 = 0;
 
 #[test]
 fn a_16bit_tile_cut__feat__image_editor_tile_provider() {
@@ -137,11 +136,12 @@ fn a_16bit_tile_cut__feat__image_editor_tile_provider() {
     counters::reset();
     let ((bytes, tw, th), e, _) = counters::measure(|| img.tile_window_rgba8(64, 64, 64, 64));
     assert_eq!((tw, th, bytes.len()), (64, 64, 64 * 64 * 4));
-    // The bytes are right whatever the cost: the high byte of each sample.
-    assert_eq!(
-        &bytes[..4],
-        &ramp(w, h, 7)[(64 * 256 + 64) * 4..(64 * 256 + 64) * 4 + 4]
-    );
+    // The bytes equal narrowing the whole image and then cropping.
+    let full = img.rgba.to_rgba8();
+    let want: Vec<u8> = (64..128usize)
+        .flat_map(|y| full[(y * 256 + 64) * 4..(y * 256 + 128) * 4].to_vec())
+        .collect();
+    assert_eq!(bytes, want, "the tile is the narrowed image's window");
     check(
         "16-bit tile cut",
         &[
