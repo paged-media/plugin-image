@@ -127,6 +127,7 @@ use std::sync::Arc;
 
 use image_core::Region;
 use image_gpu::coverage::SelectionCoverage;
+#[cfg(any(test, feature = "reference-fold"))]
 use image_gpu::selection::SelectionMask;
 use image_gpu::stroke::window_is_opaque;
 use image_gpu::{GpuContext, TileInput};
@@ -134,9 +135,12 @@ use image_graph::journal::{FlatImage, RecordOutcome, TileJournal};
 use image_kernels::families::cast::{
     CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
 };
-use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
+#[cfg(any(test, feature = "reference-fold"))]
+use image_kernels::families::compose::ComposeParams;
+use image_kernels::families::compose::COMPOSE_NORMAL;
 use image_kernels::KernelDef;
 
+#[cfg(any(test, feature = "reference-fold"))]
 use crate::fill::{f16_to_rgba8, rgba8_to_f16};
 use crate::ingest::{AdjustParams, IngestError};
 use crate::stroke::blend_kernel;
@@ -146,6 +150,9 @@ use crate::stroke::blend_kernel;
 /// than a modelling one — and an explicit bound beats discovering it as
 /// an allocation failure mid-fold.
 const MAX_GROUP_DEPTH: usize = 8;
+
+// The GPU-resident fold (the composite's implementation).
+mod fold;
 
 /// The default name of the layer an ingested image becomes.
 pub const BACKGROUND_LAYER_NAME: &str = "Background";
@@ -459,6 +466,10 @@ pub struct LayerStack {
     active: usize,
     next_id: u32,
     journal: TileJournal,
+    /// What the GPU-resident fold keeps between composites (plates, the
+    /// checkpoint below the active layer, the last result). Keyed by
+    /// identity, so it needs no invalidation — see `fold`.
+    fold: std::sync::Mutex<fold::FoldCache>,
 }
 
 impl LayerStack {
@@ -518,6 +529,7 @@ impl LayerStack {
             active: 0,
             next_id: 2,
             journal: TileJournal::new(),
+            fold: Default::default(),
         })
     }
 
@@ -574,6 +586,7 @@ impl LayerStack {
             layers,
             next_id,
             journal: TileJournal::new(),
+            fold: Default::default(),
         })
     }
 
@@ -1104,6 +1117,7 @@ impl LayerStack {
     }
 
     /// Blend a group's finished composite into the outer stack.
+    #[cfg(any(test, feature = "reference-fold"))]
     async fn blend_group(
         &self,
         ctx: &GpuContext,
@@ -1351,6 +1365,14 @@ impl LayerStack {
     /// an in-flight stroke). Hidden, zero-opacity and fully transparent
     /// layers drop out here — each is exactly the identity in the fold.
     fn plates<'a>(&'a self, override_active: Option<&'a Arc<[u8]>>) -> Vec<(&'a Layer, Arc<[u8]>)> {
+        self.plates_indexed(override_active)
+            .into_iter()
+            .map(|(i, px)| (&self.layers[i], px))
+            .collect()
+    }
+
+    /// [`Self::plates`] by layer index.
+    fn plates_indexed(&self, override_active: Option<&Arc<[u8]>>) -> Vec<(usize, Arc<[u8]>)> {
         self.layers
             .iter()
             .enumerate()
@@ -1372,7 +1394,7 @@ impl LayerStack {
                 if l.is_pixels() && is_fully_transparent(&px) {
                     return None;
                 }
-                Some((l, px))
+                Some((i, px))
             })
             .collect()
     }
@@ -1391,9 +1413,40 @@ impl LayerStack {
         ctx: Option<&GpuContext>,
         override_active: Option<&Arc<[u8]>>,
     ) -> Result<Arc<[u8]>, IngestError> {
+        let plates = self.plates_indexed(override_active);
+        crate::counters::bump(|c| c.composites += 1);
+
+        match plates.as_slice() {
+            // Nothing contributes: an honest transparent canvas.
+            [] => return Ok(self.transparent()),
+            // The identity fold — the pixels ARE the composite. Handed
+            // back as the very same allocation (an `Arc` clone), so a
+            // one-layer document costs nothing to composite.
+            [(i, px)] if self.layers[*i].is_plain() => return Ok(Arc::clone(px)),
+            _ => {}
+        }
+        let ctx = ctx.ok_or_else(|| {
+            IngestError::Unsupported(
+                "compositing layers is GPU-only — call init_gpu first (the blend \
+                 is a registered WGSL kernel dispatch; no CPU blend path ships)"
+                    .into(),
+            )
+        })?;
+        self.composite_resident(ctx, &plates).await
+    }
+
+    /// The fold as it ran before it became resident: every blend its own
+    /// upload, dispatch and readback. Kept, test-only, as the reference
+    /// the resident fold is proven byte-equal against.
+    #[cfg(any(test, feature = "reference-fold"))]
+    #[doc(hidden)]
+    pub async fn composite_reference(
+        &self,
+        ctx: Option<&GpuContext>,
+        override_active: Option<&Arc<[u8]>>,
+    ) -> Result<Arc<[u8]>, IngestError> {
         let (w, h) = (self.width, self.height);
         let plates = self.plates(override_active);
-        crate::counters::bump(|c| c.composites += 1);
 
         match plates.as_slice() {
             // Nothing contributes: an honest transparent canvas.

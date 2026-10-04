@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex};
 use image_kernels::KernelDef;
 
 use crate::pipeline::KernelPipeline;
+use crate::resident::{Constant, Resident, ScratchPool};
 use crate::GpuError;
 
 pub struct GpuContext {
@@ -55,6 +56,11 @@ pub struct GpuContext {
     /// dispatch (as every dispatch did until 2026-10-04) cost a shader
     /// compile per tile per stage.
     pipelines: Mutex<HashMap<&'static str, Arc<KernelPipeline>>>,
+    /// Released textures kept for reuse (see `resident`).
+    pub(crate) scratch: Arc<Mutex<ScratchPool>>,
+    /// Constant textures (the constant-1 mask, transparent black), one
+    /// per size.
+    pub(crate) constants: Mutex<HashMap<(Constant, u32, u32), Resident>>,
 }
 
 impl GpuContext {
@@ -99,6 +105,8 @@ impl GpuContext {
             queue,
             adapter_info: adapter.get_info(),
             pipelines: Mutex::new(HashMap::new()),
+            scratch: Arc::default(),
+            constants: Mutex::new(HashMap::new()),
         })
     }
 

@@ -27,6 +27,9 @@ bytemuck = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# The layer fold's cache property test compares the resident fold with
+# the reference one (dev-only; image-js never depends back on this crate).
+image-js = { path = "../image-js", features = ["reference-fold"] }
 criterion = { workspace = true }
 # D-4 bench (png_d4): zune-png is the chosen adapter; image/png is the
 # loser kept here ONLY as the bench comparison baseline (dev-dep, never
