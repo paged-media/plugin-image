@@ -1524,10 +1524,10 @@ impl LayerStack {
             .count();
         while pixel_steps > held {
             match self.steps.remove(0) {
+                // The journal already counted its own eviction.
                 Step::Pixels => pixel_steps -= 1,
-                Step::Structure { .. } => {}
+                Step::Structure { .. } => self.dropped_steps += 1,
             }
-            self.dropped_steps += 1;
         }
     }
 

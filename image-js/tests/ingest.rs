@@ -314,7 +314,7 @@ fn image_editor_ingest_adjust_identity_needs_no_gpu() {
 }
 
 #[test]
-fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
+fn image_editor_ingest_adjust_exposure_doubles_the_light_on_gpu() {
     let Some(ctx) = device() else {
         println!("SKIP: no GPU adapter");
         return;
@@ -322,7 +322,7 @@ fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
     let img =
         decode_rgba8(&psd_bytes(2, 1, &[&[10, 20], &[30, 40], &[50, 60]])).expect("decode psd");
     let params = AdjustParams {
-        exposure_ev: 1.0, // exp2(1) = ×2 on rgb, alpha preserved
+        exposure_ev: 1.0, // ×2 on the LIGHT (2.2-decoded), alpha preserved
         ..AdjustParams::default()
     };
     let out = pollster::block_on(adjust_rgba8(ctx, &img, &params, None)).expect("adjust");
@@ -331,7 +331,8 @@ fn image_editor_ingest_adjust_exposure_doubles_on_gpu() {
         let expect = if i % 4 == 3 {
             src as i32 // alpha untouched
         } else {
-            (src as i32 * 2).min(255)
+            let light = (f64::from(src) / 255.0).powf(2.2) * 2.0;
+            ((light.powf(1.0 / 2.2) * 255.0).round() as i32).min(255)
         };
         assert!(
             (got as i32 - expect).abs() <= 2,

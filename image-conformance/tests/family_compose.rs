@@ -305,16 +305,18 @@ fn compose_extended_blend_semantics() {
     // pin light: darken arm below 0.5, lighten arm above.
     assert!((b_pin_light(0.9, 0.2) - 0.4).abs() < 1e-6);
     assert!((b_pin_light(0.1, 0.9) - 0.8).abs() < 1e-6);
-    // hard mix snaps to 0/1; the sum-at-1 tie goes to 1.
+    // hard mix snaps to 0/1; the sum-at-1 tie goes to 0 (Photoshop).
     assert_eq!(b_hard_mix(0.4, 0.5), 0.0);
-    assert_eq!(b_hard_mix(0.5, 0.5), 1.0);
+    assert_eq!(b_hard_mix(0.5, 0.5), 0.0);
+    assert_eq!(b_hard_mix(0.5, 0.51), 1.0);
     // subtract floors at 0.
     assert_eq!(b_subtract(0.2, 0.5), 0.0);
     assert!((b_subtract(0.7, 0.2) - 0.5).abs() < 1e-6);
-    // divide: clamp at 1, Cs = 0 -> 1.
+    // divide: clamp at 1, Cs = 0 -> 1, but 0 / 0 -> 0 (Photoshop).
     assert!((b_divide(0.25, 0.5) - 0.5).abs() < 1e-6);
     assert_eq!(b_divide(0.5, 0.25), 1.0);
-    assert_eq!(b_divide(0.0, 0.0), 1.0);
+    assert_eq!(b_divide(0.5, 0.0), 1.0);
+    assert_eq!(b_divide(0.0, 0.0), 0.0);
     // darker/lighter color select the WHOLE triple by Lum; ties keep Cb.
     let dark = [0.1, 0.1, 0.9]; // lum 0.188
     let light = [0.5, 0.9, 0.1]; // lum 0.692

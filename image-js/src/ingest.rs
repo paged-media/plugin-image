@@ -1143,7 +1143,7 @@ fn build_adjust_chain(
         node = pipe.apply(
             node,
             &ADJUST_EXPOSURE,
-            Arc::<[u8]>::from(AdjustExposureParams::new(params.exposure_ev).as_bytes()),
+            Arc::<[u8]>::from(AdjustExposureParams::encoded(params.exposure_ev).as_bytes()),
         );
     }
     if params.temp != 0.0 || params.tint != 0.0 {

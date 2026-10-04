@@ -977,6 +977,7 @@
   status: implemented
   provenance:
     - "exposure: rgb·exp2(ev); standard tone op; no reference reading"
+    - "encoding = 1: the gain on light decoded with a 2.2 power; oracle: Photoshop 2026 Exposure (image-conformance/fixtures/photoshop/adjustments)"
   tests:
     rust: ["image-conformance/tests/family_adjust.rs"]
 

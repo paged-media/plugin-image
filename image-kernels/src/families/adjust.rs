@@ -150,21 +150,36 @@ fn unpremul_rgb(c: vec4<f32>) -> vec3<f32> {
 //
 // Stops of exposure: a scalar gain k = exp2(ev) applied to LINEAR light.
 // Because gain commutes with premultiplication ((rgb·α)·k = (rgb·k)·α),
-// the module scales the PREMULTIPLIED rgb directly and leaves alpha — no
-// unpremul/re-premul round-trip needed. exp2 is a WGSL builtin; the
-// scalar reference mirrors `f32::exp2` exactly.
+// on linear input the module scales the PREMULTIPLIED rgb directly and
+// leaves alpha — no unpremul/re-premul round-trip needed. exp2 is a WGSL
+// builtin; the scalar reference mirrors `f32::exp2` exactly.
+//
+// `encoding = 1` declares the input gamma-ENCODED (the editor's working
+// data): the module unpremultiplies, decodes with a pure 2.2 power,
+// applies the gain to the light, encodes and re-premultiplies. A stop is
+// defined on light, so +1 EV doubles it: encoded 0.5 → 0.687, not the
+// ~2.2 stops a gain on the encoded value would give. The 2.2 power is
+// Photoshop's: against its Exposure it is within 1.7 levels where the
+// piecewise sRGB curve is 4.4 levels off in the shadows (measured).
 
-/// Exposure params: `ev` stops (powers of two; exp2(ev) is the gain).
+/// Exposure params: `ev` stops (powers of two; exp2(ev) is the gain);
+/// `encoding` 0 = linear input, 1 = 2.2-gamma-encoded input.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
 pub struct AdjustExposureParams {
     pub ev: f32,
-    pub _abi_pad: u32,
+    pub encoding: u32,
 }
 
 impl AdjustExposureParams {
+    /// Exposure on linear input.
     pub fn new(ev: f32) -> Self {
-        Self { ev, _abi_pad: 0 }
+        Self { ev, encoding: 0 }
+    }
+
+    /// Exposure on gamma-encoded input, applied to its light.
+    pub fn encoded(ev: f32) -> Self {
+        Self { ev, encoding: 1 }
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -172,12 +187,19 @@ impl AdjustExposureParams {
     }
 }
 
-const EXPOSURE_PARAMS_FIELDS: &[ParamField] = &[ParamField {
-    name: "ev",
-    wgsl_ty: "f32",
-}];
+const EXPOSURE_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "ev",
+        wgsl_ty: "f32",
+    },
+    ParamField {
+        name: "encoding",
+        wgsl_ty: "u32",
+    },
+];
 
-/// out.rgb = a.rgb · exp2(ev); out.a = a.a (scales premultiplied rgb).
+/// Linear: out.rgb = a.rgb · exp2(ev) (premultiplied); encoded: the same
+/// gain on the decoded light of the unpremultiplied colour. out.a = a.a.
 pub static ADJUST_EXPOSURE: KernelDef = KernelDef {
     id: "adjust.exposure",
     class: KernelClass::Point,
@@ -195,12 +217,22 @@ pub static ADJUST_EXPOSURE: KernelDef = KernelDef {
 const EXPOSURE_WGSL: &str = adjust_wgsl!(
     "struct Params {
     ev: f32,
-    _abi_pad: u32,
+    encoding: u32,
 }",
     "
+fn gamma_decode(c: f32) -> f32 { return pow(max(c, 0.0), 2.2); }
+fn gamma_encode(l: f32) -> f32 { return pow(max(l, 0.0), 1.0 / 2.2); }
 fn adjust(a: vec4<f32>) -> vec4<f32> {
     let k = exp2(params.ev);
-    return vec4<f32>(a.rgb * k, a.a);
+    if (params.encoding == 0u) { return vec4<f32>(a.rgb * k, a.a); }
+    if (a.a == 0.0) { return a; }
+    let c = a.rgb / a.a;
+    let o = vec3<f32>(
+        gamma_encode(gamma_decode(c.r) * k),
+        gamma_encode(gamma_decode(c.g) * k),
+        gamma_encode(gamma_decode(c.b) * k),
+    );
+    return vec4<f32>(o * a.a, a.a);
 }
 "
 );

@@ -151,8 +151,8 @@ fn s_color_dodge(cb: f32, cs: f32) -> f32 {
     return min(1.0, cb / (1.0 - cs));
 }
 fn s_color_burn(cb: f32, cs: f32) -> f32 {
-    if (cb == 1.0) { return 1.0; }
     if (cs == 0.0) { return 0.0; }
+    if (cb == 1.0) { return 1.0; }
     return 1.0 - min(1.0, (1.0 - cb) / cs);
 }
 fn s_soft_light(cb: f32, cs: f32) -> f32 {
@@ -176,12 +176,12 @@ fn s_pin_light(cb: f32, cs: f32) -> f32 {
     return max(cb, 2.0 * cs - 1.0);
 }
 fn s_hard_mix(cb: f32, cs: f32) -> f32 {
-    if (cb + cs < 1.0) { return 0.0; }
-    return 1.0;
+    if (cb + cs > 1.0 + 1.0 / 512.0) { return 1.0; }
+    return 0.0;
 }
 fn s_subtract(cb: f32, cs: f32) -> f32 { return max(cb - cs, 0.0); }
 fn s_divide(cb: f32, cs: f32) -> f32 {
-    if (cs == 0.0) { return 1.0; }
+    if (cs == 0.0) { return select(1.0, 0.0, cb == 0.0); }
     return min(cb / cs, 1.0);
 }
 "
@@ -365,10 +365,10 @@ const DIVIDE_WGSL: &str = separable_wgsl!(
 // only `lum` from the nonsep helper block. Ties keep the BACKDROP (the
 // strict compare fails), mirrored exactly by the scalar reference.
 const DARKER_COLOR_WGSL: &str = nonsep_wgsl!(
-    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    if (lum(cs) < lum(cb)) { return cs; }\n    return cb;\n}\n"
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    if (lum(cs) < lum(cb) - 1.0 / 32768.0) { return cs; }\n    return cb;\n}\n"
 );
 const LIGHTER_COLOR_WGSL: &str = nonsep_wgsl!(
-    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    if (lum(cs) > lum(cb)) { return cs; }\n    return cb;\n}\n"
+    "fn blend(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {\n    if (lum(cs) > lum(cb) + 1.0 / 32768.0) { return cs; }\n    return cb;\n}\n"
 );
 
 /// Build a compose `KernelDef` with the shared params + binary point

@@ -158,9 +158,21 @@ fn gradient_map_ref(a: Px, _b: Px, p: &AdjustGradientMapParams) -> Px {
 }
 
 fn exposure_ref(a: Px, _b: Px, p: &AdjustExposureParams) -> Px {
-    // vec4(a.rgb * exp2(ev), a.a) — operates on premultiplied rgb directly.
+    // Linear: vec4(a.rgb * exp2(ev), a.a) on premultiplied rgb directly.
     let k = p.ev.exp2();
-    Px([a.0[0] * k, a.0[1] * k, a.0[2] * k, a.0[3]])
+    if p.encoding == 0 {
+        return Px([a.0[0] * k, a.0[1] * k, a.0[2] * k, a.0[3]]);
+    }
+    // Encoded: the gain applies to the 2.2-decoded light of the straight colour.
+    let al = a.0[3];
+    if al == 0.0 {
+        return a;
+    }
+    let dec = |c: f32| c.max(0.0).powf(2.2);
+    let enc = |l: f32| l.max(0.0).powf(1.0 / 2.2);
+    let c = unpremul(a);
+    let o = c.map(|x| enc(dec(x) * k));
+    Px([o[0] * al, o[1] * al, o[2] * al, al])
 }
 
 fn brightness_contrast_ref(a: Px, _b: Px, p: &AdjustBrightnessContrastParams) -> Px {
@@ -547,6 +559,12 @@ parity_test!(
     ADJUST_EXPOSURE,
     exposure_ref,
     AdjustExposureParams::new(0.8)
+);
+parity_test!(
+    exposure_encoded_parity,
+    ADJUST_EXPOSURE,
+    exposure_ref,
+    AdjustExposureParams::encoded(0.8)
 );
 parity_test!(
     brightness_contrast_parity,

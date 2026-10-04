@@ -138,13 +138,15 @@ pub fn b_color_dodge(cb: f32, cs: f32) -> f32 {
     }
 }
 
-/// W3C §"color-burn": if Cb = 1 → 1; if Cs = 0 → 0; else
-/// `1 − min(1, (1 − Cb) / Cs)`.
+/// Colour burn: if Cs = 0 → 0; if Cb = 1 → 1; else
+/// `1 − min(1, (1 − Cb) / Cs)`. W3C tests Cb = 1 first; Photoshop tests
+/// Cs = 0 first (white over a black source is black), measured against
+/// Photoshop 2026 — the only point where the two orders differ.
 pub fn b_color_burn(cb: f32, cs: f32) -> f32 {
-    if cb == 1.0 {
-        1.0
-    } else if cs == 0.0 {
+    if cs == 0.0 {
         0.0
+    } else if cb == 1.0 {
+        1.0
     } else {
         1.0 - 1.0_f32.min((1.0 - cb) / cs)
     }
@@ -221,13 +223,16 @@ pub fn b_pin_light(cb: f32, cs: f32) -> f32 {
     }
 }
 
-/// Photoshop "hard mix": every channel snaps to 0 or 1 —
-/// `Cb + Cs < 1 → 0`, else `1`.
+/// Photoshop "hard mix": every channel snaps to 0 or 1 — `1` only when
+/// `Cb + Cs > 1` STRICTLY (the anti-diagonal `Cb + Cs = 1` is black,
+/// measured against Photoshop 2026). The comparison allows half an 8-bit
+/// step, so a sum that is 1 in 8-bit levels stays a tie after the f16
+/// storage of both operands.
 pub fn b_hard_mix(cb: f32, cs: f32) -> f32 {
-    if cb + cs < 1.0 {
-        0.0
-    } else {
+    if cb + cs > 1.0 + 1.0 / 512.0 {
         1.0
+    } else {
+        0.0
     }
 }
 
@@ -237,10 +242,15 @@ pub fn b_subtract(cb: f32, cs: f32) -> f32 {
 }
 
 /// Photoshop "divide": `B = min(Cb / Cs, 1)`; `Cs = 0 → 1` (the
-/// limit for any Cb > 0; black-source columns blow to white).
+/// limit for any Cb > 0; black-source columns blow to white), except
+/// `0 / 0 → 0` (measured against Photoshop 2026).
 pub fn b_divide(cb: f32, cs: f32) -> f32 {
     if cs == 0.0 {
-        1.0
+        if cb == 0.0 {
+            0.0
+        } else {
+            1.0
+        }
     } else {
         (cb / cs).min(1.0)
     }
@@ -355,11 +365,17 @@ pub fn b_luminosity(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     set_lum(cb, lum(cs))
 }
 
+/// Luminosities closer than this are a TIE for darker/lighter colour,
+/// and a tie keeps the backdrop: Photoshop 2026 keeps it at 0.0016 levels
+/// apart and takes the source at 0.02 (its 16-bit precision is 1/32768).
+pub const COLOR_TIE: f32 = 1.0 / 32768.0;
+
 /// Photoshop "darker color" (non-separable): keep the WHOLE rgb triple
 /// with the lower luminosity — `Lum(Cs) < Lum(Cb) → Cs`, else `Cb`
-/// (ties keep the backdrop). Same `Lum` weights as §10.3.
+/// (ties, within [`COLOR_TIE`], keep the backdrop). Same `Lum` weights
+/// as §10.3.
 pub fn b_darker_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    if lum(cs) < lum(cb) {
+    if lum(cs) < lum(cb) - COLOR_TIE {
         cs
     } else {
         cb
@@ -368,9 +384,9 @@ pub fn b_darker_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
 
 /// Photoshop "lighter color" (non-separable): keep the triple with the
 /// higher luminosity — `Lum(Cs) > Lum(Cb) → Cs`, else `Cb` (ties keep
-/// the backdrop).
+/// the backdrop, within [`COLOR_TIE`]).
 pub fn b_lighter_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    if lum(cs) > lum(cb) {
+    if lum(cs) > lum(cb) + COLOR_TIE {
         cs
     } else {
         cb
