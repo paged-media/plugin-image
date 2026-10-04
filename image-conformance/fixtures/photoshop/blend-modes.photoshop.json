@@ -1,0 +1,545 @@
+{
+  "fixture": "blend-modes",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/blend-modes.jsx",
+    "script_sha256": "a00f29b908b078427999e581f27b898cda8f69ecbafb026ed1ccf1079113df73",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-04T09:26:52.358Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "identity-bottom",
+      "params": {},
+      "output": "blend-modes/identity-bottom.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "normal@100",
+      "params": {
+        "mode": "normal",
+        "opacity": 100
+      },
+      "output": "blend-modes/normal@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "normal@50",
+      "params": {
+        "mode": "normal",
+        "opacity": 50
+      },
+      "output": "blend-modes/normal@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "multiply@100",
+      "params": {
+        "mode": "multiply",
+        "opacity": 100
+      },
+      "output": "blend-modes/multiply@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "multiply@50",
+      "params": {
+        "mode": "multiply",
+        "opacity": 50
+      },
+      "output": "blend-modes/multiply@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "screen@100",
+      "params": {
+        "mode": "screen",
+        "opacity": 100
+      },
+      "output": "blend-modes/screen@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "screen@50",
+      "params": {
+        "mode": "screen",
+        "opacity": 50
+      },
+      "output": "blend-modes/screen@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "overlay@100",
+      "params": {
+        "mode": "overlay",
+        "opacity": 100
+      },
+      "output": "blend-modes/overlay@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "overlay@50",
+      "params": {
+        "mode": "overlay",
+        "opacity": 50
+      },
+      "output": "blend-modes/overlay@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "darken@100",
+      "params": {
+        "mode": "darken",
+        "opacity": 100
+      },
+      "output": "blend-modes/darken@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "darken@50",
+      "params": {
+        "mode": "darken",
+        "opacity": 50
+      },
+      "output": "blend-modes/darken@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "lighten@100",
+      "params": {
+        "mode": "lighten",
+        "opacity": 100
+      },
+      "output": "blend-modes/lighten@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "lighten@50",
+      "params": {
+        "mode": "lighten",
+        "opacity": 50
+      },
+      "output": "blend-modes/lighten@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "color_dodge@100",
+      "params": {
+        "mode": "color_dodge",
+        "opacity": 100
+      },
+      "output": "blend-modes/color_dodge@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "color_dodge@50",
+      "params": {
+        "mode": "color_dodge",
+        "opacity": 50
+      },
+      "output": "blend-modes/color_dodge@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "color_burn@100",
+      "params": {
+        "mode": "color_burn",
+        "opacity": 100
+      },
+      "output": "blend-modes/color_burn@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "color_burn@50",
+      "params": {
+        "mode": "color_burn",
+        "opacity": 50
+      },
+      "output": "blend-modes/color_burn@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hard_light@100",
+      "params": {
+        "mode": "hard_light",
+        "opacity": 100
+      },
+      "output": "blend-modes/hard_light@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hard_light@50",
+      "params": {
+        "mode": "hard_light",
+        "opacity": 50
+      },
+      "output": "blend-modes/hard_light@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "soft_light@100",
+      "params": {
+        "mode": "soft_light",
+        "opacity": 100
+      },
+      "output": "blend-modes/soft_light@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "soft_light@50",
+      "params": {
+        "mode": "soft_light",
+        "opacity": 50
+      },
+      "output": "blend-modes/soft_light@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "difference@100",
+      "params": {
+        "mode": "difference",
+        "opacity": 100
+      },
+      "output": "blend-modes/difference@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "difference@50",
+      "params": {
+        "mode": "difference",
+        "opacity": 50
+      },
+      "output": "blend-modes/difference@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "exclusion@100",
+      "params": {
+        "mode": "exclusion",
+        "opacity": 100
+      },
+      "output": "blend-modes/exclusion@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "exclusion@50",
+      "params": {
+        "mode": "exclusion",
+        "opacity": 50
+      },
+      "output": "blend-modes/exclusion@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hue@100",
+      "params": {
+        "mode": "hue",
+        "opacity": 100
+      },
+      "output": "blend-modes/hue@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hue@50",
+      "params": {
+        "mode": "hue",
+        "opacity": 50
+      },
+      "output": "blend-modes/hue@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "saturation@100",
+      "params": {
+        "mode": "saturation",
+        "opacity": 100
+      },
+      "output": "blend-modes/saturation@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "saturation@50",
+      "params": {
+        "mode": "saturation",
+        "opacity": 50
+      },
+      "output": "blend-modes/saturation@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "color@100",
+      "params": {
+        "mode": "color",
+        "opacity": 100
+      },
+      "output": "blend-modes/color@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "color@50",
+      "params": {
+        "mode": "color",
+        "opacity": 50
+      },
+      "output": "blend-modes/color@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "luminosity@100",
+      "params": {
+        "mode": "luminosity",
+        "opacity": 100
+      },
+      "output": "blend-modes/luminosity@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "luminosity@50",
+      "params": {
+        "mode": "luminosity",
+        "opacity": 50
+      },
+      "output": "blend-modes/luminosity@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "linear_burn@100",
+      "params": {
+        "mode": "linear_burn",
+        "opacity": 100
+      },
+      "output": "blend-modes/linear_burn@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "linear_burn@50",
+      "params": {
+        "mode": "linear_burn",
+        "opacity": 50
+      },
+      "output": "blend-modes/linear_burn@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "linear_dodge@100",
+      "params": {
+        "mode": "linear_dodge",
+        "opacity": 100
+      },
+      "output": "blend-modes/linear_dodge@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "linear_dodge@50",
+      "params": {
+        "mode": "linear_dodge",
+        "opacity": 50
+      },
+      "output": "blend-modes/linear_dodge@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "darker_color@100",
+      "params": {
+        "mode": "darker_color",
+        "opacity": 100
+      },
+      "output": "blend-modes/darker_color@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "darker_color@50",
+      "params": {
+        "mode": "darker_color",
+        "opacity": 50
+      },
+      "output": "blend-modes/darker_color@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "lighter_color@100",
+      "params": {
+        "mode": "lighter_color",
+        "opacity": 100
+      },
+      "output": "blend-modes/lighter_color@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "lighter_color@50",
+      "params": {
+        "mode": "lighter_color",
+        "opacity": 50
+      },
+      "output": "blend-modes/lighter_color@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "vivid_light@100",
+      "params": {
+        "mode": "vivid_light",
+        "opacity": 100
+      },
+      "output": "blend-modes/vivid_light@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "vivid_light@50",
+      "params": {
+        "mode": "vivid_light",
+        "opacity": 50
+      },
+      "output": "blend-modes/vivid_light@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "linear_light@100",
+      "params": {
+        "mode": "linear_light",
+        "opacity": 100
+      },
+      "output": "blend-modes/linear_light@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "linear_light@50",
+      "params": {
+        "mode": "linear_light",
+        "opacity": 50
+      },
+      "output": "blend-modes/linear_light@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "pin_light@100",
+      "params": {
+        "mode": "pin_light",
+        "opacity": 100
+      },
+      "output": "blend-modes/pin_light@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "pin_light@50",
+      "params": {
+        "mode": "pin_light",
+        "opacity": 50
+      },
+      "output": "blend-modes/pin_light@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hard_mix@100",
+      "params": {
+        "mode": "hard_mix",
+        "opacity": 100
+      },
+      "output": "blend-modes/hard_mix@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hard_mix@50",
+      "params": {
+        "mode": "hard_mix",
+        "opacity": 50
+      },
+      "output": "blend-modes/hard_mix@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "subtract@100",
+      "params": {
+        "mode": "subtract",
+        "opacity": 100
+      },
+      "output": "blend-modes/subtract@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "subtract@50",
+      "params": {
+        "mode": "subtract",
+        "opacity": 50
+      },
+      "output": "blend-modes/subtract@50.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "divide@100",
+      "params": {
+        "mode": "divide",
+        "opacity": 100
+      },
+      "output": "blend-modes/divide@100.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "divide@50",
+      "params": {
+        "mode": "divide",
+        "opacity": 50
+      },
+      "output": "blend-modes/divide@50.png",
+      "profile": "none",
+      "bits": 16
+    }
+  ]
+}

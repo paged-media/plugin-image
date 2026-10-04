@@ -1,0 +1,111 @@
+{
+  "fixture": "filters",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/filters.jsx",
+    "script_sha256": "640544b0b56a8e1cf031b7ef1174ed1f59cb1409b281aad94a2b86eb61cdd4b9",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-04T09:29:32.626Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "identity",
+      "params": {},
+      "output": "filters/identity.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "gaussian-r2",
+      "params": {
+        "radius": 2
+      },
+      "output": "filters/gaussian-r2.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "gaussian-r5",
+      "params": {
+        "radius": 5
+      },
+      "output": "filters/gaussian-r5.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "unsharp-100-r1.5",
+      "params": {
+        "amount": 100,
+        "radius": 1.5,
+        "threshold": 0
+      },
+      "output": "filters/unsharp-100-r1.5.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "motion-30-r10",
+      "params": {
+        "angle": 30,
+        "distance": 10
+      },
+      "output": "filters/motion-30-r10.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "emboss",
+      "params": {
+        "angle": 135,
+        "height": 3,
+        "amount": 100
+      },
+      "output": "filters/emboss.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "find-edges",
+      "params": {},
+      "output": "filters/find-edges.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "mosaic-8",
+      "params": {
+        "cell": 8
+      },
+      "output": "filters/mosaic-8.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "median-r1",
+      "params": {
+        "radius": 1
+      },
+      "output": "filters/median-r1.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "offset-20-10-wrap",
+      "params": {
+        "h": 20,
+        "v": 10,
+        "undefined_areas": "wrap"
+      },
+      "output": "filters/offset-20-10-wrap.png",
+      "profile": "none",
+      "bits": 16
+    }
+  ]
+}

@@ -1,0 +1,250 @@
+{
+  "fixture": "adjustments",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/adjustments.jsx",
+    "script_sha256": "d58a3bff74221a0bbc76ad800c9850039a4c939049c6cb7dbd0eff559054c7e3",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-04T09:29:26.924Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "identity",
+      "params": {},
+      "output": "adjustments/identity.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "invert",
+      "params": {},
+      "output": "adjustments/invert.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "posterize-4",
+      "params": {
+        "levels": 4
+      },
+      "output": "adjustments/posterize-4.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "threshold-128",
+      "params": {
+        "level": 128
+      },
+      "output": "adjustments/threshold-128.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "levels",
+      "params": {
+        "in_black": 20,
+        "in_white": 230,
+        "gamma": 1.4,
+        "out_black": 10,
+        "out_white": 245
+      },
+      "output": "adjustments/levels.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "curves",
+      "params": {
+        "points": [
+          [
+            0,
+            0
+          ],
+          [
+            64,
+            40
+          ],
+          [
+            128,
+            150
+          ],
+          [
+            192,
+            220
+          ],
+          [
+            255,
+            255
+          ]
+        ]
+      },
+      "output": "adjustments/curves.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "exposure+1",
+      "params": {
+        "exposure": 1,
+        "offset": 0,
+        "gamma": 1
+      },
+      "output": "adjustments/exposure+1.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "exposure-0.5",
+      "params": {
+        "exposure": -0.5,
+        "offset": 0,
+        "gamma": 1
+      },
+      "output": "adjustments/exposure-0.5.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "brightness-contrast-legacy",
+      "params": {
+        "brightness": 30,
+        "contrast": 40,
+        "legacy": true
+      },
+      "output": "adjustments/brightness-contrast-legacy.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "brightness-contrast",
+      "params": {
+        "brightness": 30,
+        "contrast": 40,
+        "legacy": false
+      },
+      "output": "adjustments/brightness-contrast.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hue-saturation",
+      "params": {
+        "hue": 40,
+        "saturation": 30,
+        "lightness": 0
+      },
+      "output": "adjustments/hue-saturation.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "hue-only",
+      "params": {
+        "hue": 40,
+        "saturation": 0,
+        "lightness": 0
+      },
+      "output": "adjustments/hue-only.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "vibrance",
+      "params": {
+        "vibrance": 50,
+        "saturation": 0
+      },
+      "output": "adjustments/vibrance.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "color-balance",
+      "params": {
+        "shadows": [
+          0,
+          0,
+          0
+        ],
+        "midtones": [
+          30,
+          -20,
+          10
+        ],
+        "highlights": [
+          0,
+          0,
+          0
+        ],
+        "preserve_luminosity": true
+      },
+      "output": "adjustments/color-balance.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "channel-mixer",
+      "params": {
+        "red": [
+          80,
+          30,
+          -10,
+          0
+        ],
+        "green": [
+          0,
+          100,
+          0,
+          0
+        ],
+        "blue": [
+          0,
+          20,
+          80,
+          0
+        ]
+      },
+      "output": "adjustments/channel-mixer.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "photo-filter",
+      "params": {
+        "color": [
+          236,
+          138,
+          0
+        ],
+        "density": 50,
+        "preserve_luminosity": true
+      },
+      "output": "adjustments/photo-filter.png",
+      "profile": "none",
+      "bits": 16
+    },
+    {
+      "id": "black-white",
+      "params": {
+        "weights": [
+          40,
+          60,
+          40,
+          60,
+          20,
+          80
+        ]
+      },
+      "output": "adjustments/black-white.png",
+      "profile": "none",
+      "bits": 16
+    }
+  ]
+}
