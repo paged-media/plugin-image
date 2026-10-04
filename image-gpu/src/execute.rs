@@ -70,6 +70,7 @@ fn make_texture(
     format: wgpu::TextureFormat,
     usage: wgpu::TextureUsages,
 ) -> wgpu::Texture {
+    crate::counters::bump(|c| c.textures_created += 1);
     ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -87,6 +88,7 @@ fn make_texture(
 }
 
 fn upload_f16(ctx: &GpuContext, tex: &wgpu::Texture, w: u32, h: u32, bytes: &[u8]) {
+    crate::counters::bump(|c| c.bytes_uploaded += bytes.len() as u64);
     ctx.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: tex,
@@ -366,6 +368,10 @@ impl PendingReadback {
 
     /// Strip the alignment padding out of the mapped rows.
     fn collect(&self) -> Vec<u8> {
+        crate::counters::bump(|c| {
+            c.readbacks += 1;
+            c.bytes_read_back += self.padded_row as u64 * self.h as u64;
+        });
         let mut out = Vec::with_capacity((self.row_bytes * self.h) as usize);
         {
             let data = self.readback.slice(..).get_mapped_range();
@@ -461,6 +467,7 @@ fn record_common(
             depth_or_array_layers: 1,
         },
     );
+    crate::counters::bump(|c| c.bytes_uploaded += mask_bytes.len() as u64);
     let mask_view = mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
     // Params uniform.
@@ -471,6 +478,7 @@ fn record_common(
         mapped_at_creation: false,
     });
     ctx.queue.write_buffer(&params_buf, 0, params);
+    crate::counters::bump(|c| c.bytes_uploaded += params.len() as u64);
 
     // Output (storage, write-only — the portable path, §9.2).
     let out_tex = make_texture(
@@ -553,6 +561,10 @@ fn record_common(
             h.div_ceil(abi::WORKGROUP_SIZE),
             1,
         );
+        crate::counters::bump(|c| {
+            c.dispatches += 1;
+            c.dispatched_texels += w as u64 * h as u64;
+        });
     }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
@@ -576,6 +588,7 @@ fn record_common(
         },
     );
     ctx.queue.submit([encoder.finish()]);
+    crate::counters::bump(|c| c.submits += 1);
 
     Ok(PendingReadback {
         readback,

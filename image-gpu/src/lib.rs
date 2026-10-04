@@ -41,6 +41,9 @@
 //! frozen bind groups, §9.2) and the single-tile execute path the
 //! conformance harness drives.
 
+// Work counters (thread-local, always on) — what performance budgets
+// are written against.
+pub mod counters;
 mod device;
 mod dispatch;
 mod execute;
@@ -90,6 +93,7 @@ pub mod distance;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+pub use counters::GpuCounters;
 pub use coverage::{CombineMode, SelectionCoverage};
 pub use dab::{
     plan_segment, BrushTip, Dab, PressureTarget, SampledTip, StrokeAccumulator, StrokeSample,

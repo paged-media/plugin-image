@@ -139,6 +139,10 @@ impl KernelPipeline {
                 cache: None,
             });
 
+        crate::counters::bump(|c| {
+            c.shader_modules += 1;
+            c.pipelines_built += 1;
+        });
         KernelPipeline {
             def,
             pipeline,

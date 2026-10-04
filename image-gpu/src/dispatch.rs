@@ -84,6 +84,7 @@ fn make_texture(
     format: wgpu::TextureFormat,
     usage: wgpu::TextureUsages,
 ) -> wgpu::Texture {
+    crate::counters::bump(|c| c.textures_created += 1);
     ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -101,6 +102,7 @@ fn make_texture(
 }
 
 fn upload_f16(ctx: &GpuContext, tex: &wgpu::Texture, w: u32, h: u32, bytes: &[u8]) {
+    crate::counters::bump(|c| c.bytes_uploaded += bytes.len() as u64);
     ctx.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: tex,
@@ -163,6 +165,7 @@ impl<'p> DispatchBatch<'p> {
             mapped_at_creation: false,
         });
         ctx.queue.write_buffer(&params_buf, 0, &self.params);
+        crate::counters::bump(|c| c.bytes_uploaded += self.params.len() as u64);
 
         let in_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         let mut resources: Vec<TileResources> = Vec::with_capacity(tiles.len());
@@ -244,6 +247,7 @@ impl<'p> DispatchBatch<'p> {
                     depth_or_array_layers: 1,
                 },
             );
+            crate::counters::bump(|c| c.bytes_uploaded += mask_bytes.len() as u64);
             let mask_view = mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Output storage texture.
@@ -338,6 +342,10 @@ impl<'p> DispatchBatch<'p> {
                     res.h.div_ceil(abi::WORKGROUP_SIZE),
                     1,
                 );
+                crate::counters::bump(|c| {
+                    c.dispatches += 1;
+                    c.dispatched_texels += res.w as u64 * res.h as u64;
+                });
             }
         }
         for res in &resources {
@@ -364,6 +372,7 @@ impl<'p> DispatchBatch<'p> {
             );
         }
         ctx.queue.submit([encoder.finish()]);
+        crate::counters::bump(|c| c.submits += 1);
 
         // Map every readback, then poll once for the whole batch.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -399,6 +408,10 @@ impl<'p> DispatchBatch<'p> {
                 }
             }
             res.readback.unmap();
+            crate::counters::bump(|c| {
+                c.readbacks += 1;
+                c.bytes_read_back += res.padded_row as u64 * res.h as u64;
+            });
             outputs.push(out);
         }
         Ok(outputs)

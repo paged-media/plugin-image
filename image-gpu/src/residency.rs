@@ -230,6 +230,10 @@ impl ResidencyManager {
             },
         );
         ctx.queue.submit([]);
+        crate::counters::bump(|c| {
+            c.bytes_uploaded += bytes.len() as u64;
+            c.submits += 1;
+        });
         pool.touch(slot);
         self.set_tier0(coord, slot);
         Ok(())
@@ -303,6 +307,7 @@ impl ResidencyManager {
             },
         );
         ctx.queue.submit([encoder.finish()]);
+        crate::counters::bump(|c| c.submits += 1);
 
         let slice = readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -323,6 +328,10 @@ impl ResidencyManager {
             }
         }
         readback.unmap();
+        crate::counters::bump(|c| {
+            c.readbacks += 1;
+            c.bytes_read_back += padded_row as u64 * TILE as u64;
+        });
 
         Ok(Arc::from(heap.into_boxed_slice()))
     }

@@ -148,6 +148,7 @@ impl TexturePool {
     /// (sampled via `textureLoad`), a storage output, and a copy
     /// endpoint for residency upload/download.
     fn make_slot_texture(ctx: &GpuContext, index: u32) -> wgpu::Texture {
+        crate::counters::bump(|c| c.textures_created += 1);
         ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("pool slot {index}")),
             size: wgpu::Extent3d {
