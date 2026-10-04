@@ -67,6 +67,9 @@
 //! files total several GB):
 //!
 //! ```text
+//! (A file that is now REFUSED on purpose — the import learned it was
+//! approximating — is accepted with `PAGED_PSD_LEDGER=accept-refusals`.)
+//!
 //! PAGED_PSD_CORPUS=1 cargo test --release -p image-conformance \
 //!   --test psd_composite_oracle -- --ignored --nocapture
 //! ```
@@ -120,10 +123,22 @@ fn categorize(reason: &str) -> (String, String) {
             clean.push(ch);
         }
     }
-    let cat = if reason.contains("GROUPED") {
-        "groups"
-    } else if reason.contains("LAYER MASK") {
-        "layer-mask"
+    let cat = if reason.contains("GROUP with a mask") {
+        "group-mask"
+    } else if reason.contains("VECTOR MASK") || reason.contains("vector-derived") {
+        "vector-mask"
+    } else if reason.contains("density/feather") {
+        "mask-parameters"
+    } else if reason.contains("layer effects") {
+        "effects"
+    } else if reason.contains("adjustment layer") {
+        "adjustment-layers"
+    } else if reason.contains("smart object") {
+        "smart-objects"
+    } else if reason.contains("artboard") {
+        "artboards"
+    } else if reason.contains("FILL OPACITY") {
+        "fill-opacity"
     } else if reason.contains("color mode") || reason.contains("colour mode") {
         "colour-mode"
     } else if reason.contains("no layer records") || reason.contains("no layers") {
@@ -404,7 +419,8 @@ fn photoshop_merged_composite_vs_our_layer_flatten__feat__image_psd_layer_import
             outcome_count(&fresh, "compared"),
         );
         assert!(
-            now >= was,
+            now >= was
+                || std::env::var_os("PAGED_PSD_LEDGER").is_some_and(|v| v == "accept-refusals"),
             "RATCHET: {now} file(s) compared, the committed ledger records {was}"
         );
         if let Some(old_rows) = old.get("rows").and_then(Json::as_object) {
@@ -414,9 +430,20 @@ fn photoshop_merged_composite_vs_our_layer_flatten__feat__image_psd_layer_import
                 .filter(|(sha, _)| rows.get(sha.as_str()).map(|r| r.outcome) != Some("compared"))
                 .map(|(sha, _)| &sha[..12])
                 .collect();
+            // A DELIBERATE new refusal (the import learned it was
+            // approximating) is accepted only when asked for, and only
+            // when every lost file is now refused with a reason.
+            let accept = std::env::var_os("PAGED_PSD_LEDGER")
+                .is_some_and(|v| v == "accept-refusals")
+                && lost.iter().all(|short| {
+                    rows.iter()
+                        .any(|(sha, r)| sha.starts_with(short) && r.outcome == "refused")
+                });
             assert!(
-                lost.is_empty(),
-                "RATCHET: file(s) the ledger records as compared no longer are: {lost:?}"
+                lost.is_empty() || accept,
+                "RATCHET: file(s) the ledger records as compared no longer are: {lost:?} \
+                 (if they are now refused on purpose, re-run with \
+                 PAGED_PSD_LEDGER=accept-refusals)"
             );
         }
     }

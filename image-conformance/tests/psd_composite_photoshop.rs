@@ -68,13 +68,15 @@ fn dir() -> PathBuf {
 ///   clip base and its clipped layers as a group (they were 27 and 64
 ///   levels off while the clipped layers blended against everything
 ///   below); `clipping_groups_match_photoshop` below keeps it;
-/// * groups and layer masks are REFUSED by the import, by design today.
+/// * `group-isolated-50`, `group-pass-through` and `layer-mask` AGREE
+///   since the import reads groups (divider + folder records) and user
+///   masks (they were refused before).
 const EXPECT: &[(&str, Result<u8, &str>)] = &[
     ("clip-base-100", Ok(1)),
     ("clip-base-50", Ok(1)),
-    ("group-isolated-50", Err("groups")),
-    ("group-pass-through", Err("groups")),
-    ("layer-mask", Err("layer-mask")),
+    ("group-isolated-50", Ok(0)),
+    ("group-pass-through", Ok(0)),
+    ("layer-mask", Ok(1)),
     ("opacity-blend-stack", Ok(1)),
     ("transparent-soft", Ok(0)),
 ];

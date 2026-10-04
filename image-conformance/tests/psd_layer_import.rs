@@ -130,18 +130,27 @@ fn image_psd_layer_pixel_import_carries_the_record_properties() {
     assert_eq!(&import.layers[1].rgba[..4], &[2, 2, 2, 255]);
 }
 
+/// GROUPS ARE NO LONGER A REFUSAL — they are imported. The stack gained
+/// groups (pass-through and isolated, nested) before the import did; the
+/// refusal outlived the reason for it, as the clipping one below had.
+/// Each member names its group, and each group is read from its folder
+/// record (the bounding divider below the members opens it).
 #[test]
-fn image_psd_layer_pixel_import_declines_a_grouped_psd() {
+fn image_psd_layer_pixel_import_carries_groups_across() {
     let (bytes, _m) = fixtures::multilayer_groups();
-    let err = parse(&bytes)
+    let import = parse(&bytes)
         .layer_plates_rgba8()
-        .expect_err("groups are not modeled");
-    let msg = err.to_string();
-    assert!(msg.contains("GROUPED"), "{msg}");
+        .expect("a grouped PSD imports now");
+    assert!(!import.groups.is_empty(), "the fixture's groups arrived");
     assert!(
-        msg.contains("merged composite is kept"),
-        "the refusal says what happens instead: {msg}"
+        import.layers.iter().any(|l| l.group.is_some()),
+        "members name their group"
     );
+    for g in &import.groups {
+        if let Some(p) = g.parent {
+            assert!(p < import.groups.len(), "a parent is a group of the file");
+        }
+    }
 }
 
 /// CLIPPING IS NO LONGER A REFUSAL — it is imported.
@@ -163,13 +172,25 @@ fn image_psd_layer_pixel_import_carries_clipping_across() {
     );
 }
 
+/// MASKS ARE NO LONGER A REFUSAL — a user mask (channel −2) imports as
+/// canvas-extent coverage: the record's default colour outside the mask
+/// rectangle, the decoded mask inside it.
 #[test]
-fn image_psd_layer_pixel_import_declines_a_masked_layer() {
+fn image_psd_layer_pixel_import_carries_masks_across() {
     let (bytes, _m) = fixtures::raster_masks();
-    let err = parse(&bytes)
+    let import = parse(&bytes)
         .layer_plates_rgba8()
-        .expect_err("masks are not modeled");
-    assert!(err.to_string().contains("LAYER MASK"), "{err}");
+        .expect("a masked PSD imports now");
+    let masked: Vec<_> = import
+        .layers
+        .iter()
+        .filter_map(|l| l.mask.as_ref())
+        .collect();
+    assert!(!masked.is_empty(), "the fixture's mask arrived");
+    let n = (import.width * import.height) as usize;
+    for m in masked {
+        assert_eq!(m.coverage.len(), n, "canvas extent, one byte per pixel");
+    }
 }
 
 #[test]

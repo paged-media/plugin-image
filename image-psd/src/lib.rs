@@ -87,7 +87,7 @@ pub use abr::AbrFile;
 pub use composite::CompositeRgba8;
 pub use container::Container;
 pub use descriptor::{Descriptor, DescriptorValue};
-pub use layer_pixels::{LayerImport, LayerPlate, MAX_IMPORT_BYTES};
+pub use layer_pixels::{GroupPlate, LayerImport, LayerPlate, MaskPlate, MAX_IMPORT_BYTES};
 pub use model::PsdFile;
 
 #[derive(Debug, thiserror::Error)]

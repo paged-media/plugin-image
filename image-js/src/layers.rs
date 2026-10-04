@@ -676,6 +676,26 @@ impl LayerStack {
             ));
         }
         let want = (width as usize) * (height as usize) * 4;
+        // Ids: layers 1..=N, then the groups (one id space, as `fresh_id`).
+        let group_id = |g: usize| (import.layers.len() + g) as u32 + 1;
+        let groups: Vec<LayerGroup> = import
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g, plate)| LayerGroup {
+                id: group_id(g),
+                name: if plate.name.is_empty() {
+                    format!("Group {}", g + 1)
+                } else {
+                    plate.name.clone()
+                },
+                visible: !plate.hidden,
+                opacity: plate.opacity as f32 / 255.0,
+                pass_through: &plate.blend_key == b"pass",
+                blend: psd_blend_kernel(&plate.blend_key),
+                parent: plate.parent.map(group_id),
+            })
+            .collect();
         let mut layers = Vec::with_capacity(import.layers.len());
         for (i, plate) in import.layers.iter().enumerate() {
             if plate.rgba.len() != want {
@@ -700,16 +720,20 @@ impl LayerStack {
                     plate.rgba.clone().into_boxed_slice(),
                 )),
                 kind: LayerKind::Pixels,
-                // A new layer is unmasked; the mask is authored later.
-                mask: None,
-                mask_enabled: true,
-                group: None,
+                mask: plate.mask.as_ref().map(|m| {
+                    Arc::new(
+                        SelectionCoverage::from_data(width, height, m.coverage.clone())
+                            .expect("a canvas-extent mask"),
+                    )
+                }),
+                mask_enabled: plate.mask.as_ref().is_none_or(|m| m.enabled),
+                group: plate.group.map(group_id),
                 clipped: plate.clipped,
             });
         }
-        let next_id = layers.len() as u32 + 1;
-        Ok(LayerStack {
-            groups: Vec::new(),
+        let next_id = (layers.len() + groups.len()) as u32 + 1;
+        let stack = LayerStack {
+            groups,
             width,
             height,
             active: layers.len() - 1,
@@ -721,7 +745,19 @@ impl LayerStack {
             dropped_steps: 0,
             structure_generation: 0,
             fold: Default::default(),
-        })
+        };
+        if let Some(deep) = stack
+            .groups
+            .iter()
+            .find(|g| stack.depth_of(Some(g.id)) > MAX_GROUP_DEPTH)
+        {
+            return Err(IngestError::Unsupported(format!(
+                "PSD group \"{}\" is nested deeper than {MAX_GROUP_DEPTH}: each level parks a \
+                 full-canvas buffer while it composites",
+                deep.name
+            )));
+        }
+        Ok(stack)
     }
 
     pub fn width(&self) -> u32 {
@@ -2974,6 +3010,8 @@ mod tests {
     fn image_editor_layers_a_psd_import_becomes_a_stack_bottom_first() {
         let plate = |name: &str, key: &[u8; 4], opacity: u8, hidden: bool| image_psd::LayerPlate {
             clipped: false,
+            group: None,
+            mask: None,
             name: name.to_string(),
             blend_key: *key,
             opacity,
@@ -2981,6 +3019,7 @@ mod tests {
             rgba: vec![0u8; 4 * 4 * 4],
         };
         let import = image_psd::LayerImport {
+            groups: Vec::new(),
             depth_reduced: false,
             width: 4,
             height: 4,
@@ -3002,11 +3041,14 @@ mod tests {
     #[test]
     fn image_editor_layers_a_psd_import_with_a_mis_sized_plate_is_a_clean_error() {
         let import = image_psd::LayerImport {
+            groups: Vec::new(),
             depth_reduced: false,
             width: 4,
             height: 4,
             layers: vec![image_psd::LayerPlate {
                 clipped: false,
+                group: None,
+                mask: None,
                 name: "short".into(),
                 blend_key: *b"norm",
                 opacity: 255,

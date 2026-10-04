@@ -50,18 +50,31 @@
 //! refuses every file whose structure it does not model, and the caller
 //! keeps the flatten:
 //!
-//! * **not 8-bit RGB** — 16/32-bit and CMYK/Lab are the M2 cast/CMS lane;
-//! * **groups** (`lsct` section dividers) — a group has its own
-//!   compositing rules (pass-through, isolation) that a flat stack does
-//!   not reproduce;
-//! * **clipping layers** (`clipping == 1`) — a clipped layer is masked by
-//!   the one below it;
-//! * **layer masks** (channel ids −2/−3) — the mask changes what the
-//!   layer covers;
+//! * **not RGB at 8 or 16 bits** — 1/32-bit and CMYK/Lab are separate
+//!   lanes;
+//! * **a group with a mask of its own**, a **vector mask**, a mask with
+//!   **density/feather parameters**, or a layer with both a user and a
+//!   "real" mask (channel −3) — none of these is modelled;
+//! * **layer effects** (`lfx2` / `lrFX`), **adjustment layers** (their
+//!   pixels are not stored; the adjustment is), **smart objects** (their
+//!   stored pixels are a cache of the embedded source and can be stale)
+//!   and **artboards** — importing them as plain pixel layers would draw
+//!   something else;
+//! * **fill opacity** below 100 % on one of Photoshop's eight special
+//!   blend modes (where fill and layer opacity differ), or on a group;
 //! * **a budget overrun** — plates are CANVAS-EXTENT (the layer model's
 //!   deliberate simplification), so N layers of a big canvas is N × 4
 //!   bytes per pixel. Past [`MAX_IMPORT_BYTES`] the import declines
 //!   instead of exhausting the wasm heap.
+//!
+//! What it does import: pixel layers with opacity, blend and visibility
+//! (FILL opacity, `iOpa`, folded into the opacity: without effects, and
+//! outside the eight special modes, the two multiply);
+//! CLIPPING (the record's clipping byte); GROUPS — the bounding divider
+//! below a group's members and the folder record above them, with the
+//! folder's name, blend (`pass` = pass-through), opacity and visibility,
+//! nested; and LAYER MASKS (channel −2: the mask rectangle, the default
+//! colour outside it, the disabled and invert flags).
 //!
 //! Every refusal is a typed [`PsdError::Unsupported`] carrying the
 //! reason, which the panel shows verbatim. "It flattened and did not say
@@ -69,8 +82,10 @@
 //!
 //! Provenance: Adobe Photoshop File Format specification — Layer
 //! Records (bounds, blend-mode key, opacity, flags), Channel Image Data
-//! (per-channel decode, ids 0/1/2 = R/G/B and −1 = transparency),
-//! Additional Layer Information (`lsct` section dividers, `luni` names).
+//! (per-channel decode, ids 0/1/2 = R/G/B, −1 = transparency, −2 = user
+//! mask), Layer Mask / Adjustment Layer Data (rectangle, default colour,
+//! flags), Additional Layer Information (`lsct` section dividers, `luni`
+//! names, `vmsk`/`vsms` vector masks).
 
 use crate::model::ColorMode;
 use crate::model::{LayerRecord, PsdFile, SectionKind};
@@ -102,6 +117,33 @@ pub struct LayerPlate {
     /// it did not when this importer was written, and the refusal that
     /// used to live here said so.
     pub clipped: bool,
+    /// The innermost enclosing group, as an index into
+    /// [`LayerImport::groups`]; `None` at the top level.
+    pub group: Option<usize>,
+    /// The layer's user mask, canvas-extent.
+    pub mask: Option<MaskPlate>,
+}
+
+/// A layer mask as the stack takes it: one coverage byte per canvas
+/// pixel (255 = shown), the record's default colour outside the mask
+/// rectangle, inverted when the record says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskPlate {
+    pub coverage: Vec<u8>,
+    /// Mask flags bit 1 clear: a disabled mask is kept, not applied.
+    pub enabled: bool,
+}
+
+/// A group (a Photoshop layer folder) as its folder record stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupPlate {
+    pub name: String,
+    /// The folder's blend key; `pass` is pass-through.
+    pub blend_key: [u8; 4],
+    pub opacity: u8,
+    pub hidden: bool,
+    /// The enclosing group (index into [`LayerImport::groups`]).
+    pub parent: Option<usize>,
 }
 
 /// The whole importable layer tree.
@@ -117,18 +159,73 @@ pub struct LayerImport {
     /// BOTTOM-first, the order PSD stores them in and the order the
     /// layer stack composites in.
     pub layers: Vec<LayerPlate>,
+    /// Every group, outermost before its children; members name theirs by
+    /// index.
+    pub groups: Vec<GroupPlate>,
 }
 
-/// Is this record a group structural marker (divider/folder)? Such
-/// records carry an `lsct` of kind 1/2/3 and hold no pixels.
-fn is_group_marker(layer: &LayerRecord) -> bool {
-    matches!(
-        layer.addl.iter().find_map(|a| a.lsct()).map(|d| d.kind),
-        Some(SectionKind::OpenFolder)
-            | Some(SectionKind::ClosedFolder)
-            | Some(SectionKind::BoundingDivider)
-    )
+/// Additional-layer-info keys whose content the import does not model,
+/// each with what it is. A record carrying one is refused.
+const UNMODELLED: &[(&[u8; 4], &str)] = &[
+    // A smart object renders from its embedded source, and the layer's
+    // stored pixels are only a cache of it — measured stale on corpus
+    // mock-ups (a replaced design still in the cache, Photoshop showing
+    // the new one).
+    (b"PlLd", "a smart object"),
+    (b"SoLd", "a smart object"),
+    (b"SoLE", "a smart object"),
+    (b"lfx2", "layer effects"),
+    (b"lrFX", "layer effects"),
+    (b"artb", "an artboard"),
+    (b"artd", "an artboard"),
+    (b"abdd", "an artboard"),
+    (b"levl", "a Levels adjustment layer"),
+    (b"curv", "a Curves adjustment layer"),
+    (b"hue2", "a Hue/Saturation adjustment layer"),
+    (b"hue ", "a Hue/Saturation adjustment layer"),
+    (b"brit", "a Brightness/Contrast adjustment layer"),
+    (b"blnc", "a Color Balance adjustment layer"),
+    (b"mixr", "a Channel Mixer adjustment layer"),
+    (b"phfl", "a Photo Filter adjustment layer"),
+    (b"post", "a Posterize adjustment layer"),
+    (b"thrs", "a Threshold adjustment layer"),
+    (b"nvrt", "an Invert adjustment layer"),
+    (b"selc", "a Selective Color adjustment layer"),
+    (b"vibA", "a Vibrance adjustment layer"),
+    (b"blwh", "a Black & White adjustment layer"),
+    (b"grdm", "a Gradient Map adjustment layer"),
+    (b"expA", "an Exposure adjustment layer"),
+    (b"clrL", "a Color Lookup adjustment layer"),
+];
+
+/// Photoshop's eight special blend modes, where fill opacity is applied
+/// inside the blend rather than as a fade (so it is not layer opacity).
+const SPECIAL_FILL_MODES: &[&[u8; 4]] = &[
+    b"idiv", b"lbrn", b"div ", b"lddg", b"vLit", b"lLit", b"hMix", b"diff",
+];
+
+/// A block's payload: after the signature, key and 4-byte length.
+fn addl_payload(a: &crate::model::AdditionalLayerInfo) -> &[u8] {
+    a.raw_block
+        .as_deref()
+        .and_then(|b| b.get(12..))
+        .unwrap_or(&[])
 }
+
+/// The record's fill opacity (`iOpa`), 255 when absent.
+fn fill_opacity(layer: &LayerRecord) -> u8 {
+    layer
+        .addl
+        .iter()
+        .find(|a| &a.key == b"iOpa")
+        .and_then(|a| addl_payload(a).first().copied())
+        .unwrap_or(255)
+}
+
+/// The user-mask channel ids: −2 the user mask, −3 the "real" user mask
+/// that appears beside a vector mask.
+const USER_MASK: i16 = -2;
+const REAL_USER_MASK: i16 = -3;
 
 impl PsdFile {
     /// Decode every pixel-bearing layer into a canvas-extent straight
@@ -164,24 +261,121 @@ impl PsdFile {
             .ok_or_else(|| PsdError::Unsupported("canvas extent overflows usize".into()))?;
 
         // Structural gate FIRST: refuse before decoding a single byte.
+        // Groups: records run bottom-first, so a group's BOUNDING DIVIDER
+        // comes before its members and its FOLDER record after them.
         let mut pixel_layers = Vec::new();
+        let mut groups: Vec<GroupPlate> = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        let mut masked = 0usize;
         for layer in &self.layer_mask.layers {
-            if is_group_marker(layer) {
-                return Err(PsdError::Unsupported(
-                    "layer import of a GROUPED PSD (lsct section dividers): group \
-                     compositing (pass-through / isolation) is not modeled, so the \
-                     merged composite is kept instead"
-                        .into(),
-                ));
-            }
-            if layer.channels.iter().any(|c| c.id == -2 || c.id == -3) {
+            let kind = layer.addl.iter().find_map(|a| a.lsct()).map(|d| d.kind);
+            if layer
+                .addl
+                .iter()
+                .any(|a| &a.key == b"vmsk" || &a.key == b"vsms")
+            {
                 return Err(PsdError::Unsupported(format!(
-                    "layer import of a PSD with a LAYER MASK (\"{}\"): a mask changes \
-                     what the layer covers, which is not modeled",
+                    "layer import of a PSD with a VECTOR MASK (\"{}\"): vector masks \
+                     are not modelled, so the merged composite is kept instead",
                     layer.name()
                 )));
             }
-            pixel_layers.push(layer);
+            if let Some((_, what)) = UNMODELLED
+                .iter()
+                .find(|(key, _)| layer.addl.iter().any(|a| &a.key == *key))
+            {
+                return Err(PsdError::Unsupported(format!(
+                    "layer import of a PSD with {what} (\"{}\"): not modelled, so the \
+                     merged composite is kept instead",
+                    layer.name()
+                )));
+            }
+            let fill = fill_opacity(layer);
+            if fill < 255 && SPECIAL_FILL_MODES.contains(&&layer.blend_key) {
+                return Err(PsdError::Unsupported(format!(
+                    "layer import of FILL OPACITY on a special blend mode (\"{}\"): there \
+                     fill is not layer opacity, so the merged composite is kept instead",
+                    layer.name()
+                )));
+            }
+            let has_mask = layer.channels.iter().any(|c| c.id == USER_MASK);
+            match kind {
+                Some(SectionKind::BoundingDivider) => {
+                    groups.push(GroupPlate {
+                        name: String::new(),
+                        blend_key: *b"pass",
+                        opacity: 255,
+                        hidden: false,
+                        parent: open.last().copied(),
+                    });
+                    open.push(groups.len() - 1);
+                    continue;
+                }
+                Some(SectionKind::OpenFolder) | Some(SectionKind::ClosedFolder) => {
+                    let Some(g) = open.pop() else {
+                        return Err(PsdError::Malformed {
+                            section: "layer records",
+                            detail: format!(
+                                "group \"{}\" has no bounding divider below it",
+                                layer.name()
+                            ),
+                        });
+                    };
+                    if fill < 255 {
+                        return Err(PsdError::Unsupported(format!(
+                            "layer import of FILL OPACITY on a group (\"{}\"): not \
+                             modelled, so the merged composite is kept instead",
+                            layer.name()
+                        )));
+                    }
+                    if has_mask {
+                        return Err(PsdError::Unsupported(format!(
+                            "layer import of a GROUP with a mask (\"{}\"): group masks \
+                             are not modelled, so the merged composite is kept instead",
+                            layer.name()
+                        )));
+                    }
+                    let lsct_blend = layer
+                        .addl
+                        .iter()
+                        .find_map(|a| a.lsct())
+                        .and_then(|d| d.blend_key);
+                    groups[g] = GroupPlate {
+                        name: layer.name(),
+                        blend_key: lsct_blend.unwrap_or(layer.blend_key),
+                        opacity: layer.opacity,
+                        hidden: (layer.flags & 0x02) != 0,
+                        parent: groups[g].parent,
+                    };
+                    continue;
+                }
+                _ => {}
+            }
+            if layer.channels.iter().any(|c| c.id == REAL_USER_MASK) {
+                return Err(PsdError::Unsupported(format!(
+                    "layer import of a layer with both a user and a vector-derived \
+                     mask (\"{}\"): not modelled, so the merged composite is kept \
+                     instead",
+                    layer.name()
+                )));
+            }
+            if has_mask {
+                if layer.mask.as_ref().is_some_and(|m| m.flags & 0x10 != 0) {
+                    return Err(PsdError::Unsupported(format!(
+                        "layer import of a mask with density/feather parameters \
+                         (\"{}\"): not modelled, so the merged composite is kept instead",
+                        layer.name()
+                    )));
+                }
+                masked += 1;
+            }
+            pixel_layers.push((layer, open.last().copied()));
+        }
+        if !open.is_empty() {
+            return Err(PsdError::Malformed {
+                section: "layer records",
+                detail: format!("{} group(s) never closed by a folder record", open.len()),
+            });
         }
         if pixel_layers.is_empty() {
             return Err(PsdError::Unsupported(
@@ -190,7 +384,9 @@ impl PsdFile {
                     .into(),
             ));
         }
-        let total = plate_bytes.saturating_mul(pixel_layers.len());
+        let total = plate_bytes
+            .saturating_mul(pixel_layers.len())
+            .saturating_add(canvas_texels.saturating_mul(masked));
         if total > MAX_IMPORT_BYTES {
             return Err(PsdError::Unsupported(format!(
                 "layer import needs {} MiB ({} layers × {}×{} canvas-extent plates), \
@@ -204,14 +400,19 @@ impl PsdFile {
         }
 
         let mut layers = Vec::with_capacity(pixel_layers.len());
-        for layer in pixel_layers {
+        for (layer, group) in pixel_layers {
+            // Fill opacity folds into opacity (see the refusals above).
+            let opacity =
+                ((u32::from(layer.opacity) * u32::from(fill_opacity(layer)) + 127) / 255) as u8;
             layers.push(LayerPlate {
                 name: layer.name(),
                 blend_key: layer.blend_key,
-                opacity: layer.opacity,
+                opacity,
                 hidden: (layer.flags & 0x02) != 0,
                 clipped: layer.clipping != 0,
                 rgba: self.layer_canvas_rgba8(layer, cw, ch)?,
+                group,
+                mask: self.layer_mask_plate(layer, cw, ch)?,
             });
         }
         Ok(LayerImport {
@@ -219,7 +420,73 @@ impl PsdFile {
             height: ch,
             depth_reduced: h.depth == 16,
             layers,
+            groups,
         })
+    }
+
+    /// The layer's user mask (channel −2) at canvas extent: the record's
+    /// default colour everywhere, the decoded mask inside its rectangle,
+    /// inverted when flags bit 2 says so. `None` without a mask channel.
+    fn layer_mask_plate(&self, layer: &LayerRecord, cw: u32, ch: u32) -> Result<Option<MaskPlate>> {
+        let Some(ci) = layer.channels.iter().position(|c| c.id == USER_MASK) else {
+            return Ok(None);
+        };
+        let Some(m) = layer.mask.as_ref() else {
+            return Err(PsdError::Malformed {
+                section: "layer mask data",
+                detail: format!(
+                    "layer \"{}\" has a mask channel but no mask data",
+                    layer.name()
+                ),
+            });
+        };
+        let mut coverage = vec![m.default_color; (cw as usize) * (ch as usize)];
+        let mw = (m.right - m.left).max(0) as u32;
+        let mh = (m.bottom - m.top).max(0) as u32;
+        if mw > 0 && mh > 0 {
+            let data = layer
+                .channel_data
+                .get(ci)
+                .ok_or_else(|| PsdError::Malformed {
+                    section: "layer channel image data",
+                    detail: format!("layer \"{}\" mask channel has no payload", layer.name()),
+                })?;
+            let plane = data.decode(self.container, mh, mw, self.header.depth)?;
+            if plane.len() != (mw as usize) * (mh as usize) {
+                return Err(PsdError::Malformed {
+                    section: "layer channel image data",
+                    detail: format!(
+                        "layer \"{}\" mask decoded to {} bytes, expected {}",
+                        layer.name(),
+                        plane.len(),
+                        (mw as usize) * (mh as usize)
+                    ),
+                });
+            }
+            for my in 0..mh as i64 {
+                let dy = m.top as i64 + my;
+                if dy < 0 || dy >= ch as i64 {
+                    continue;
+                }
+                for mx in 0..mw as i64 {
+                    let dx = m.left as i64 + mx;
+                    if dx < 0 || dx >= cw as i64 {
+                        continue;
+                    }
+                    coverage[(dy * cw as i64 + dx) as usize] =
+                        plane[(my * mw as i64 + mx) as usize];
+                }
+            }
+        }
+        if m.flags & 0x04 != 0 {
+            for v in &mut coverage {
+                *v = 255 - *v;
+            }
+        }
+        Ok(Some(MaskPlate {
+            coverage,
+            enabled: m.flags & 0x02 == 0,
+        }))
     }
 
     /// One layer's canvas-extent straight RGBA8: decode its modeled
@@ -248,9 +515,8 @@ impl PsdFile {
                 1 => &mut g,
                 2 => &mut b,
                 -1 => &mut a,
-                // The structural gate already refused masks; anything
-                // else here is a spot/extra channel with no composite
-                // meaning.
+                // The mask is read by `layer_mask_plate`; anything else
+                // here is a spot/extra channel with no composite meaning.
                 _ => continue,
             };
             let data = layer

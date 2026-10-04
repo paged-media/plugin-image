@@ -1080,6 +1080,38 @@ mod tests {
         assert_eq!(f.write().expect("rewrite"), bytes);
     }
 
+    /// What the writer stores, the import reads back: the group (name,
+    /// pass-through, members), the user mask, clipping, blend, opacity
+    /// and visibility — a layered PSD round-trips through Paged.
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_written_layered_psd_imports_back_as_the_same_stack__feat__image_psd_layer_import() {
+        let bytes = write_layered();
+        let f = PsdFile::parse(&bytes).expect("parse");
+        let import = f.layer_plates_rgba8().expect("groups and masks import");
+        let back = crate::layers::LayerStack::from_psd_plates(&import).expect("stack");
+        let orig = layered_stack();
+        assert_eq!(back.layers().len(), orig.layers().len());
+        assert_eq!(back.groups().len(), 1);
+        let g = &back.groups()[0];
+        assert_eq!(g.name, "Look");
+        assert!(g.pass_through);
+        for (a, b) in back.layers().iter().zip(orig.layers()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.visible, b.visible);
+            assert_eq!(a.clipped, b.clipped);
+            assert_eq!(a.blend.id, b.blend.id);
+            assert!((a.opacity - b.opacity).abs() <= 0.5 / 255.0 + 1e-6);
+            assert_eq!(a.group.is_some(), b.group.is_some(), "{}", a.name);
+            assert_eq!(
+                a.mask.as_ref().map(|m| m.data().to_vec()),
+                b.mask.as_ref().map(|m| m.data().to_vec()),
+                "{}",
+                a.name
+            );
+        }
+    }
+
     #[test]
     #[allow(non_snake_case)]
     fn a_stack_with_adjustment_layers_is_refused_for_the_flatten_fallback__feat__image_io_save_back(

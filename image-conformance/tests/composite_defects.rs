@@ -53,12 +53,15 @@ fn plate(name: &str, rgb: [u8; 3], opacity: u8, key: &[u8; 4], clipped: bool) ->
             .flat_map(|_| [rgb[0], rgb[1], rgb[2], 255])
             .collect(),
         clipped,
+        group: None,
+        mask: None,
     }
 }
 
 fn flatten(layers: Vec<LayerPlate>) -> Option<Arc<[u8]>> {
     let ctx = image_conformance::device::test_device()?;
     let stack = LayerStack::from_psd_plates(&LayerImport {
+        groups: Vec::new(),
         width: W,
         height: H,
         depth_reduced: false,
