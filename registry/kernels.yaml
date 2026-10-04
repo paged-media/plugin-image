@@ -1074,6 +1074,19 @@
   tests:
     rust: ["image-conformance/tests/family_adjust.rs"]
 
+- id: adjust.hue_saturation
+  rust_path: families::adjust::ADJUST_HUE_SATURATION
+  state_row: image.kernel.family-t2
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 8 }
+  oracle: none
+  status: implemented
+  provenance:
+    - "Hue/Saturation dialog: master + six hue ranges (±15° full, fading to 0 at ±45°) + colorize, in HSL; semantics from the published description of the dialog; HSL conversions are textbook (Smith 1978); no reference reading"
+  tests:
+    rust: ["image-conformance/tests/family_adjust.rs", "image-conformance/tests/gpu_module_kernels.rs"]
+
 - id: adjust.color_balance
   rust_path: families::adjust::ADJUST_COLOR_BALANCE
   state_row: image.kernel.family-t2

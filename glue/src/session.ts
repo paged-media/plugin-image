@@ -124,6 +124,9 @@ export const FILL_NOISE_SEED_DEFAULT = 1;
  * Frozen wire encoding shared with the Rust `VacateMode` and the WGSL
  * branch, so renumbering here changes what a stored effect does.
  */
+/** Which curve a curve edit addresses. */
+export type CurveChannel = "rgb" | "r" | "g" | "b";
+
 export const VacateMode = {
   /** Plain drag: the pixels leave and the source becomes transparent. */
   Transparent: 0,
@@ -605,7 +608,9 @@ export interface ImageSession {
   setLevels(l: Partial<LevelsParams>): void;
   /** Build + set the curves tone LUT from `(input, output)` control points
    *  in [0,1] (an empty / identity set clears the curve). */
-  setCurvePoints(points: Array<[number, number]>): void;
+  /** Set a curve from control points: the composite ("rgb", default) or
+   *  one channel's ("r", "g", "b"). */
+  setCurvePoints(points: Array<[number, number]>, channel?: CurveChannel): void;
   /** Auto-enhance: derive levels (in black/white) + white balance
    *  (temp/tint) from the ingested image's histogram and set them on the
    *  params (PREVIEW-only — the user commits with Apply, like every other
@@ -2676,7 +2681,7 @@ export function createImageSession(host: BundleHost): ImageSession {
       schedulePreview();
     },
 
-    setCurvePoints(points) {
+    setCurvePoints(points, channel = "rgb") {
       if (!engine) return;
       // The identity curve [(0,0),(1,1)] clears the LUT (no curve pass).
       const isIdentityCurve =
@@ -2685,10 +2690,14 @@ export function createImageSession(host: BundleHost): ImageSession {
         points[0][1] === 0 &&
         points[1][0] === 1 &&
         points[1][1] === 1;
-      state.params = {
-        ...state.params,
-        curveLut: isIdentityCurve ? null : engine.curveLut(points),
-      };
+      const table = isIdentityCurve ? null : engine.curveLut(points);
+      if (channel === "rgb") {
+        state.params = { ...state.params, curveLut: table };
+      } else {
+        const rgb = [...state.params.curveLutRgb] as AdjustParams["curveLutRgb"];
+        rgb[{ r: 0, g: 1, b: 2 }[channel]] = table;
+        state.params = { ...state.params, curveLutRgb: rgb };
+      }
       emit();
       schedulePreview();
     },

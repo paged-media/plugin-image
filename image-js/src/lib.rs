@@ -487,17 +487,30 @@ mod wasm {
         invert: bool,
         ext: &[f32],
     ) -> Result<AdjustParams, JsValue> {
-        let lut = if curve_lut.len() == 256 {
-            let mut a = [0u8; 256];
-            a.copy_from_slice(curve_lut);
-            Some(a)
-        } else if curve_lut.is_empty() {
-            None
-        } else {
-            return Err(JsValue::from_str(&format!(
-                "curve_lut must be 256 bytes or empty (got {})",
-                curve_lut.len()
-            )));
+        // 256 bytes: the composite curve. 1024: composite, then red, green
+        // and blue channel curves. An identity composite in the 1024 form
+        // is dropped, so only the channel curves run.
+        let table = |b: &[u8]| -> [u8; 256] { std::array::from_fn(|i| b[i]) };
+        let identity: [u8; 256] = std::array::from_fn(|i| i as u8);
+        let (lut, curve_rgb) = match curve_lut.len() {
+            0 => (None, None),
+            256 => (Some(table(curve_lut)), None),
+            1024 => {
+                let comp = table(&curve_lut[..256]);
+                (
+                    (comp != identity).then_some(comp),
+                    Some(Box::new([
+                        table(&curve_lut[256..512]),
+                        table(&curve_lut[512..768]),
+                        table(&curve_lut[768..]),
+                    ])),
+                )
+            }
+            n => {
+                return Err(JsValue::from_str(&format!(
+                    "curve_lut must be 256 or 1024 bytes, or empty (got {n})"
+                )))
+            }
         };
         let mut params = AdjustParams {
             exposure_ev,
@@ -514,6 +527,7 @@ mod wasm {
                 out_white,
             },
             curve_lut: lut,
+            curve_rgb,
             blur_sigma,
             sharpen_amount,
             hue_degrees,

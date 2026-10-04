@@ -2084,6 +2084,174 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+// ─────────────────────────── hue_saturation ────────────────────────
+//
+// Image ▸ Adjustments ▸ Hue/Saturation, the full dialog: a MASTER
+// hue/saturation/lightness and one per colour RANGE (reds, yellows,
+// greens, cyans, blues, magentas, centred at 0°, 60° … 300°), plus
+// COLORIZE. On UNpremultiplied rgb, in HSL:
+//   w_k   = clamp((45 − d_k) / 30, 0, 1) · [s > 0]   d_k = circular
+//           distance from the pixel's hue to range k's centre: fully on
+//           within ±15°, fading to 0 at ±45°; a grey has no hue and so
+//           belongs to no range
+//   dh,ds,dl = master + Σ w_k · range_k
+//   h'    = (h + dh) mod 360                 (colorize: h' = its hue)
+//   s'    = ds ≥ 0 ? s + (1 − s)·ds : s·(1 + ds)   (colorize: from its sat)
+//   l'    = dl ≥ 0 ? l + (1 − l)·dl : l·(1 + dl)   (dl includes colorize's)
+// then back to rgb, re-premultiplied, alpha preserved. Every parameter 0
+// and colorize off is the identity (up to the HSL round trip). The HSL
+// conversions are the standard textbook ones (Foley & van Dam / Smith
+// 1978), mirrored line for line by the scalar reference. Semantics
+// from the published description of the dialog; no reference reading.
+
+/// Hue/Saturation params. Each vec4 is (hue°, saturation, lightness, _)
+/// with saturation and lightness in [−1, 1]; `colorize` is
+/// (on, hue°, saturation 0–1, lightness −1–1).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct AdjustHueSaturationParams {
+    pub master: [f32; 4],
+    pub ranges: [[f32; 4]; 6],
+    pub colorize: [f32; 4],
+}
+
+impl AdjustHueSaturationParams {
+    /// Every adjustment zero, colorize off — the identity.
+    pub fn identity() -> Self {
+        Self {
+            master: [0.0; 4],
+            ranges: [[0.0; 4]; 6],
+            colorize: [0.0; 4],
+        }
+    }
+
+    /// Is this the identity? SEMANTIC: every hue/saturation/lightness
+    /// delta zero and colorize off, whatever colorize's own values are
+    /// (a panel keeps a starting colour there while it is off).
+    pub fn is_identity(&self) -> bool {
+        let zero = |v: &[f32; 4]| v[..3].iter().all(|&x| x == 0.0);
+        zero(&self.master) && self.ranges.iter().all(zero) && self.colorize[0] == 0.0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const HUE_SATURATION_PARAMS_FIELDS: &[ParamField] = &[
+    ParamField {
+        name: "master",
+        wgsl_ty: "vec4<f32>",
+    },
+    ParamField {
+        name: "ranges",
+        wgsl_ty: "array<vec4<f32>, 6>",
+    },
+    ParamField {
+        name: "colorize",
+        wgsl_ty: "vec4<f32>",
+    },
+];
+
+/// The full Hue/Saturation dialog (see the section note).
+pub static ADJUST_HUE_SATURATION: KernelDef = KernelDef {
+    id: "adjust.hue_saturation",
+    class: KernelClass::Point,
+    inputs: 1,
+    params: ParamsLayout {
+        size: ::core::mem::size_of::<AdjustHueSaturationParams>(),
+        fields: HUE_SATURATION_PARAMS_FIELDS,
+    },
+    wgsl: HUE_SATURATION_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(8),
+};
+
+const HUE_SATURATION_WGSL: &str = adjust_wgsl!(
+    "struct Params {
+    master: vec4<f32>,
+    ranges: array<vec4<f32>, 6>,
+    colorize: vec4<f32>,
+}",
+    "
+fn hs_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    let l = (mx + mn) * 0.5;
+    let d = mx - mn;
+    if (d <= 0.0) { return vec3<f32>(0.0, 0.0, l); }
+    var s: f32;
+    if (l > 0.5) { s = d / (2.0 - mx - mn); } else { s = d / (mx + mn); }
+    var h: f32;
+    if (mx == c.r) {
+        h = (c.g - c.b) / d;
+        if (c.g < c.b) { h = h + 6.0; }
+    } else if (mx == c.g) {
+        h = (c.b - c.r) / d + 2.0;
+    } else {
+        h = (c.r - c.g) / d + 4.0;
+    }
+    return vec3<f32>(h * 60.0, s, l);
+}
+
+fn hs_channel(p: f32, q: f32, t0: f32) -> f32 {
+    var t = t0;
+    if (t < 0.0) { t = t + 1.0; }
+    if (t > 1.0) { t = t - 1.0; }
+    if (t < 1.0 / 6.0) { return p + (q - p) * 6.0 * t; }
+    if (t < 0.5) { return q; }
+    if (t < 2.0 / 3.0) { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    return p;
+}
+
+fn hs_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
+    if (s <= 0.0) { return vec3<f32>(l); }
+    var q: f32;
+    if (l < 0.5) { q = l * (1.0 + s); } else { q = l + s - l * s; }
+    let p = 2.0 * l - q;
+    let hh = h / 360.0;
+    return vec3<f32>(
+        hs_channel(p, q, hh + 1.0 / 3.0),
+        hs_channel(p, q, hh),
+        hs_channel(p, q, hh - 1.0 / 3.0),
+    );
+}
+
+fn adjust(a: vec4<f32>) -> vec4<f32> {
+    let c = clamp(unpremul_rgb(a), vec3<f32>(0.0), vec3<f32>(1.0));
+    let hsl = hs_to_hsl(c);
+    var dh = params.master.x;
+    var ds = params.master.y;
+    var dl = params.master.z;
+    if (hsl.y > 0.0) {
+        for (var k = 0u; k < 6u; k = k + 1u) {
+            var d = abs(hsl.x - f32(k) * 60.0);
+            d = min(d, 360.0 - d);
+            let w = clamp((45.0 - d) / 30.0, 0.0, 1.0);
+            dh = dh + w * params.ranges[k].x;
+            ds = ds + w * params.ranges[k].y;
+            dl = dl + w * params.ranges[k].z;
+        }
+    }
+    var h = hsl.x + dh;
+    h = h - 360.0 * floor(h / 360.0);
+    var s = hsl.y;
+    if (params.colorize.x != 0.0) {
+        h = params.colorize.y;
+        s = params.colorize.z;
+        dl = dl + params.colorize.w;
+    }
+    if (ds >= 0.0) { s = s + (1.0 - s) * ds; } else { s = s * (1.0 + ds); }
+    s = clamp(s, 0.0, 1.0);
+    var l = hsl.z;
+    if (dl >= 0.0) { l = l + (1.0 - l) * dl; } else { l = l * (1.0 + dl); }
+    l = clamp(l, 0.0, 1.0);
+    return vec4<f32>(hs_to_rgb(h, s, l) * a.a, a.a);
+}
+"
+);
+
 pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_LUT1D,
     &ADJUST_LUT3D,
@@ -2104,4 +2272,5 @@ pub static FAMILY: &[&KernelDef] = &[
     &ADJUST_CHANNEL_MIXER,
     &ADJUST_LEVELS_RGB,
     &ADJUST_SELECTIVE_COLOR,
+    &ADJUST_HUE_SATURATION,
 ];

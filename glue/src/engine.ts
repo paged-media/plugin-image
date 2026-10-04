@@ -109,6 +109,29 @@ export interface BlackWhiteParams {
   weights: [number, number, number, number, number, number];
 }
 
+/** Hue/Saturation: hue in degrees, saturation and lightness in −1…1, for
+ *  the master and each of the six ranges (reds, yellows, greens, cyans,
+ *  blues, magentas); colorize replaces hue and saturation. */
+export interface HueSatParams {
+  master: [number, number, number];
+  ranges: [number, number, number][];
+  colorize: { on: boolean; hue: number; saturation: number; lightness: number };
+}
+
+export const HUE_SAT_RANGES = ["Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas"] as const;
+
+export function identityHueSat(): HueSatParams {
+  return {
+    master: [0, 0, 0],
+    ranges: Array.from({ length: 6 }, () => [0, 0, 0] as [number, number, number]),
+    colorize: { on: false, hue: 0, saturation: 0.25, lightness: 0 },
+  };
+}
+
+function hueSatIdentity(h: HueSatParams): boolean {
+  return allZero(h.master) && h.ranges.every((r) => allZero(r)) && !h.colorize.on;
+}
+
 /** The committed adjustment parameters. Identity = every field neutral:
  *  exposure 0 / brightness 0 / contrast 1 / saturation 1, white balance
  *  0/0, levels identity, no curve LUT, and every EXTENDED stage gated
@@ -126,6 +149,9 @@ export interface AdjustParams {
   /** Curves: a 256-byte tone LUT (built from the curve editor's control
    *  points via `engine.curveLut`), or null for the identity curve. */
   curveLut: Uint8Array | null;
+  /** Per-channel curves (red, green, blue — each a 256-entry table or
+   *  null), applied before the composite `curveLut`. */
+  curveLutRgb: [Uint8Array | null, Uint8Array | null, Uint8Array | null];
   /** FILTER stages (first wasm reach of the T1/T2 kernels): Gaussian
    *  blur sigma px (0 = off), unsharp amount (0 = off), hue rotation
    *  degrees (0 = off), per-color invert. */
@@ -148,6 +174,8 @@ export interface AdjustParams {
   posterizeLevels: number | null;
   /** `adjust.threshold` — luma cut in [0,1]; `null` = off. */
   threshold: number | null;
+  /** `adjust.hue_saturation` — the full Hue/Saturation dialog. */
+  hueSat: HueSatParams;
 }
 
 /** The Black & White default mix (the conventional reds .4 / yellows .6
@@ -171,6 +199,7 @@ export const IDENTITY_PARAMS: AdjustParams = {
   tint: 0,
   levels: { ...IDENTITY_LEVELS },
   curveLut: null,
+  curveLutRgb: [null, null, null],
   blurSigma: 0,
   sharpenAmount: 0,
   hueDegrees: 0,
@@ -199,6 +228,7 @@ export const IDENTITY_PARAMS: AdjustParams = {
   blackWhite: { enabled: false, weights: [...DEFAULT_BW_WEIGHTS] },
   posterizeLevels: null,
   threshold: null,
+  hueSat: identityHueSat(),
 };
 
 /** A DEEP clone of the identity params — the nested objects/arrays must
@@ -209,6 +239,7 @@ export function freshIdentityParams(): AdjustParams {
     ...p,
     levels: { ...p.levels },
     curveLut: null,
+    curveLutRgb: [null, null, null],
     colorBalance: {
       shadows: [...p.colorBalance.shadows],
       midtones: [...p.colorBalance.midtones],
@@ -226,6 +257,7 @@ export function freshIdentityParams(): AdjustParams {
       b: { ...p.levelsRgb.b },
     },
     blackWhite: { enabled: false, weights: [...p.blackWhite.weights] },
+    hueSat: identityHueSat(),
   };
 }
 
@@ -249,9 +281,22 @@ export function isIdentity(p: AdjustParams): boolean {
     p.tint === 0 &&
     levelsIdentity(p.levels) &&
     p.curveLut === null &&
+    p.curveLutRgb.every((t) => t === null) &&
     filtersIdentity(p) &&
     extendedIdentity(p)
   );
+}
+
+/** The curve argument the doors take: empty (no curve), the 256-byte
+ *  composite table, or 1024 bytes — composite (identity when unset),
+ *  then red, green and blue (identity where unset). */
+export function packCurves(p: AdjustParams): Uint8Array {
+  if (p.curveLutRgb.every((t) => t === null)) return p.curveLut ?? new Uint8Array(0);
+  const identity = Uint8Array.from({ length: 256 }, (_, i) => i);
+  const out = new Uint8Array(1024);
+  out.set(p.curveLut ?? identity, 0);
+  p.curveLutRgb.forEach((t, c) => out.set(t ?? identity, 256 * (c + 1)));
+  return out;
 }
 
 function filtersIdentity(p: AdjustParams): boolean {
@@ -297,6 +342,7 @@ function extendedIdentity(p: AdjustParams): boolean {
     levelsChannelIdentity(p.levelsRgb.g) &&
     levelsChannelIdentity(p.levelsRgb.b) &&
     !p.blackWhite.enabled &&
+    hueSatIdentity(p.hueSat) &&
     p.posterizeLevels === null &&
     p.threshold === null
   );
@@ -311,6 +357,7 @@ function isBaseOnly(p: AdjustParams): boolean {
     p.tint === 0 &&
     levelsIdentity(p.levels) &&
     p.curveLut === null &&
+    p.curveLutRgb.every((t) => t === null) &&
     filtersIdentity(p) &&
     extendedIdentity(p)
   );
@@ -318,7 +365,7 @@ function isBaseOnly(p: AdjustParams): boolean {
 
 /** Wire length of the EXTENDED adjust block — MUST match the Rust
  *  `image_js::ingest::ADJUST_EXT_LEN`. */
-export const ADJUST_EXT_LEN = 47;
+export const ADJUST_EXT_LEN = 72;
 
 /** Pack the extended stages into the flat `f32` block the
  *  `adjust_image_ext` door reads. The layout is the ONE cross-language
@@ -346,6 +393,12 @@ export function packAdjustExt(p: AdjustParams): Float32Array {
   e.set([lr.r.inBlack, lr.r.inWhite, lr.r.gamma], 38);
   e.set([lr.g.inBlack, lr.g.inWhite, lr.g.gamma], 41);
   e.set([lr.b.inBlack, lr.b.inWhite, lr.b.gamma], 44);
+  // 47..72: Hue/Saturation — master, six ranges, colorize.
+  const hs = p.hueSat;
+  e.set(hs.master, 47);
+  hs.ranges.forEach((r, k) => e.set(r, 50 + k * 3));
+  const c = hs.colorize;
+  e.set([c.on ? 1 : 0, c.hue, c.saturation, c.lightness], 68);
   return e;
 }
 
@@ -1935,7 +1988,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.levels.gamma,
         p.levels.outBlack,
         p.levels.outWhite,
-        p.curveLut ?? new Uint8Array(0),
+        packCurves(p),
         p.blurSigma,
         p.sharpenAmount,
         p.hueDegrees,
@@ -2496,7 +2549,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.levels.gamma,
         p.levels.outBlack,
         p.levels.outWhite,
-        p.curveLut ?? new Uint8Array(0),
+        packCurves(p),
         p.blurSigma,
         p.sharpenAmount,
         p.hueDegrees,
@@ -2520,7 +2573,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.levels.gamma,
         p.levels.outBlack,
         p.levels.outWhite,
-        p.curveLut ?? new Uint8Array(0),
+        packCurves(p),
         p.blurSigma,
         p.sharpenAmount,
         p.hueDegrees,
@@ -2542,7 +2595,7 @@ export function wrapEngine(wasm: ImageWasmModule): ImageEngine {
         p.levels.gamma,
         p.levels.outBlack,
         p.levels.outWhite,
-        p.curveLut ?? new Uint8Array(0),
+        packCurves(p),
         p.blurSigma,
         p.sharpenAmount,
         p.hueDegrees,

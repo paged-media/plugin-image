@@ -187,6 +187,63 @@ describe("the extended adjust parameter wire", () => {
   });
 });
 
+describe("per-channel curves", () => {
+  it("pack as nothing, the composite alone, or composite + red + green + blue", async () => {
+    const { packCurves } = await import("../src/engine");
+    const p = freshIdentityParams();
+    expect(packCurves(p)).toHaveLength(0);
+    p.curveLut = Uint8Array.from({ length: 256 }, (_, i) => 255 - i);
+    expect(packCurves(p)).toHaveLength(256);
+    p.curveLutRgb = [null, Uint8Array.from({ length: 256 }, () => 7), null];
+    const packed = packCurves(p);
+    expect(packed).toHaveLength(1024);
+    expect(packed[0]).toBe(255); // composite first
+    expect(packed[256 + 10]).toBe(10); // red unset → identity
+    expect(packed[512 + 10]).toBe(7); // green
+    expect(isIdentity(p)).toBe(false);
+  });
+
+  it("the session sets one channel without touching the others", async () => {
+    const fake = makeFakeEditor();
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+    expect(await session.importBytes("c.psd", psdBytes())).toBe(true);
+    session.setCurvePoints([[0, 0], [0.5, 0.8], [1, 1]], "g");
+    const rgb = session.state().params.curveLutRgb;
+    expect(rgb[0]).toBeNull();
+    expect(rgb[1]?.[128]).toBeGreaterThan(160);
+    expect(session.state().params.curveLut).toBeNull();
+    // Back to the identity curve clears that channel.
+    session.setCurvePoints([[0, 0], [1, 1]], "g");
+    expect(session.state().params.curveLutRgb[1]).toBeNull();
+    session.dispose();
+    handle.dispose();
+  });
+});
+
+describe("Hue/Saturation in the extended block", () => {
+  it("packs master, ranges and colorize at 47..72, and is not the identity", () => {
+    const p = freshIdentityParams();
+    expect(isIdentity(p)).toBe(true);
+    p.hueSat.master = [10, 0.2, -0.1];
+    p.hueSat.ranges[4] = [30, -0.5, 0];
+    p.hueSat.colorize = { on: true, hue: 200, saturation: 0.6, lightness: 0.1 };
+    expect(isIdentity(p)).toBe(false);
+    const e = packAdjustExt(p);
+    expect(e).toHaveLength(72);
+    expect(Array.from(e.slice(47, 50)).map((n) => Math.round(n * 10) / 10)).toEqual([10, 0.2, -0.1]);
+    expect(Array.from(e.slice(62, 65))).toEqual([30, -0.5, 0]);
+    expect(Array.from(e.slice(68, 72)).map((n) => Math.round(n * 10) / 10)).toEqual([1, 200, 0.6, 0.1]);
+  });
+
+  it("a fresh identity does not share its hue/sat arrays", () => {
+    const a = freshIdentityParams();
+    const b = freshIdentityParams();
+    a.hueSat.ranges[0][0] = 5;
+    expect(b.hueSat.ranges[0][0]).toBe(0);
+  });
+});
+
 describe("the save-back lane (real engine wasm)", () => {
   it("re-encodes a PNG source's adjusted pixels through the PNG lane", async () => {
     // The fixture IS the encoder's own output — which also proves the

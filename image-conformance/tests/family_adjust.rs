@@ -51,14 +51,14 @@ use image_conformance::Px;
 use image_kernels::families::adjust::{
     adjust_invert_rgb, AdjustBlackWhiteParams, AdjustBrightnessContrastParams,
     AdjustChannelMixerParams, AdjustColorBalanceParams, AdjustExposureParams,
-    AdjustGradientMapParams, AdjustHueRotateParams, AdjustInvertRgbParams, AdjustLevelsParams,
-    AdjustLevelsRgbParams, AdjustLut1dParams, AdjustLut3dParams, AdjustPhotoFilterParams,
-    AdjustPosterizeParams, AdjustSaturationParams, AdjustThresholdParams, AdjustVibranceParams,
-    AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER,
-    ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE, ADJUST_GRADIENT_MAP, ADJUST_HUE_ROTATE,
-    ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_LUT1D, ADJUST_LUT3D,
-    ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE,
-    ADJUST_WHITE_BALANCE,
+    AdjustGradientMapParams, AdjustHueRotateParams, AdjustHueSaturationParams,
+    AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams, AdjustLut1dParams,
+    AdjustLut3dParams, AdjustPhotoFilterParams, AdjustPosterizeParams, AdjustSaturationParams,
+    AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE,
+    ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE,
+    ADJUST_GRADIENT_MAP, ADJUST_HUE_ROTATE, ADJUST_HUE_SATURATION, ADJUST_INVERT_RGB,
+    ADJUST_LEVELS, ADJUST_LEVELS_RGB, ADJUST_LUT1D, ADJUST_LUT3D, ADJUST_PHOTO_FILTER,
+    ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE, ADJUST_WHITE_BALANCE,
 };
 
 /// `unpremul_rgb` — the module preamble helper (a==0 → 0).
@@ -252,6 +252,131 @@ fn vibrance_ref(a: Px, _b: Px, p: &AdjustVibranceParams) -> Px {
         lum * (1.0 - f) + c[2] * f,
     ];
     Px([cp[0] * al, cp[1] * al, cp[2] * al, al])
+}
+
+/// Mirrors `HUE_SATURATION_WGSL` term for term (HSL round trip, range
+/// weights, colorize).
+fn hue_saturation_ref(a: Px, _b: Px, p: &AdjustHueSaturationParams) -> Px {
+    fn to_hsl(c: [f32; 3]) -> [f32; 3] {
+        let mx = c[0].max(c[1].max(c[2]));
+        let mn = c[0].min(c[1].min(c[2]));
+        let l = (mx + mn) * 0.5;
+        let d = mx - mn;
+        if d <= 0.0 {
+            return [0.0, 0.0, l];
+        }
+        let s = if l > 0.5 {
+            d / (2.0 - mx - mn)
+        } else {
+            d / (mx + mn)
+        };
+        let h = if mx == c[0] {
+            let h = (c[1] - c[2]) / d;
+            if c[1] < c[2] {
+                h + 6.0
+            } else {
+                h
+            }
+        } else if mx == c[1] {
+            (c[2] - c[0]) / d + 2.0
+        } else {
+            (c[0] - c[1]) / d + 4.0
+        };
+        [h * 60.0, s, l]
+    }
+    fn channel(p: f32, q: f32, t0: f32) -> f32 {
+        let mut t = t0;
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 0.5 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
+        p
+    }
+    fn to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+        if s <= 0.0 {
+            return [l, l, l];
+        }
+        let q = if l < 0.5 {
+            l * (1.0 + s)
+        } else {
+            l + s - l * s
+        };
+        let pp = 2.0 * l - q;
+        let hh = h / 360.0;
+        [
+            channel(pp, q, hh + 1.0 / 3.0),
+            channel(pp, q, hh),
+            channel(pp, q, hh - 1.0 / 3.0),
+        ]
+    }
+    let al = a.0[3];
+    let u = unpremul(a);
+    let c = [
+        u[0].clamp(0.0, 1.0),
+        u[1].clamp(0.0, 1.0),
+        u[2].clamp(0.0, 1.0),
+    ];
+    let hsl = to_hsl(c);
+    let (mut dh, mut ds, mut dl) = (p.master[0], p.master[1], p.master[2]);
+    if hsl[1] > 0.0 {
+        for (k, r) in p.ranges.iter().enumerate() {
+            let mut d = (hsl[0] - k as f32 * 60.0).abs();
+            d = d.min(360.0 - d);
+            let w = ((45.0 - d) / 30.0).clamp(0.0, 1.0);
+            dh += w * r[0];
+            ds += w * r[1];
+            dl += w * r[2];
+        }
+    }
+    let mut h = hsl[0] + dh;
+    h -= 360.0 * (h / 360.0).floor();
+    let mut s = hsl[1];
+    if p.colorize[0] != 0.0 {
+        h = p.colorize[1];
+        s = p.colorize[2];
+        dl += p.colorize[3];
+    }
+    s = if ds >= 0.0 {
+        s + (1.0 - s) * ds
+    } else {
+        s * (1.0 + ds)
+    };
+    s = s.clamp(0.0, 1.0);
+    let mut l = hsl[2];
+    l = if dl >= 0.0 {
+        l + (1.0 - l) * dl
+    } else {
+        l * (1.0 + dl)
+    };
+    l = l.clamp(0.0, 1.0);
+    let o = to_rgb(h, s, l);
+    Px([o[0] * al, o[1] * al, o[2] * al, al])
+}
+
+fn hue_sat_master_and_ranges() -> AdjustHueSaturationParams {
+    let mut p = AdjustHueSaturationParams::identity();
+    p.master = [20.0, 0.2, -0.1, 0.0];
+    p.ranges[0] = [-15.0, 0.4, 0.1, 0.0];
+    p.ranges[2] = [10.0, -0.3, 0.2, 0.0];
+    p.ranges[4] = [30.0, -0.5, 0.0, 0.0];
+    p
+}
+
+fn hue_sat_colorize() -> AdjustHueSaturationParams {
+    let mut p = AdjustHueSaturationParams::identity();
+    p.colorize = [1.0, 35.0, 0.6, -0.2];
+    p
 }
 
 fn color_balance_ref(a: Px, _b: Px, p: &AdjustColorBalanceParams) -> Px {
@@ -464,6 +589,18 @@ parity_test!(
     ADJUST_VIBRANCE,
     vibrance_ref,
     AdjustVibranceParams::new(0.6, 0.15)
+);
+parity_test!(
+    hue_saturation_parity,
+    ADJUST_HUE_SATURATION,
+    hue_saturation_ref,
+    hue_sat_master_and_ranges()
+);
+parity_test!(
+    hue_saturation_colorize_parity,
+    ADJUST_HUE_SATURATION,
+    hue_saturation_ref,
+    hue_sat_colorize()
 );
 parity_test!(
     color_balance_parity,

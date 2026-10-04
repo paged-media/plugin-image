@@ -92,7 +92,7 @@ use image_conformance::device::test_device;
 use image_conformance::quantize::f16_ulp_distance;
 use image_gpu::{execute_tile_once, execute_windowed_once, GpuContext, TileInput};
 use image_kernels::families::adjust::{
-    AdjustGradientMapParams, AdjustLut1dParams, AdjustLut3dParams,
+    AdjustGradientMapParams, AdjustHueSaturationParams, AdjustLut1dParams, AdjustLut3dParams,
 };
 use image_kernels::{KernelClass, KernelDef, Tolerance};
 
@@ -170,6 +170,18 @@ fn lut1d_inverted() -> Vec<u8> {
         *v = 255 - i as u8;
     }
     bytemuck::bytes_of(&AdjustLut1dParams::new(&t)).to_vec()
+}
+
+fn hue_sat_identity() -> Vec<u8> {
+    bytemuck::bytes_of(&AdjustHueSaturationParams::identity()).to_vec()
+}
+
+fn hue_sat_stress() -> Vec<u8> {
+    let mut p = AdjustHueSaturationParams::identity();
+    p.master = [20.0, 0.2, -0.1, 0.0];
+    p.ranges[0] = [-15.0, 0.4, 0.1, 0.0]; // reds
+    p.ranges[4] = [30.0, -0.5, 0.0, 0.0]; // blues
+    bytemuck::bytes_of(&p).to_vec()
 }
 
 fn lut3d_identity() -> Vec<u8> {
@@ -298,6 +310,10 @@ const TABLE: &[Row] = &[
           stress: P::Raw(lut1d_inverted),
           note: "lut[i] = i/255; the transfer is interpolated, so a linear \
                  table reconstructs the input exactly" },
+    Row { id: "adjust.hue_saturation",
+          identity: Identity::Params(P::Raw(hue_sat_identity)),
+          stress: P::Raw(hue_sat_stress),
+          note: "every delta 0 and colorize off ⇒ the HSL round trip" },
     Row { id: "adjust.lut3d",
           identity: Identity::Params(P::Raw(lut3d_identity)),
           stress: P::Raw(lut3d_channel_swap),

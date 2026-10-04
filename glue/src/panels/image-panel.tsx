@@ -31,7 +31,7 @@ import type { ReactNode } from "react";
 
 import manifest from "../../manifest.json";
 
-import type { ImageSession } from "../session";
+import type { CurveChannel, ImageSession } from "../session";
 import type {
   AdjustParams,
   BrushLibraryInfo,
@@ -59,6 +59,7 @@ import {
 import type { AspectPreset } from "../crop-machine";
 
 import { CanvasSection, type CanvasSize } from "./sections/canvas-section";
+import { HueSatSection } from "./sections/hue-sat-section";
 import { ColorSection } from "./sections/color-section";
 import { RankLookupSection } from "./sections/rank-lookup-section";
 import { SelectModifySection } from "./sections/select-modify-section";
@@ -1570,8 +1571,12 @@ export function LayersSection({
 export function makeImagePanel(session: ImageSession) {
   return function ImagePanel() {
     const [, bump] = useReducer((n: number) => n + 1, 0);
-    const [curvePoints, setCurvePoints] =
-      useState<Array<[number, number]>>(IDENTITY_CURVE);
+    // Control points per curve: the composite and each channel's.
+    const [curveChannel, setCurveChannel] = useState<CurveChannel>("rgb");
+    const [curvePointsBy, setCurvePointsBy] = useState<
+      Record<CurveChannel, Array<[number, number]>>
+    >({ rgb: IDENTITY_CURVE, r: IDENTITY_CURVE, g: IDENTITY_CURVE, b: IDENTITY_CURVE });
+    const curvePoints = curvePointsBy[curveChannel];
     const [aspect, setAspect] = useState<AspectPreset>("free");
     const [angle, setAngle] = useState(0);
     // Pattern / smart-object section state (slider positions only).
@@ -1586,6 +1591,7 @@ export function makeImagePanel(session: ImageSession) {
     });
     const [modifyRadius, setModifyRadius] = useState(4);
     const [lookupName, setLookupName] = useState<string | null>(null);
+    const [hueSatRange, setHueSatRange] = useState(-1);
     // Generate-section local state (the request shape, not engine state).
     const [pathThreshold, setPathThreshold] = useState(128);
     const [gradKind, setGradKind] = useState<GradientKind>("linear");
@@ -1657,8 +1663,8 @@ export function makeImagePanel(session: ImageSession) {
     };
 
     const pushCurve = (next: Array<[number, number]>) => {
-      setCurvePoints(next);
-      session.setCurvePoints(next);
+      setCurvePointsBy((m) => ({ ...m, [curveChannel]: next }));
+      session.setCurvePoints(next, curveChannel);
     };
 
     const machine = session.cropMachine();
@@ -2411,6 +2417,14 @@ export function makeImagePanel(session: ImageSession) {
           onScale={setSmartScale}
         />
 
+        <HueSatSection
+          session={session}
+          hueSat={p.hueSat}
+          range={hueSatRange}
+          onRange={setHueSatRange}
+          disabled={disabled}
+        />
+
         {/* Filters — the T1/T2 kernels' first editor reach (blur, unsharp,
             hue rotation, invert); same GPU chain, same Apply commit. */}
         <div style={sectionTitle}>Filters</div>
@@ -3023,6 +3037,18 @@ export function makeImagePanel(session: ImageSession) {
             alignItems: "flex-start",
           }}
         >
+          <select
+            aria-label="Curve channel"
+            data-image-curve-channel
+            value={curveChannel}
+            disabled={disabled}
+            onChange={(e) => setCurveChannel(e.target.value as CurveChannel)}
+          >
+            <option value="rgb">RGB</option>
+            <option value="r">Red</option>
+            <option value="g">Green</option>
+            <option value="b">Blue</option>
+          </select>
           <CurveEditor
             points={curvePoints}
             onChange={pushCurve}
@@ -3183,7 +3209,12 @@ export function makeImagePanel(session: ImageSession) {
               // stage above, including the extended ones; the local
               // pickers below are the panel's own state.
               void session.reset();
-              setCurvePoints(IDENTITY_CURVE);
+              setCurvePointsBy({
+                rgb: IDENTITY_CURVE,
+                r: IDENTITY_CURVE,
+                g: IDENTITY_CURVE,
+                b: IDENTITY_CURVE,
+              });
               setAspect("free");
               setAngle(0);
               setGradKind("linear");

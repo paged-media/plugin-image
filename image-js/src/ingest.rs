@@ -57,11 +57,12 @@ use image_core::{
 use image_gpu::{GpuContext, SelectionCoverage};
 use image_kernels::families::adjust::{
     AdjustBlackWhiteParams, AdjustBrightnessContrastParams, AdjustChannelMixerParams,
-    AdjustColorBalanceParams, AdjustExposureParams, AdjustHueRotateParams, AdjustInvertRgbParams,
-    AdjustLevelsParams, AdjustLevelsRgbParams, AdjustPhotoFilterParams, AdjustPosterizeParams,
-    AdjustSaturationParams, AdjustThresholdParams, AdjustVibranceParams, AdjustWhiteBalanceParams,
-    ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST, ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE,
-    ADJUST_EXPOSURE, ADJUST_HUE_ROTATE, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB,
+    AdjustColorBalanceParams, AdjustExposureParams, AdjustHueRotateParams,
+    AdjustHueSaturationParams, AdjustInvertRgbParams, AdjustLevelsParams, AdjustLevelsRgbParams,
+    AdjustPhotoFilterParams, AdjustPosterizeParams, AdjustSaturationParams, AdjustThresholdParams,
+    AdjustVibranceParams, AdjustWhiteBalanceParams, ADJUST_BLACK_WHITE, ADJUST_BRIGHTNESS_CONTRAST,
+    ADJUST_CHANNEL_MIXER, ADJUST_COLOR_BALANCE, ADJUST_EXPOSURE, ADJUST_HUE_ROTATE,
+    ADJUST_HUE_SATURATION, ADJUST_INVERT_RGB, ADJUST_LEVELS, ADJUST_LEVELS_RGB,
     ADJUST_PHOTO_FILTER, ADJUST_POSTERIZE, ADJUST_SATURATION, ADJUST_THRESHOLD, ADJUST_VIBRANCE,
     ADJUST_WHITE_BALANCE,
 };
@@ -266,6 +267,10 @@ pub struct AdjustParams {
     /// RGBA8 result — there is no GPU LUT kernel yet (the honest deferral
     /// documented on the wasm export).
     pub curve_lut: Option<[u8; 256]>,
+    /// Per-channel curves (red, green, blue), applied BEFORE the
+    /// composite `curve_lut` — Photoshop's channel curves under its RGB
+    /// curve. `None` = no channel curve.
+    pub curve_rgb: Option<Box<[[u8; 256]; 3]>>,
     /// FILTER stages (editor-ui-coverage: the T1/T2 kernels get their
     /// first wasm reach). Each 0/false = stage off.
     /// Gaussian blur σ (px); radius derives as ceil(3σ) clamped to the
@@ -300,6 +305,9 @@ pub struct AdjustParams {
     pub posterize: Option<f32>,
     /// `adjust.threshold` — luma cut to black/white. `None` = off.
     pub threshold: Option<f32>,
+    /// `adjust.hue_saturation` — the full Hue/Saturation dialog (master,
+    /// six colour ranges, colorize). Identity = off.
+    pub hue_sat: AdjustHueSaturationParams,
 }
 
 impl Default for AdjustParams {
@@ -313,6 +321,7 @@ impl Default for AdjustParams {
             tint: 0.0,
             levels: LevelsParams::default(),
             curve_lut: None,
+            curve_rgb: None,
             blur_sigma: 0.0,
             sharpen_amount: 0.0,
             hue_degrees: 0.0,
@@ -325,6 +334,7 @@ impl Default for AdjustParams {
             black_white: BlackWhiteParams::default(),
             posterize: None,
             threshold: None,
+            hue_sat: AdjustHueSaturationParams::identity(),
         }
     }
 }
@@ -352,7 +362,11 @@ impl Default for AdjustParams {
 /// 26..=37 channel_mixer rows r[4], g[4], b[4] (in_r, in_g, in_b, const)
 /// 38..=46 levels_rgb r[3], g[3], b[3] (in_black, in_white, gamma)
 /// ```
-pub const ADJUST_EXT_LEN: usize = 47;
+pub const ADJUST_EXT_LEN: usize = 72;
+
+/// The extended block before Hue/Saturation joined it (still accepted:
+/// sessions stored then carry it).
+pub const ADJUST_EXT_LEN_V1: usize = 47;
 
 impl AdjustParams {
     /// Is the whole chain a NO-OP? SEMANTIC, not structural: a stage
@@ -363,7 +377,7 @@ impl AdjustParams {
     /// short-circuit gate `adjust_rgba8` uses to return the decode
     /// verbatim.
     pub fn is_identity(&self) -> bool {
-        !self.has_gpu_stage() && self.curve_lut.is_none()
+        !self.has_gpu_stage() && self.curve_lut.is_none() && self.curve_rgb.is_none()
     }
 
     /// Decode the flat [`ADJUST_EXT_LEN`] block onto these params. An
@@ -374,9 +388,10 @@ impl AdjustParams {
         if ext.is_empty() {
             return Ok(());
         }
-        if ext.len() != ADJUST_EXT_LEN {
+        if ext.len() != ADJUST_EXT_LEN && ext.len() != ADJUST_EXT_LEN_V1 {
             return Err(IngestError::Unsupported(format!(
-                "extended adjust block must be {ADJUST_EXT_LEN} f32s or empty (got {})",
+                "extended adjust block must be {ADJUST_EXT_LEN} (or {ADJUST_EXT_LEN_V1}) f32s \
+                 or empty (got {})",
                 ext.len()
             )));
         }
@@ -407,7 +422,32 @@ impl AdjustParams {
             g: [ext[41], ext[42], ext[43]],
             b: [ext[44], ext[45], ext[46]],
         };
+        // 47..72: Hue/Saturation — master (h, s, l), six ranges (h, s, l),
+        // colorize (on, h, s, l).
+        self.hue_sat = AdjustHueSaturationParams::identity();
+        if ext.len() == ADJUST_EXT_LEN {
+            let e = &ext[47..];
+            self.hue_sat.master = [e[0], e[1], e[2], 0.0];
+            for k in 0..6 {
+                self.hue_sat.ranges[k] = [e[3 + k * 3], e[4 + k * 3], e[5 + k * 3], 0.0];
+            }
+            self.hue_sat.colorize = [e[21], e[22], e[23], e[24]];
+        }
         Ok(())
+    }
+
+    /// The three tables the curves pass applies — each channel's curve,
+    /// then the composite curve — or `None` when there is no curve.
+    pub fn effective_curves(&self) -> Option<[[u8; 256]; 3]> {
+        if self.curve_lut.is_none() && self.curve_rgb.is_none() {
+            return None;
+        }
+        let id: [u8; 256] = std::array::from_fn(|i| i as u8);
+        let comp = self.curve_lut.unwrap_or(id);
+        let rgb = self.curve_rgb.as_deref().copied().unwrap_or([id; 3]);
+        Some(std::array::from_fn(|c| {
+            std::array::from_fn(|i| comp[rgb[c][i] as usize])
+        }))
     }
 
     /// The EXTENDED block, the exact inverse of [`apply_extended`].
@@ -435,6 +475,11 @@ impl AdjustParams {
         e[38..41].copy_from_slice(&self.levels_rgb.r);
         e[41..44].copy_from_slice(&self.levels_rgb.g);
         e[44..47].copy_from_slice(&self.levels_rgb.b);
+        e[47..50].copy_from_slice(&self.hue_sat.master[..3]);
+        for k in 0..6 {
+            e[50 + k * 3..53 + k * 3].copy_from_slice(&self.hue_sat.ranges[k][..3]);
+        }
+        e[68..72].copy_from_slice(&self.hue_sat.colorize);
         e
     }
 
@@ -471,13 +516,27 @@ impl AdjustParams {
                 .map(|&v| f32::from(v)),
         );
         w.extend_from_slice(&self.extended());
+        // Version 3: the channel curves.
+        w.push(b(self.curve_rgb.is_some()));
+        let rgb = self
+            .curve_rgb
+            .as_deref()
+            .copied()
+            .unwrap_or([[0u8; 256]; 3]);
+        for t in rgb {
+            w.extend(t.iter().map(|&v| f32::from(v)));
+        }
         w
     }
 
     /// The inverse of [`to_wire`](Self::to_wire).
     pub fn from_wire(w: &[f32]) -> Result<Self, IngestError> {
         const HEAD: usize = 16;
-        if w.len() != HEAD + 256 + ADJUST_EXT_LEN {
+        const V3: usize = HEAD + 256 + ADJUST_EXT_LEN + 1 + 768;
+        if w.len() != V3
+            && w.len() != HEAD + 256 + ADJUST_EXT_LEN
+            && w.len() != HEAD + 256 + ADJUST_EXT_LEN_V1
+        {
             return Err(IngestError::Decode(format!(
                 "adjustment block: {} values, expected {}",
                 w.len(),
@@ -509,7 +568,18 @@ impl AdjustParams {
             curve_lut: (w[15] != 0.0).then_some(lut),
             ..AdjustParams::default()
         };
-        p.apply_extended(&w[HEAD + 256..])?;
+        let ext_end = if w.len() == V3 {
+            HEAD + 256 + ADJUST_EXT_LEN
+        } else {
+            w.len()
+        };
+        p.apply_extended(&w[HEAD + 256..ext_end])?;
+        if w.len() == V3 && w[ext_end] != 0.0 {
+            let t = &w[ext_end + 1..];
+            p.curve_rgb = Some(Box::new(std::array::from_fn(|c| {
+                std::array::from_fn(|i| t[c * 256 + i].clamp(0.0, 255.0) as u8)
+            })));
+        }
         Ok(p)
     }
 
@@ -540,6 +610,7 @@ impl AdjustParams {
             || self.black_white.enabled
             || self.posterize.is_some()
             || self.threshold.is_some()
+            || !self.hue_sat.is_identity()
     }
 }
 
@@ -1013,8 +1084,8 @@ pub async fn adjust_f16(
     // quantizes its own stage — a table has 256 entries whatever the
     // buffer holds — and leaves every other stage's precision intact,
     // which is the whole gain.
-    if let Some(lut) = &params.curve_lut {
-        apply_curve_lut_f16(&mut pixels, lut, selection.as_deref(), width, height);
+    if let Some(luts) = params.effective_curves() {
+        apply_curve_lut_f16(&mut pixels, &luts, selection.as_deref(), width, height);
     }
     Ok(pixels)
 }
@@ -1023,7 +1094,7 @@ pub async fn adjust_f16(
 /// optionally masked by the same coverage the GPU stages honour.
 fn apply_curve_lut_f16(
     pixels: &mut [u8],
-    lut: &[u8; 256],
+    luts: &[[u8; 256]; 3],
     selection: Option<&SelectionCoverage>,
     width: u32,
     height: u32,
@@ -1047,7 +1118,7 @@ fn apply_curve_lut_f16(
             let o = ch * 2;
             let v = half::f16::from_le_bytes([texel[o], texel[o + 1]]).to_f32();
             let idx = (v.clamp(0.0, 1.0) * 255.0).round() as usize;
-            let mapped = f32::from(lut[idx.min(255)]) / 255.0;
+            let mapped = f32::from(luts[ch][idx.min(255)]) / 255.0;
             let out = v + (mapped - v) * cov;
             let b = half::f16::from_f32(out).to_le_bytes();
             texel[o] = b[0];
@@ -1199,6 +1270,13 @@ fn build_adjust_chain(
             Arc::<[u8]>::from(AdjustHueRotateParams::new(params.hue_degrees).as_bytes()),
         );
     }
+    if !params.hue_sat.is_identity() {
+        node = pipe.apply(
+            node,
+            &ADJUST_HUE_SATURATION,
+            Arc::<[u8]>::from(params.hue_sat.as_bytes()),
+        );
+    }
     if params.invert {
         node = pipe.apply(
             node,
@@ -1265,10 +1343,10 @@ pub async fn adjust_rgba8(
     // Under a selection the LUT result blends per-pixel by the SAME
     // coverage the GPU stages masked with, so the whole chain honors one
     // selection contract.
-    if let Some(lut) = &params.curve_lut {
+    if let Some(luts) = params.effective_curves() {
         match &selection {
-            Some(cov) => apply_curve_lut_masked(&mut pixels, lut, cov),
-            None => apply_curve_lut(&mut pixels, lut),
+            Some(cov) => apply_curve_luts_masked(&mut pixels, &luts, cov),
+            None => apply_curve_luts(&mut pixels, &luts),
         }
     }
     Ok(pixels)
@@ -1279,10 +1357,15 @@ pub async fn adjust_rgba8(
 /// per-channel table lookup, the deterministic CPU pass that consumes the
 /// LUT the panel built (`image_core::curve_lut`).
 pub fn apply_curve_lut(pixels: &mut [u8], lut: &[u8; 256]) {
+    apply_curve_luts(pixels, &[*lut, *lut, *lut]);
+}
+
+/// [`apply_curve_lut`] with one table per channel (red, green, blue).
+pub fn apply_curve_luts(pixels: &mut [u8], luts: &[[u8; 256]; 3]) {
     for px in pixels.chunks_exact_mut(4) {
-        px[0] = lut[px[0] as usize];
-        px[1] = lut[px[1] as usize];
-        px[2] = lut[px[2] as usize];
+        px[0] = luts[0][px[0] as usize];
+        px[1] = luts[1][px[1] as usize];
+        px[2] = luts[2][px[2] as usize];
     }
 }
 
@@ -1294,9 +1377,18 @@ pub fn apply_curve_lut(pixels: &mut [u8], lut: &[u8; 256]) {
 /// buffer); a size mismatch falls back to the unmasked LUT (defensive —
 /// the session always adjusts at image resolution).
 pub fn apply_curve_lut_masked(pixels: &mut [u8], lut: &[u8; 256], coverage: &SelectionCoverage) {
+    apply_curve_luts_masked(pixels, &[*lut, *lut, *lut], coverage);
+}
+
+/// [`apply_curve_lut_masked`] with one table per channel.
+pub fn apply_curve_luts_masked(
+    pixels: &mut [u8],
+    luts: &[[u8; 256]; 3],
+    coverage: &SelectionCoverage,
+) {
     let expected = (coverage.width() as usize) * (coverage.height() as usize) * 4;
     if pixels.len() != expected {
-        apply_curve_lut(pixels, lut);
+        apply_curve_luts(pixels, luts);
         return;
     }
     for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
@@ -1306,7 +1398,7 @@ pub fn apply_curve_lut_masked(pixels: &mut [u8], lut: &[u8; 256], coverage: &Sel
         }
         for c in 0..3 {
             let orig = px[c] as u16;
-            let mapped = lut[px[c] as usize] as u16;
+            let mapped = luts[c][px[c] as usize] as u16;
             // Rounded integer mix(orig, mapped, m/255).
             px[c] = ((orig * (255 - m) + mapped * m + 127) / 255) as u8;
         }
@@ -1403,6 +1495,60 @@ pub async fn straighten_crop_rgba8(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(non_snake_case)]
+    fn channel_curves_run_before_the_composite_and_persist__feat__image_editor_curves() {
+        let invert: [u8; 256] = std::array::from_fn(|i| 255 - i as u8);
+        let id: [u8; 256] = std::array::from_fn(|i| i as u8);
+        let half: [u8; 256] = std::array::from_fn(|i| (i / 2) as u8);
+        let mut p = AdjustParams {
+            curve_lut: Some(half),
+            curve_rgb: Some(Box::new([invert, id, id])),
+            ..AdjustParams::default()
+        };
+        assert!(!p.is_identity());
+        let luts = p.effective_curves().expect("curves");
+        // Red: invert, then halve: 0 → 255 → 127.
+        assert_eq!(luts[0][0], 127);
+        // Green: identity, then halve.
+        assert_eq!(luts[1][200], 100);
+        let mut px = vec![0u8, 200, 10, 255];
+        apply_curve_luts(&mut px, &luts);
+        assert_eq!(px, vec![127, 100, 5, 255]);
+        // Stored and read back exactly.
+        let back = AdjustParams::from_wire(&p.to_wire()).expect("v3");
+        assert_eq!(back.curve_rgb, p.curve_rgb);
+        assert_eq!(back.curve_lut, p.curve_lut);
+        // No curve at all: no pass.
+        p.curve_lut = None;
+        p.curve_rgb = None;
+        assert!(p.effective_curves().is_none());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn hue_saturation_rides_the_extended_block_and_old_blocks_still_read__feat__image_editor_adjust_breadth(
+    ) {
+        let mut p = AdjustParams::default();
+        p.hue_sat.master = [12.0, 0.3, -0.2, 0.0];
+        p.hue_sat.ranges[2] = [-20.0, 0.5, 0.1, 0.0];
+        p.hue_sat.colorize = [1.0, 40.0, 0.5, 0.0];
+        assert!(!p.is_identity());
+        let back = AdjustParams::from_wire(&p.to_wire()).expect("round trip");
+        assert_eq!(back.hue_sat, p.hue_sat);
+        // A block written before Hue/Saturation existed (47 values) reads
+        // as hue/sat off.
+        let mut old = p.to_wire();
+        old.truncate(16 + 256 + ADJUST_EXT_LEN_V1);
+        let back = AdjustParams::from_wire(&old).expect("legacy");
+        assert!(back.hue_sat.is_identity());
+        // Colorize OFF with a starting colour kept is still the identity.
+        let mut off = AdjustParams::default();
+        off.hue_sat.colorize = [0.0, 30.0, 0.25, 0.0];
+        assert!(off.is_identity());
+        assert_eq!(back.vibrance, p.vibrance);
+    }
+
     use super::*;
 
     /// A 2×1 RGBA image: pixel (0,0) red, (1,0) green — a horizontal pair
