@@ -189,6 +189,9 @@ pub struct LayerPlate {
     /// is kept, not applied. `None` on a fill/shape layer, whose stored
     /// pixels already are the shape's render.
     pub vector_mask: Option<VectorMask>,
+    /// The layer is a TEXT layer (`TySh`): its pixels are the text's
+    /// render, which Photoshop blends in a gamma space.
+    pub text: bool,
     /// The plate is a SMART OBJECT's stored render (`SoLd`/`PlLd`/`SoLE`),
     /// not pixels of its own. The import is only sound once the consumer
     /// has checked these plates against the merged composite (module
@@ -657,6 +660,10 @@ impl PsdFile {
                 // A shape layer's pixels already ARE its path's render.
                 vector_mask: masks.vector.filter(|_| !is_shape_content(layer)),
                 smart: is_smart(layer),
+                text: layer
+                    .addl
+                    .iter()
+                    .any(|a| &a.key == b"TySh" || &a.key == b"tySh"),
                 adjustment,
                 color_overlay,
             });

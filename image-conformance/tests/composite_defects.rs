@@ -58,6 +58,7 @@ fn plate(name: &str, rgb: [u8; 3], opacity: u8, key: &[u8; 4], clipped: bool) ->
         mask: None,
         vector_mask: None,
         smart: false,
+        text: false,
         adjustment: None,
         color_overlay: None,
     }

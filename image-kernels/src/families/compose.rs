@@ -446,3 +446,111 @@ pub static FAMILY: &[&KernelDef] = &[
     &COMPOSE_DARKER_COLOR,
     &COMPOSE_LIGHTER_COLOR,
 ];
+
+// ─────────────────────────── normal_gamma ──────────────────────────
+//
+// NORMAL blending in a GAMMA space: both colours are raised to `gamma`,
+// source-over composited, and the result taken back by `1/gamma`
+// (premultiplied in and out, the mask as every compose kernel takes it):
+//
+//   cs' = cs^γ, cb' = cb^γ
+//   αo  = αs + αb (1 − αs)
+//   co  = ((αs cs' + (1 − αs) αb cb') / αo)^(1/γ) · αo
+//
+// γ = 1 is `compose.normal`. Photoshop composites TEXT layers this way —
+// its colour settings' "Blend Text Colors Using Gamma" — and the layered
+// PSD import gives a text layer the gamma measured against Photoshop's
+// own composites (`image_psd`'s text-layer flag; the stack's
+// `Layer::blend_gamma`). Semantics: Porter & Duff source-over (1984) on
+// power-encoded values; no reference reading.
+
+/// `opacity` as the other compose kernels; `gamma` the blend space.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, ::bytemuck::Pod, ::bytemuck::Zeroable)]
+pub struct ComposeGammaParams {
+    pub opacity: f32,
+    pub gamma: f32,
+}
+
+impl ComposeGammaParams {
+    pub fn new(opacity: f32, gamma: f32) -> Self {
+        Self { opacity, gamma }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        ::bytemuck::bytes_of(self)
+    }
+}
+
+const NORMAL_GAMMA_WGSL: &str = "// paged.image compose kernel — handwritten under ABI v1.1.
+// MPL-2.0 OR LicenseRef-PMEL; (c) And The Next GmbH.
+
+struct Params {
+    opacity: f32,
+    gamma: f32,
+}
+
+@group(0) @binding(0) var in0 : texture_2d<f32>;
+@group(0) @binding(1) var in1 : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> params : Params;
+@group(2) @binding(0) var mask : texture_2d<f32>;
+@group(3) @binding(0) var outp : texture_storage_2d<rgba16float, write>;
+
+fn unpremul_rgb(c: vec4<f32>) -> vec3<f32> {
+    if (c.a == 0.0) { return vec3<f32>(0.0); }
+    return c.rgb / c.a;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(outp);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    let xy = vec2<i32>(i32(gid.x), i32(gid.y));
+    let a = textureLoad(in0, xy, 0);
+    let bs = textureLoad(in1, xy, 0) * params.opacity;
+    let g = params.gamma;
+    let alpha_s = bs.a;
+    let alpha_b = a.a;
+    let cs = pow(clamp(unpremul_rgb(bs), vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(g));
+    let cb = pow(clamp(unpremul_rgb(a), vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(g));
+    let alpha_o = alpha_s + alpha_b * (1.0 - alpha_s);
+    var co = vec3<f32>(0.0);
+    if (alpha_o > 0.0) {
+        let mixed = (alpha_s * cs + (1.0 - alpha_s) * alpha_b * cb) / alpha_o;
+        co = pow(max(mixed, vec3<f32>(0.0)), vec3<f32>(1.0 / g)) * alpha_o;
+    }
+    let result = vec4<f32>(co, alpha_o);
+    let m = textureLoad(mask, xy, 0).r;
+    textureStore(outp, xy, mix(a, result, vec4<f32>(m)));
+}
+";
+
+const NORMAL_GAMMA_PARAMS: ParamsLayout = ParamsLayout {
+    size: ::core::mem::size_of::<ComposeGammaParams>(),
+    fields: &[
+        ParamField {
+            name: "opacity",
+            wgsl_ty: "f32",
+        },
+        ParamField {
+            name: "gamma",
+            wgsl_ty: "f32",
+        },
+    ],
+};
+
+/// Normal blending in a gamma space (see the section note).
+pub static COMPOSE_NORMAL_GAMMA: KernelDef = KernelDef {
+    id: "compose.normal_gamma",
+    class: KernelClass::Point,
+    inputs: 2,
+    params: NORMAL_GAMMA_PARAMS,
+    wgsl: NORMAL_GAMMA_WGSL,
+    module: true,
+    mip_exact: true,
+    gpu_tolerance: Tolerance::ChannelEpsF16(8),
+};
+
+/// The gamma-space blends — kept out of [`FAMILY`], which is the set of
+/// layer blend MODES a user picks by name.
+pub static GAMMA_FAMILY: &[&KernelDef] = &[&COMPOSE_NORMAL_GAMMA];

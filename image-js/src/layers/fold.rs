@@ -77,7 +77,9 @@ use image_kernels::families::band::{
 use image_kernels::families::cast::{
     CastPremultiplyParams, CastUnpremultiplyParams, CAST_PREMULTIPLY, CAST_UNPREMULTIPLY,
 };
-use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
+use image_kernels::families::compose::{
+    ComposeGammaParams, ComposeParams, COMPOSE_NORMAL, COMPOSE_NORMAL_GAMMA,
+};
 use image_kernels::KernelDef;
 
 use super::{alpha_of, effective_coverage, LayerStack, Plate};
@@ -146,6 +148,8 @@ pub(super) enum Step {
         px: Arc<[u8]>,
         rect: Option<Region>,
         blend: &'static KernelDef,
+        /// Normal blending in this gamma space (a text layer).
+        gamma: Option<f32>,
         opacity: f32,
         cov: CovKey,
     },
@@ -194,6 +198,7 @@ impl Step {
                     px,
                     rect,
                     blend,
+                    gamma,
                     opacity,
                     cov,
                 },
@@ -202,12 +207,14 @@ impl Step {
                     px: p2,
                     rect: r2,
                     blend: b2,
+                    gamma: g2,
                     opacity: o2,
                     cov: c2,
                 },
             ) => {
                 layer == l2
                     && rect == r2
+                    && gamma == g2
                     && Arc::ptr_eq(px, p2)
                     && std::ptr::eq(*blend, *b2)
                     && opacity.to_bits() == o2.to_bits()
@@ -529,6 +536,9 @@ impl LayerStack {
                 px: Arc::clone(&plate.px),
                 rect: plate.rect,
                 blend: layer.blend,
+                gamma: layer
+                    .blend_gamma
+                    .filter(|_| std::ptr::eq(layer.blend, &COMPOSE_NORMAL)),
                 opacity: layer.opacity,
                 cov,
             });
@@ -634,6 +644,7 @@ impl LayerStack {
                     px,
                     rect: Some(rect),
                     blend,
+                    gamma,
                     opacity,
                     cov,
                 } => {
@@ -657,9 +668,9 @@ impl LayerStack {
                     let blended = batch.target(rw, rh);
                     batch
                         .dispatch(
-                            blend,
+                            pixel_kernel(blend, *gamma),
                             &[&win, &plate],
-                            ComposeParams::new(*opacity).as_bytes(),
+                            &pixel_params(*opacity, *gamma),
                             mask.as_ref(),
                             &blended,
                         )
@@ -674,6 +685,7 @@ impl LayerStack {
                     px,
                     rect: None,
                     blend,
+                    gamma,
                     opacity,
                     cov,
                 } => {
@@ -683,9 +695,9 @@ impl LayerStack {
                     let out = batch.target(w, h);
                     batch
                         .dispatch(
-                            blend,
+                            pixel_kernel(blend, *gamma),
                             &[&acc, &plate],
-                            ComposeParams::new(*opacity).as_bytes(),
+                            &pixel_params(*opacity, *gamma),
                             mask.as_ref(),
                             &out,
                         )
@@ -940,6 +952,23 @@ fn window_f16(px: &[u8], w: u32, r: (u32, u32, u32, u32)) -> Vec<u8> {
     rgba8_to_f16(&win)
 }
 
+/// The kernel a pixel step blends with: its own, or Normal in a gamma
+/// space for a text layer.
+fn pixel_kernel(blend: &'static KernelDef, gamma: Option<f32>) -> &'static KernelDef {
+    match gamma {
+        Some(_) => &COMPOSE_NORMAL_GAMMA,
+        None => blend,
+    }
+}
+
+/// The parameter block for [`pixel_kernel`].
+fn pixel_params(opacity: f32, gamma: Option<f32>) -> Vec<u8> {
+    match gamma {
+        Some(g) => ComposeGammaParams::new(opacity, g).as_bytes().to_vec(),
+        None => ComposeParams::new(opacity).as_bytes().to_vec(),
+    }
+}
+
 /// A BOUNDED plate's window `r` (canvas coordinates) as rgba16float:
 /// the plate's pixels where it covers the window, transparent elsewhere.
 fn window_f16_bounded(px: &[u8], b: Region, r: (u32, u32, u32, u32)) -> Vec<u8> {
@@ -1049,6 +1078,7 @@ impl LayerStack {
                         px: p1,
                         rect: None,
                         blend: b1,
+                        gamma: g1,
                         opacity: o1,
                         cov: c1,
                     },
@@ -1057,11 +1087,13 @@ impl LayerStack {
                         px: p2,
                         rect: None,
                         blend: b2,
+                        gamma: g2,
                         opacity: o2,
                         cov: c2,
                     },
                 ) => {
                     l1 == l2
+                        && g1 == g2
                         && std::ptr::eq(*b1, *b2)
                         && o1.to_bits() == o2.to_bits()
                         && opt_ptr_eq(&c1.own, &c2.own)
@@ -1156,6 +1188,7 @@ impl LayerStack {
                     px,
                     rect,
                     blend,
+                    gamma,
                     opacity,
                     cov,
                 } => {
@@ -1202,9 +1235,9 @@ impl LayerStack {
                     let out = batch.target(rw, rh);
                     batch
                         .dispatch(
-                            blend,
+                            pixel_kernel(blend, *gamma),
                             &[&a, &plate],
-                            ComposeParams::new(*opacity).as_bytes(),
+                            &pixel_params(*opacity, *gamma),
                             mask.as_ref(),
                             &out,
                         )

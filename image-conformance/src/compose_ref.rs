@@ -623,3 +623,27 @@ pub fn composite(a: Px, b: Px, opacity: f32, blend: Blend) -> Px {
     out[3] = alpha_o;
     Px(out)
 }
+
+/// Scalar twin of `compose.normal_gamma`: normal source-over on colours
+/// raised to `gamma`, taken back by `1/gamma` (premultiplied in and out).
+pub fn composite_normal_gamma(a: Px, b: Px, opacity: f32, gamma: f32) -> Px {
+    let bs = Px([
+        b.0[0] * opacity,
+        b.0[1] * opacity,
+        b.0[2] * opacity,
+        b.0[3] * opacity,
+    ]);
+    let (alpha_s, alpha_b) = (bs.0[3], a.0[3]);
+    let cs = unpremul_rgb(bs).map(|c| c.clamp(0.0, 1.0).powf(gamma));
+    let cb = unpremul_rgb(a).map(|c| c.clamp(0.0, 1.0).powf(gamma));
+    let alpha_o = alpha_s + alpha_b * (1.0 - alpha_s);
+    let mut out = [0.0f32; 4];
+    if alpha_o > 0.0 {
+        for ch in 0..3 {
+            let mixed = (alpha_s * cs[ch] + (1.0 - alpha_s) * alpha_b * cb[ch]) / alpha_o;
+            out[ch] = mixed.max(0.0).powf(1.0 / gamma) * alpha_o;
+        }
+    }
+    out[3] = alpha_o;
+    Px(out)
+}

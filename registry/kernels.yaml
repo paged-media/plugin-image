@@ -597,6 +597,20 @@
   tests:
     rust: ["image-conformance/tests/family_compose.rs"]
 
+- id: compose.normal_gamma
+  rust_path: families::compose::COMPOSE_NORMAL_GAMMA
+  state_row: image.kernel.family-t1
+  class: point
+  mip_exact: true
+  gpu_tolerance: { kind: channel_eps_f16, value: 8 }
+  oracle: photoshop
+  status: implemented
+  provenance:
+    - "Porter & Duff, Compositing Digital Images (SIGGRAPH 1984) — source-over, here on colours raised to a gamma and taken back by its inverse"
+    - "Photoshop composites TEXT layers in a gamma space (Color Settings: Blend Text Colors Using Gamma). Measured on text layers Photoshop 27.10 wrote over white, dark and coloured backdrops: a plain normal blend is 19-40 levels off on anti-aliased edges, this kernel at gamma 1.55 within 2-7 (the best gamma per case is 1.52-1.6, so it is a stated approximation) [OBS]"
+  tests:
+    rust: ["image-conformance/tests/family_compose.rs (compose_normal_gamma_parity)"]
+
 - id: compose.multiply
   rust_path: families::compose::COMPOSE_MULTIPLY
   state_row: image.kernel.family-t1

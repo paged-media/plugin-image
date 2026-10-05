@@ -45,7 +45,8 @@
 //! group, u8 mask_enabled, u8 kind (0 pixels, 1 adjustment, 2 smart), u8
 //! depth (8 | 16), u32 pixel slot, then (version 3) i32 x, i32 y, u32 w,
 //! u32 h — the rectangle the pixels cover, all four −1/0 sentinels
-//! (x = −1) for the canvas (ADR 464), then i64 mask slot (-1 = none), then for an
+//! (x = −1) for the canvas (ADR 464) — and f32 blend gamma (0 = none),
+//! then i64 mask slot (-1 = none), then for an
 //! adjustment u32 n + n f32 (`AdjustParams::to_wire`), for a smart object
 //! u32 width, u32 height, f32 scale, u32 source slot}. A `str` is u32
 //! length + UTF-8. Versions 1 (no group masks) and 2 (no layer
@@ -206,6 +207,7 @@ impl LayerStack {
                     w.u32(0);
                 }
             }
+            w.f32(l.blend_gamma.unwrap_or(0.0));
             let mask = l
                 .mask
                 .as_ref()
@@ -317,11 +319,15 @@ impl LayerStack {
             };
             let px = buffer(r.u32()?)?;
             let bpp = if depth == SampleDepth::U16 { 8 } else { 4 };
-            let rect = if version >= 3 {
+            let (rect, blend_gamma) = if version >= 3 {
                 let (x, y, rw, rh) = (r.i32()?, r.i32()?, r.u32()?, r.u32()?);
-                (x >= 0).then_some(image_core::Region::new(x, y, rw, rh))
+                let g = r.f32()?;
+                (
+                    (x >= 0).then_some(image_core::Region::new(x, y, rw, rh)),
+                    (g > 0.0).then_some(g),
+                )
             } else {
-                None
+                (None, None)
             };
             let rgba: crate::pixels::LayerPixels = match rect {
                 Some(rect) => crate::pixels::Bounded::new(
@@ -402,6 +408,7 @@ impl LayerStack {
                 group,
                 mask_enabled,
                 clipped,
+                blend_gamma,
             });
         }
         if layers.is_empty() || active >= layers.len() {
@@ -523,10 +530,10 @@ mod tests {
         let mut v1 = m2.clone();
         v1[4..8].copy_from_slice(&1u32.to_le_bytes());
         let canvas_rect = [
-            0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0,
+            0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        while let Some(at) = v1.windows(16).position(|w| w == canvas_rect) {
-            v1.drain(at..at + 16);
+        while let Some(at) = v1.windows(20).position(|w| w == canvas_rect) {
+            v1.drain(at..at + 20);
         }
         // The group record ends with u8 mask_enabled + i64 mask slot (-1):
         // nine bytes, the first group's last ones before the layer count.

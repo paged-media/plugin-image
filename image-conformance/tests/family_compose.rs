@@ -416,3 +416,28 @@ fn compose_psd_key_roundtrip() {
     }
     assert_eq!(Blend::from_psd_key("zzzz"), None, "unknown key → None");
 }
+
+#[test]
+fn compose_normal_gamma_parity() {
+    use image_conformance::compose_ref::composite_normal_gamma;
+    use image_kernels::families::compose::{ComposeGammaParams, COMPOSE_NORMAL_GAMMA};
+    let (a, b) = (backdrop_tile(W, H), source_tile(W, H));
+    for (opacity, gamma) in [(1.0f32, 1.0f32), (1.0, 1.55), (0.5, 1.55), (1.0, 2.2)] {
+        let p = ComposeGammaParams::new(opacity, gamma);
+        let reference =
+            |a: Px, b: Px, p: &ComposeGammaParams| composite_normal_gamma(a, b, p.opacity, p.gamma);
+        if let Some(r) = parity(&COMPOSE_NORMAL_GAMMA, reference, &[&a, &b], &p) {
+            eprintln!(
+                "compose.normal_gamma ({opacity}, {gamma}): max f16 ULP {}",
+                r.max_ulp
+            );
+            assert_within(r, &COMPOSE_NORMAL_GAMMA);
+        }
+    }
+    // Gamma 1 is the normal blend.
+    let p = ComposeGammaParams::new(1.0, 1.0);
+    let normal = |a: Px, b: Px, _p: &ComposeGammaParams| composite(a, b, 1.0, Blend::Normal);
+    if let Some(r) = parity(&COMPOSE_NORMAL_GAMMA, normal, &[&a, &b], &p) {
+        assert_within(r, &COMPOSE_NORMAL_GAMMA);
+    }
+}

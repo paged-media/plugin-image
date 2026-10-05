@@ -66,6 +66,7 @@ pub static ALL_FAMILIES: &[&[&KernelDef]] = &[
     boolean::FAMILY,
     cast::FAMILY,
     compose::FAMILY,
+    compose::GAMMA_FAMILY,
     conv::FAMILY,
     gallery::FAMILY,
     gen::FAMILY,

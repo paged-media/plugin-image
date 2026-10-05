@@ -612,6 +612,7 @@ mod tests {
                 mask: user,
                 vector_mask: Some(v),
                 smart: false,
+                text: false,
                 adjustment: None,
                 color_overlay: None,
             }

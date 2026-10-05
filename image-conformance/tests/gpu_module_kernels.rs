@@ -332,6 +332,10 @@ const TABLE: &[Row] = &[
 
     // ── compose (26 binary blend modes; one shared params block) ────────
     Row { id: "compose.normal",        identity: Identity::Params(COMPOSE_IDENTITY), stress: COMPOSE_STRESS, note: COMPOSE_NOTE },
+    Row { id: "compose.normal_gamma",
+          identity: Identity::Params(P::Fields(&[("opacity", V::F(0.0)), ("gamma", V::F(1.0))])),
+          stress: P::Fields(&[("opacity", V::F(0.75)), ("gamma", V::F(1.55))]),
+          note: "opacity 0 at gamma 1 = the backdrop; the text-layer blend" },
     Row { id: "compose.multiply",      identity: Identity::Params(COMPOSE_IDENTITY), stress: COMPOSE_STRESS, note: COMPOSE_NOTE },
     Row { id: "compose.screen",        identity: Identity::Params(COMPOSE_IDENTITY), stress: COMPOSE_STRESS, note: COMPOSE_NOTE },
     Row { id: "compose.overlay",       identity: Identity::Params(COMPOSE_IDENTITY), stress: COMPOSE_STRESS, note: COMPOSE_NOTE },

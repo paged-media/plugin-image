@@ -337,6 +337,11 @@ pub struct Layer {
     /// wanted: an adjustment layer clipped to a smart object IS a smart
     /// filter.
     pub clipped: bool,
+    /// Blend this layer (in Normal mode) in a GAMMA space — how Photoshop
+    /// composites TEXT layers ("Blend Text Colors Using Gamma"); `None`
+    /// is the ordinary blend. Set by the layered PSD import on text
+    /// layers (`compose.normal_gamma`).
+    pub blend_gamma: Option<f32>,
 }
 
 impl Layer {
@@ -729,6 +734,7 @@ impl LayerStack {
                 mask_enabled: true,
                 group: None,
                 clipped: false,
+                blend_gamma: None,
             }],
             active: 0,
             next_id: 2,
@@ -857,6 +863,13 @@ impl LayerStack {
                 }),
                 group: plate.group.map(group_id),
                 clipped: plate.clipped,
+                // Text blends in a gamma space — in an RGB document. A
+                // CMYK document blends in its inks; its measured
+                // composites got worse with the gamma (3 corpus files).
+                blend_gamma: (plate.text
+                    && &plate.blend_key == b"norm"
+                    && !import.converted_from_cmyk)
+                    .then_some(TEXT_BLEND_GAMMA),
             });
             // COLOR OVERLAY: Photoshop draws it over the layer's content —
             // and over the layers CLIPPED to it, which it covers (measured:
@@ -883,6 +896,7 @@ impl LayerStack {
                     mask_enabled: true,
                     group: plate.group.map(group_id),
                     clipped: true,
+                    blend_gamma: None,
                 });
             }
         }
@@ -992,6 +1006,7 @@ impl LayerStack {
                 mask_enabled: true,
                 group: None,
                 clipped: false,
+                blend_gamma: None,
             },
         );
         self.active = at;
@@ -1190,6 +1205,7 @@ impl LayerStack {
                 mask_enabled: true,
                 group: None,
                 clipped: false,
+                blend_gamma: None,
             },
         );
         self.active = at;
@@ -2490,16 +2506,32 @@ impl LayerStack {
                         .to_vec()
                 });
             let below = (!layer.clipped).then(|| acc.clone());
+            // A text layer in Normal mode blends in a gamma space.
+            let gamma = layer
+                .blend_gamma
+                .filter(|_| std::ptr::eq(layer.blend, &COMPOSE_NORMAL));
+            let (kernel, params): (&'static KernelDef, Vec<u8>) = match gamma {
+                Some(g) => (
+                    &image_kernels::families::compose::COMPOSE_NORMAL_GAMMA,
+                    image_kernels::families::compose::ComposeGammaParams::new(layer.opacity, g)
+                        .as_bytes()
+                        .to_vec(),
+                ),
+                None => (
+                    layer.blend,
+                    ComposeParams::new(layer.opacity).as_bytes().to_vec(),
+                ),
+            };
             acc = image_gpu::execute_tile_once_async(
                 ctx,
-                layer.blend,
+                kernel,
                 &[
                     TileInput { f16_bytes: &acc },
                     TileInput { f16_bytes: &premul },
                 ],
                 // The layer's opacity IS the compose family's α: the
                 // spine computes `over(a, b·α)`.
-                ComposeParams::new(layer.opacity).as_bytes(),
+                &params,
                 // THE LAYER MASK. The compose spine already took a mask
                 // here and every caller passed `None`; a masked layer is
                 // that argument finally carrying something. Lowered to
@@ -2811,6 +2843,13 @@ pub(crate) fn with_opacity(
     };
     SelectionCoverage::from_data(w, h, data).map(Arc::new)
 }
+
+/// The gamma a text layer blends in. Photoshop composites TEXT layers in
+/// a gamma space ("Blend Text Colors Using Gamma"; its colour settings
+/// say 1.45). Fitted to text layers Photoshop 27.10 wrote: the best power
+/// on the stored pixels is 1.52–1.6 depending on the colours, so this is
+/// an approximation — 19–40 levels on anti-aliased edges become 2–7.
+pub const TEXT_BLEND_GAMMA: f32 = 1.55;
 
 /// One Levels record as a 256-entry table: the input range normalised,
 /// raised to 1/gamma, mapped onto the output range.
@@ -3824,6 +3863,7 @@ mod tests {
             mask: None,
             vector_mask: None,
             smart: false,
+            text: false,
             adjustment: None,
             color_overlay: None,
             name: name.to_string(),
@@ -3868,6 +3908,7 @@ mod tests {
                 mask: None,
                 vector_mask: None,
                 smart: false,
+                text: false,
                 adjustment: None,
                 color_overlay: None,
                 name: "short".into(),

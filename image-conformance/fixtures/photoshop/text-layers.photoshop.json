@@ -1,0 +1,98 @@
+{
+  "fixture": "text-layers",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/text-layers.jsx",
+    "script_sha256": "6e4667821f9cfc36b7a46967cb7a52775d20903f30ba7a08ec0c4ba101531d89",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-05T11:01:36.636Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "black-on-white",
+      "params": {
+        "backdrop": [
+          255,
+          255,
+          255
+        ]
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "text-layers/black-on-white.psd",
+        "text-layers/black-on-white.png"
+      ]
+    },
+    {
+      "id": "white-on-dark",
+      "params": {
+        "backdrop": [
+          30,
+          40,
+          60
+        ]
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "text-layers/white-on-dark.psd",
+        "text-layers/white-on-dark.png"
+      ]
+    },
+    {
+      "id": "red-on-green",
+      "params": {
+        "backdrop": [
+          40,
+          160,
+          60
+        ]
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "text-layers/red-on-green.psd",
+        "text-layers/red-on-green.png"
+      ]
+    },
+    {
+      "id": "text-at-60",
+      "params": {
+        "backdrop": [
+          240,
+          230,
+          210
+        ]
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "text-layers/text-at-60.psd",
+        "text-layers/text-at-60.png"
+      ]
+    },
+    {
+      "id": "text-multiply",
+      "params": {
+        "backdrop": [
+          240,
+          200,
+          120
+        ]
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "text-layers/text-multiply.psd",
+        "text-layers/text-multiply.png"
+      ]
+    }
+  ]
+}
