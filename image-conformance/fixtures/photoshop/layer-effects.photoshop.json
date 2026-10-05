@@ -1,0 +1,198 @@
+{
+  "fixture": "layer-effects",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/layer-effects.jsx",
+    "script_sha256": "0207d114065a500e2ef4eec150f7f5799e13f1ed5ec8eef82799cc5bc7422da5",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-05T10:04:11.148Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "overlay-normal-100",
+      "params": {
+        "mode": "Nrml",
+        "opacity": 100,
+        "colour": [
+          40,
+          90,
+          200
+        ],
+        "feathered": false
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-normal-100.psd",
+        "layer-effects/overlay-normal-100.png"
+      ]
+    },
+    {
+      "id": "overlay-normal-90",
+      "params": {
+        "mode": "Nrml",
+        "opacity": 90,
+        "colour": [
+          40,
+          90,
+          200
+        ],
+        "feathered": false
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-normal-90.psd",
+        "layer-effects/overlay-normal-90.png"
+      ]
+    },
+    {
+      "id": "overlay-multiply-50",
+      "params": {
+        "mode": "Mltp",
+        "opacity": 50,
+        "colour": [
+          40,
+          90,
+          200
+        ],
+        "feathered": false
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-multiply-50.psd",
+        "layer-effects/overlay-multiply-50.png"
+      ]
+    },
+    {
+      "id": "overlay-linear-burn-100",
+      "params": {
+        "mode": "linearBurn",
+        "opacity": 100,
+        "colour": [
+          40,
+          90,
+          200
+        ],
+        "feathered": false
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-linear-burn-100.psd",
+        "layer-effects/overlay-linear-burn-100.png"
+      ]
+    },
+    {
+      "id": "overlay-overlay-45",
+      "params": {
+        "mode": "Ovrl",
+        "opacity": 45,
+        "colour": [
+          40,
+          90,
+          200
+        ],
+        "feathered": false
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-overlay-45.psd",
+        "layer-effects/overlay-overlay-45.png"
+      ]
+    },
+    {
+      "id": "overlay-soft-edge",
+      "params": {
+        "mode": "Nrml",
+        "opacity": 100,
+        "colour": [
+          40,
+          90,
+          200
+        ],
+        "feathered": true
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-soft-edge.psd",
+        "layer-effects/overlay-soft-edge.png"
+      ]
+    },
+    {
+      "id": "overlay-masked",
+      "params": {
+        "mode": "Nrml",
+        "opacity": 70,
+        "mask": "feathered rectangle"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-masked.psd",
+        "layer-effects/overlay-masked.png"
+      ]
+    },
+    {
+      "id": "overlay-layer-opacity-60",
+      "params": {
+        "mode": "Mltp",
+        "opacity": 100,
+        "layer_opacity": 60
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-layer-opacity-60.psd",
+        "layer-effects/overlay-layer-opacity-60.png"
+      ]
+    },
+    {
+      "id": "overlay-clip-base",
+      "params": {
+        "mode": "Nrml",
+        "opacity": 100,
+        "clipped": "multiply grey above the base"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/overlay-clip-base.psd",
+        "layer-effects/overlay-clip-base.png"
+      ]
+    },
+    {
+      "id": "stroke-disabled",
+      "params": {
+        "stroke": "off"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/stroke-disabled.psd",
+        "layer-effects/stroke-disabled.png"
+      ]
+    },
+    {
+      "id": "stroke-enabled",
+      "params": {
+        "stroke": "on, 3 px outside"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "layer-effects/stroke-enabled.psd",
+        "layer-effects/stroke-enabled.png"
+      ]
+    }
+  ]
+}

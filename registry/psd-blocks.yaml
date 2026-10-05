@@ -188,6 +188,20 @@
   tests:
     rust: ["image-conformance/tests/psd_layer_import.rs", "image-conformance/tests/psd_adjustment_layers.rs", "image-psd/src/layer_pixels.rs", "image-psd/tests/annual_fixture.rs"]
 
+- id: image.psd.addl.effects
+  state_row: image.psd.layer-import
+  tier: parsed           # READ (image-psd/src/effects.rs): which effects an lfx2 block DRAWS, and the Color Overlay's parameters; the block stays preserved-opaque
+  oracle: photoshop      # effects Photoshop 27.10 wrote, composited by our stack vs its merged composite (psd_layer_effects.rs EXPECT)
+  provenance:
+    - "Adobe Photoshop File Formats specification — Object-based effects layer info (lfx2: version, then a versioned descriptor) [PUB]"
+    - "Effect keys SoFi/FrFX/GrFl/DrSh/IrSh/OrGl/IrGl/ebbl/ChFX and their *Multi list forms, per-effect `enab`, `masterFXSwitch`; the overlay's Md (BlnM in BOTH dialects: corpus 'Nrml'/'Mltp', Photoshop 27.10 'normal'/'multiply'), Opct (#Prc), Clr (RGBC Rd/Grn/Bl) [OBS]"
+    - "Rendering, measured against Photoshop: a Color Overlay is drawn over the layer's content AND over the layers clipped to it, inside the layer's shape, before the clipping group blends — a solid layer clipped to the base after its clipped layers; every overlay case within 1 level. An effects block with nothing enabled draws nothing (183 corpus layers) [OBS]"
+  # DECLINED: every other drawn effect, legacy lrFX without lfx2, an overlay
+  # on a group / clipped layer / adjustment layer / under fill opacity /
+  # with knockout or blend-interior-effects, a non-RGB overlay colour.
+  tests:
+    rust: ["image-conformance/tests/psd_layer_effects.rs"]
+
 - id: image.psd.addl.adjustment
   state_row: image.psd.layer-import
   tier: parsed           # READ (image-psd/src/adjustment.rs) into the layer stack's adjust chain; the block bytes stay preserved-opaque for re-emission

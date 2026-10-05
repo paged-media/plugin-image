@@ -75,6 +75,7 @@ pub mod compression;
 pub mod container;
 pub mod descriptor;
 pub mod edit;
+pub mod effects;
 pub mod layer_pixels;
 pub mod model;
 pub mod reader;

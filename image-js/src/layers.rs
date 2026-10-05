@@ -710,8 +710,16 @@ impl LayerStack {
             ));
         }
         let want = (width as usize) * (height as usize) * 4;
+        // A Color Overlay becomes a layer of its own (below), so the stack
+        // holds one layer per plate plus one per overlay.
+        let n_layers = import.layers.len()
+            + import
+                .layers
+                .iter()
+                .filter(|p| p.color_overlay.is_some())
+                .count();
         // Ids: layers 1..=N, then the groups (one id space, as `fresh_id`).
-        let group_id = |g: usize| (import.layers.len() + g) as u32 + 1;
+        let group_id = |g: usize| (n_layers + g) as u32 + 1;
         let groups: Vec<LayerGroup> = import
             .groups
             .iter()
@@ -730,8 +738,16 @@ impl LayerStack {
                 parent: plate.parent.map(group_id),
             })
             .collect();
-        let mut layers = Vec::with_capacity(import.layers.len());
+        let mut layers: Vec<Layer> = Vec::with_capacity(n_layers);
+        // A base's Color Overlay waits until its clipped layers are in.
+        let mut pending_overlay: Option<Layer> = None;
         for (i, plate) in import.layers.iter().enumerate() {
+            if !plate.clipped {
+                if let Some(mut o) = pending_overlay.take() {
+                    o.id = layers.len() as u32 + 1;
+                    layers.push(o);
+                }
+            }
             let adjustment = plate.adjustment.as_ref().map(psd_adjust_params);
             if adjustment.is_none() && plate.rgba.len() != want {
                 return Err(IngestError::Decode(format!(
@@ -740,13 +756,14 @@ impl LayerStack {
                     plate.rgba.len()
                 )));
             }
+            let name = if plate.name.is_empty() {
+                format!("Layer {}", i + 1)
+            } else {
+                plate.name.clone()
+            };
             layers.push(Layer {
-                id: (i as u32) + 1,
-                name: if plate.name.is_empty() {
-                    format!("Layer {}", i + 1)
-                } else {
-                    plate.name.clone()
-                },
+                id: layers.len() as u32 + 1,
+                name: name.clone(),
                 visible: !plate.hidden,
                 locked: false,
                 opacity: plate.opacity as f32 / 255.0,
@@ -772,6 +789,35 @@ impl LayerStack {
                 group: plate.group.map(group_id),
                 clipped: plate.clipped,
             });
+            // COLOR OVERLAY: Photoshop draws it over the layer's content —
+            // and over the layers CLIPPED to it, which it covers (measured:
+            // a normal 100 % overlay hides a clipped multiply layer
+            // completely) — inside the layer's shape, before the clipping
+            // group blends. That is a solid layer clipped to the base,
+            // placed after the base's own clipped layers.
+            if let Some(o) = &plate.color_overlay {
+                let solid: Vec<u8> = (0..want / 4)
+                    .flat_map(|_| [o.rgb[0], o.rgb[1], o.rgb[2], 255])
+                    .collect();
+                pending_overlay = Some(Layer {
+                    id: 0,
+                    name: format!("{name} · Color Overlay"),
+                    visible: !plate.hidden,
+                    locked: false,
+                    opacity: f32::from(o.opacity) / 255.0,
+                    blend: psd_blend_kernel(&o.blend_key),
+                    rgba: crate::pixels::Pixels::from_rgba8(Arc::from(solid.into_boxed_slice())),
+                    kind: LayerKind::Pixels,
+                    mask: None,
+                    mask_enabled: true,
+                    group: plate.group.map(group_id),
+                    clipped: true,
+                });
+            }
+        }
+        if let Some(mut o) = pending_overlay.take() {
+            o.id = layers.len() as u32 + 1;
+            layers.push(o);
         }
         let next_id = (layers.len() + groups.len()) as u32 + 1;
         let stack = LayerStack {
@@ -3453,6 +3499,7 @@ mod tests {
             mask: None,
             smart: false,
             adjustment: None,
+            color_overlay: None,
             name: name.to_string(),
             blend_key: *key,
             opacity,
@@ -3492,6 +3539,7 @@ mod tests {
                 mask: None,
                 smart: false,
                 adjustment: None,
+                color_overlay: None,
                 name: "short".into(),
                 blend_key: *b"norm",
                 opacity: 255,

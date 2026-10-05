@@ -55,9 +55,11 @@
 //! * **a group with a mask of its own**, a **vector mask**, a mask with
 //!   **density/feather parameters**, or a layer with both a user and a
 //!   "real" mask (channel −3) — none of these is modelled;
-//! * **layer effects** (`lfx2` / `lrFX`), **adjustment layers** (their
-//!   pixels are not stored; the adjustment is) and **artboards** —
-//!   importing them as plain pixel layers would draw something else;
+//! * **layer effects** that are drawn (`lfx2`; a block whose effects are
+//!   all off draws nothing and imports) other than a Color Overlay,
+//!   **adjustment layers** other than Curves, Levels, Exposure, Invert and
+//!   Hue/Saturation (`crate::adjustment`), and **artboards** — importing
+//!   them as plain pixel layers would draw something else;
 //! * **fill opacity** below 100 % on one of Photoshop's eight special
 //!   blend modes (where fill and layer opacity differ), or on a group;
 //! * **a budget overrun** — plates are CANVAS-EXTENT (the layer model's
@@ -104,6 +106,7 @@
 
 use crate::adjustment::Adjustment;
 use crate::composite::MergedData;
+use crate::effects::{ColorOverlay, Effects};
 use crate::model::ColorMode;
 use crate::model::{LayerRecord, PsdFile, SectionKind};
 use crate::{PsdError, Result};
@@ -139,6 +142,9 @@ pub struct LayerPlate {
     pub group: Option<usize>,
     /// The layer's user mask, canvas-extent.
     pub mask: Option<MaskPlate>,
+    /// A COLOR OVERLAY effect on the layer: the stack draws it as a
+    /// solid layer clipped to this one, in the overlay's mode and opacity.
+    pub color_overlay: Option<ColorOverlay>,
     /// The layer is an ADJUSTMENT: no pixels of its own (`rgba` is
     /// empty), the adjustment transforms what is below it.
     pub adjustment: Option<Adjustment>,
@@ -202,8 +208,8 @@ pub struct LayerImport {
 /// Additional-layer-info keys whose content the import does not model,
 /// each with what it is. A record carrying one is refused.
 const UNMODELLED: &[(&[u8; 4], &str)] = &[
-    (b"lfx2", "layer effects"),
-    (b"lrFX", "layer effects"),
+    // Effects (`lfx2`, legacy `lrFX`) are judged by `effects_of`: only an
+    // effect that is actually drawn blocks the import.
     (b"artb", "an artboard"),
     (b"artd", "an artboard"),
     (b"abdd", "an artboard"),
@@ -260,6 +266,38 @@ fn addl_payload(a: &crate::model::AdditionalLayerInfo) -> &[u8] {
         .unwrap_or(&[])
 }
 
+/// What the record's effects draw: `None` without an effects block or
+/// when nothing in it is drawn (every effect off, or the master switch
+/// off). A legacy `lrFX` block without its `lfx2` twin is not read and
+/// counts as drawn (an `Err`).
+fn effects_of(layer: &LayerRecord) -> Result<Option<Effects>> {
+    if let Some(a) = layer.addl.iter().find(|a| &a.key == b"lfx2") {
+        let fx = Effects::parse_lfx2(addl_payload(a))?;
+        return Ok((!fx.enabled.is_empty()).then_some(fx));
+    }
+    if layer.addl.iter().any(|a| &a.key == b"lrFX") {
+        return Err(PsdError::Unsupported(
+            "legacy effects (lrFX) without an lfx2 block".into(),
+        ));
+    }
+    Ok(None)
+}
+
+/// Knockout (`knko`) off and "blend interior effects as group" (`infx`)
+/// off — the defaults, under which an overlay is drawn on the layer's
+/// content before the layer blends.
+fn default_effect_blending(layer: &LayerRecord) -> bool {
+    let byte = |k: &[u8; 4]| {
+        layer
+            .addl
+            .iter()
+            .find(|a| &a.key == k)
+            .and_then(|a| addl_payload(a).first().copied())
+            .unwrap_or(0)
+    };
+    byte(b"knko") == 0 && byte(b"infx") == 0
+}
+
 /// The record's adjustment, when it is an adjustment layer this module
 /// reads.
 fn adjustment_of(layer: &LayerRecord) -> Result<Option<Adjustment>> {
@@ -313,8 +351,18 @@ impl PsdFile {
         let plate_bytes = canvas_texels
             .checked_mul(4)
             .ok_or_else(|| PsdError::Unsupported("canvas extent overflows usize".into()))?;
+        // A Color Overlay is one more canvas-extent plate in the stack.
+        let overlays = pixel_layers
+            .iter()
+            .filter(|(l, _)| {
+                effects_of(l)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|fx| matches!(fx.color_overlay, Some(Ok(_))))
+            })
+            .count();
         let total = plate_bytes
-            .saturating_mul(pixel_layers.len())
+            .saturating_mul(pixel_layers.len() + overlays)
             .saturating_add(canvas_texels.saturating_mul(masked));
         if total > MAX_IMPORT_BYTES {
             return Err(PsdError::Unsupported(format!(
@@ -331,6 +379,12 @@ impl PsdFile {
         let mut layers = Vec::with_capacity(pixel_layers.len());
         for (layer, group) in pixel_layers {
             let adjustment = adjustment_of(layer)?;
+            // The walk refused every overlay it does not model.
+            let color_overlay = effects_of(layer)
+                .ok()
+                .flatten()
+                .and_then(|fx| fx.color_overlay)
+                .and_then(|o| o.ok());
             // Fill opacity folds into opacity (see the refusals above).
             let opacity =
                 ((u32::from(layer.opacity) * u32::from(fill_opacity(layer)) + 127) / 255) as u8;
@@ -351,6 +405,7 @@ impl PsdFile {
                 mask: self.layer_mask_plate(layer, cw, ch)?,
                 smart: is_smart(layer),
                 adjustment,
+                color_overlay,
             });
         }
         Ok(LayerImport {
@@ -442,6 +497,70 @@ impl PsdFile {
                         layer.name()
                     ),
                 );
+            }
+            let is_folder = matches!(
+                kind,
+                Some(SectionKind::OpenFolder) | Some(SectionKind::ClosedFolder)
+            );
+            match effects_of(layer) {
+                Ok(None) => {}
+                Ok(Some(fx)) => {
+                    let others: Vec<&str> = fx
+                        .enabled
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|k| *k != "SoFi")
+                        .collect();
+                    if !others.is_empty() {
+                        block(
+                            "effects",
+                            format!(
+                                "layer import of a PSD with layer effects {} (\"{}\"): not \
+                                 modelled, so the merged composite is kept instead",
+                                others.join(", "),
+                                layer.name()
+                            ),
+                        );
+                    }
+                    if let Some(overlay) = &fx.color_overlay {
+                        let why = match overlay {
+                            Err(why) => Some(why.clone()),
+                            Ok(_) if is_folder => Some("a Color Overlay on a group".into()),
+                            Ok(_) if layer.clipping != 0 => {
+                                Some("a Color Overlay on a clipped layer".into())
+                            }
+                            Ok(_) if fill_opacity(layer) < 255 => {
+                                Some("a Color Overlay under fill opacity".into())
+                            }
+                            Ok(_) if adjustment_of(layer).ok().flatten().is_some() => {
+                                Some("a Color Overlay on an adjustment layer".into())
+                            }
+                            Ok(_) if !default_effect_blending(layer) => Some(
+                                "a Color Overlay with knockout or blend-interior-effects set"
+                                    .into(),
+                            ),
+                            Ok(_) => None,
+                        };
+                        if let Some(why) = why {
+                            block(
+                                "effects",
+                                format!(
+                                    "layer import of {why} (\"{}\"): not modelled, so the \
+                                     merged composite is kept instead",
+                                    layer.name()
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(e) => block(
+                    "effects",
+                    format!(
+                        "layer import of layer effects that could not be read (\"{}\"): {e}, \
+                         so the merged composite is kept instead",
+                        layer.name()
+                    ),
+                ),
             }
             match adjustment_of(layer) {
                 Ok(Some(adj)) => {
