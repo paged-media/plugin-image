@@ -490,8 +490,16 @@ export interface DecodedInfo {
 
 /** How the ingest lane treated the source's colour. `managed` means an
  *  embedded ICC profile compiled and the pixels were transformed into the
- *  working sRGB space; the other two are honest pass-throughs. */
-export type DisplayTreatment = "managed" | "assumed-srgb" | "profile-rejected";
+ *  working sRGB space; `assumed-srgb` / `profile-rejected` are honest
+ *  pass-throughs. The two `cmyk-*` states say the source was CMYK and was
+ *  CONVERTED to RGB at ingest — through its embedded profile, or through
+ *  the device formula when it had none — so the session works in RGB. */
+export type DisplayTreatment =
+  | "managed"
+  | "assumed-srgb"
+  | "profile-rejected"
+  | "cmyk-converted"
+  | "cmyk-uncalibrated";
 
 /** The DecodedInfo every kernel-apply returns. One place, because six
  *  hand-written copies of the same field list is six chances to forget
@@ -513,20 +521,39 @@ export type WarpKindName = (typeof WARP_KINDS)[number];
 
 /** Map the wasm discriminant (image-js `display_code`) to the name. */
 export function displayTreatmentOf(code: number | undefined): DisplayTreatment {
-  return code === 0
-    ? "managed"
-    : code === 2
-      ? "profile-rejected"
-      : "assumed-srgb";
+  switch (code) {
+    case 0:
+      return "managed";
+    case 2:
+      return "profile-rejected";
+    case 3:
+      return "cmyk-converted";
+    case 4:
+      return "cmyk-uncalibrated";
+    default:
+      return "assumed-srgb";
+  }
 }
 
 /** A short phrase for the panel's colour row. */
 export function displayTreatmentLabel(t: DisplayTreatment): string {
-  return t === "managed"
-    ? "ICC managed"
-    : t === "profile-rejected"
-      ? "sRGB assumed (profile rejected)"
-      : "sRGB assumed";
+  switch (t) {
+    case "managed":
+      return "ICC managed";
+    case "profile-rejected":
+      return "sRGB assumed (profile rejected)";
+    case "cmyk-converted":
+      return "CMYK, converted to sRGB";
+    case "cmyk-uncalibrated":
+      return "CMYK, converted to sRGB without a profile";
+    default:
+      return "sRGB assumed";
+  }
+}
+
+/** The source was CMYK and its pixels are an RGB conversion of the ink. */
+export function isCmykConversion(t: DisplayTreatment): boolean {
+  return t === "cmyk-converted" || t === "cmyk-uncalibrated";
 }
 
 /** The stable engine contract the bundle codes against. Every method

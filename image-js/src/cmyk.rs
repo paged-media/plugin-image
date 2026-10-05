@@ -61,6 +61,9 @@
 //!
 //! Both paths run on the CPU: CMS transform compilation/application and
 //! the codec decode are inherently-CPU work (spec §6), not GPU kernels.
+//!
+//! Callers: the CMYK JPEG decode, and the CMYK PSD — its merged composite
+//! and, for a layered open, every layer plate ([`InkTransform`]).
 
 use image_cms::moxcms_engine::MoxcmsEngine;
 use image_cms::{working_srgb_profile, CmsEngine, Intent, Profile};
@@ -79,26 +82,87 @@ fn profile_from_bytes(bytes: Vec<u8>) -> Profile {
     }
 }
 
+/// One CMYK→RGBA8 conversion, compiled ONCE per source and applied to
+/// every buffer of it — a layered CMYK PSD converts its merged composite
+/// and every layer plate, and they must all go through the SAME
+/// transform (or the layered open and the flattened open would disagree
+/// by construction).
+///
+/// # The intent, and what Photoshop does
+///
+/// Photoshop's RGB view of a CMYK document — Edit > Convert to Profile,
+/// with the Color Settings' defaults — is Adobe ACE, RELATIVE
+/// COLORIMETRIC, with BLACK-POINT COMPENSATION (read from the app's
+/// Color Settings by `scripts/photoshop/probes/cmyk-stacks.jsx`,
+/// "Europe General Purpose 3"). moxcms 0.8.1 has no BPC, and relative
+/// colorimetric WITHOUT it lands 28 levels from Photoshop on the
+/// recorded ink patches (the profile's black is lifted: L* ≈ 9 printed
+/// black has nowhere to go in sRGB but up). PERCEPTUAL — the profile's
+/// A2B0, whose black is already mapped to the PCS black — lands within
+/// 4 levels (mean 0.44) of Photoshop's relative colorimetric + BPC on
+/// the same patches, the same as lcms2's own relcol+BPC does. So the
+/// lane uses Perceptual, and the convention is stated: "Photoshop's
+/// default view, approximated by the profile's perceptual table" — the
+/// replay (`image-conformance/tests/psd_cmyk_photoshop.rs`) holds it to
+/// those numbers. Saturated greens outside sRGB are where ACE and the
+/// ICC-standard CMMs clip differently (up to ~23 levels on one channel,
+/// identical for moxcms and lcms2).
+pub struct InkTransform {
+    compiled: Option<image_cms::CompiledCmykTransform>,
+}
+
+impl InkTransform {
+    /// Compile from the source's embedded ICC profile. `None`, or a
+    /// profile that does not compile as a CMYK source, yields the
+    /// uncalibrated device formula — and [`Self::is_managed`] says so.
+    pub fn for_profile(icc: Option<&[u8]>) -> InkTransform {
+        let compiled = icc.and_then(|bytes| {
+            let src = profile_from_bytes(bytes.to_vec());
+            let dst = working_srgb_profile().ok()?;
+            MoxcmsEngine
+                .compile_cmyk_to_rgba8(&src, &dst, Intent::Perceptual, false)
+                .ok()
+        });
+        InkTransform { compiled }
+    }
+
+    /// `true` when the embedded profile drove the conversion; `false` for
+    /// the uncalibrated device formula.
+    pub fn is_managed(&self) -> bool {
+        self.compiled.is_some()
+    }
+
+    /// The treatment to report for pixels this converted.
+    pub fn treatment(&self) -> crate::display::DisplayTreatment {
+        if self.is_managed() {
+            crate::display::DisplayTreatment::CmykConverted
+        } else {
+            crate::display::DisplayTreatment::CmykUncalibrated
+        }
+    }
+
+    /// Packed 4-ink CMYK8 (`4·n` bytes, 0 = no ink) → straight RGBA8
+    /// (`4·n` bytes, A = 255).
+    pub fn to_rgba8(&self, cmyk: &[u8]) -> Vec<u8> {
+        debug_assert_eq!(cmyk.len() % 4, 0, "CMYK input must be 4 bytes per pixel");
+        match &self.compiled {
+            Some(t) => t.cmyk_to_rgba8_vec(cmyk),
+            None => cmyk_device_to_rgba8(cmyk),
+        }
+    }
+}
+
 /// Convert a packed 4-ink CMYK8 buffer (`4·n` bytes, true ink amounts) to
 /// straight RGBA8 (`4·n` bytes, A = 255) using the embedded ICC profile
 /// when present, else the uncalibrated device-CMYK fallback. Returns the
 /// RGBA8 bytes and whether the conversion was colour-managed (`true`) or
 /// the uncalibrated fallback (`false`) — the caller may surface that.
 pub fn cmyk8_to_rgba8(cmyk: &[u8], icc: Option<&[u8]>) -> Result<(Vec<u8>, bool), IngestError> {
-    debug_assert_eq!(cmyk.len() % 4, 0, "CMYK input must be 4 bytes per pixel");
-    if let Some(icc_bytes) = icc {
-        // The colour-managed lane. A bad/non-CMYK embedded profile falls
-        // back to the device formula rather than failing the decode (an
-        // image with a broken profile is still a valid image).
-        let src = profile_from_bytes(icc_bytes.to_vec());
-        let dst = working_srgb_profile()
-            .map_err(|e| IngestError::Unsupported(format!("CMYK ingest destination: {e}")))?;
-        match MoxcmsEngine.compile_cmyk_to_rgba8(&src, &dst, Intent::Perceptual, false) {
-            Ok(t) => return Ok((t.cmyk_to_rgba8_vec(cmyk), true)),
-            Err(_) => { /* fall through to the uncalibrated device formula */ }
-        }
-    }
-    Ok((cmyk_device_to_rgba8(cmyk), false))
+    // A bad/non-CMYK embedded profile falls back to the device formula
+    // rather than failing the decode (an image with a broken profile is
+    // still a valid image).
+    let t = InkTransform::for_profile(icc);
+    Ok((t.to_rgba8(cmyk), t.is_managed()))
 }
 
 /// The naive, uncalibrated device CMYK→RGBA8 conversion: the standard

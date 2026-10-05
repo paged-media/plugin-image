@@ -236,7 +236,9 @@ mod wasm {
         /// CMS rung 1 — what the RGB display transform did at decode, as a
         /// discriminant the bundle maps to a label: 0 = ICC managed,
         /// 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
-        /// because an embedded profile was rejected. Surfaced so the panel
+        /// because an embedded profile was rejected, 3 = CMYK converted to
+        /// sRGB through its embedded profile, 4 = CMYK converted with the
+        /// device formula (no usable profile). Surfaced so the panel
         /// can STATE the colour treatment instead of leaving the user to
         /// guess which numbers they are looking at.
         pub display: u8,
@@ -253,6 +255,8 @@ mod wasm {
             D::Managed => 0,
             D::AssumedSrgb => 1,
             D::ProfileRejected => 2,
+            D::CmykConverted => 3,
+            D::CmykUncalibrated => 4,
         }
     }
 
@@ -2922,6 +2926,11 @@ mod wasm {
     /// (`layers::smart_renders_agree`); a disagreement declines the
     /// import and leaves the flatten in place. Async for that reason.
     ///
+    /// A CMYK document is checked the same way: its plates go through
+    /// the conversion the composite took, the stack blends them in RGB,
+    /// and the flatten must agree with the converted composite
+    /// (`layers::cmyk_flatten_agrees`) or the import declines.
+    ///
     /// `image_handle` must be the composite already ingested from the
     /// same file (same extent); `psd_handle` is a `psd_open` handle.
     #[wasm_bindgen]
@@ -2937,8 +2946,17 @@ mod wasm {
             let file = map
                 .get(&psd_handle)
                 .ok_or_else(|| JsValue::from_str(&format!("unknown psd handle {psd_handle}")))?;
-            file.layer_plates_rgba8()
-                .map_err(|e| JsValue::from_str(&e.to_string()))
+            // A CMYK document's plates go through the SAME conversion
+            // the merged composite took at ingest (`decode_psd`), so the
+            // layered open and the flattened one agree; the stack then
+            // works in RGB, which the image's treatment already states.
+            if file.header.color_mode == image_psd::model::ColorMode::Cmyk {
+                let ink = crate::ingest::psd_ink_transform(file);
+                file.layer_plates_rgba8_via(&|cmyk| ink.to_rgba8(cmyk))
+            } else {
+                file.layer_plates_rgba8()
+            }
+            .map_err(|e| JsValue::from_str(&e.to_string()))
         })?;
         if import.width != img.width || import.height != img.height {
             return Err(JsValue::from_str(&format!(
@@ -2947,14 +2965,23 @@ mod wasm {
             )));
         }
         let stack = LayerStack::from_psd_plates(&import).map_err(ingest_err)?;
-        if import.layers.iter().any(|p| p.smart) {
+        let smart = import.layers.iter().any(|p| p.smart);
+        if smart || import.converted_from_cmyk {
             let ctx = GPU.with(|g| g.borrow().clone());
             let ours = stack
                 .composite(ctx.as_deref(), None)
                 .await
                 .map_err(ingest_err)?;
             let theirs = img.rgba.to_rgba8();
-            crate::layers::smart_renders_agree(&import, &ours, &theirs).map_err(ingest_err)?;
+            if smart {
+                crate::layers::smart_renders_agree(&import, &ours, &theirs).map_err(ingest_err)?;
+            }
+            // A CMYK document blended in RGB must still look like the
+            // file: `theirs` is its merged composite through the same
+            // conversion (`decode_psd`), so only the blend space is judged.
+            if import.converted_from_cmyk {
+                crate::layers::cmyk_flatten_agrees(&ours, &theirs).map_err(ingest_err)?;
+            }
         }
         // A 16-bit layered import reduced every plate, and the image the
         // stack composites into inherits that fact — the panel's Depth

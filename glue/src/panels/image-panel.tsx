@@ -54,6 +54,7 @@ import {
   DEFAULT_BW_WEIGHTS,
   WARP_KINDS,
   displayTreatmentLabel,
+  isCmykConversion,
   GRADIENT_KINDS,
   PRESSURE_TARGETS,
 } from "../engine";
@@ -1751,6 +1752,20 @@ export function makeImagePanel(session: ImageSession) {
             <span style={mono} data-image-colour-treatment={s.source.display}>
               {displayTreatmentLabel(s.source.display)}
             </span>
+          </div>
+        ) : null}
+
+        {/* A CMYK source was CONVERTED: the layers, the edits and the
+            save-back work in RGB from here on. Stated like the depth
+            reduction below, because it is the same kind of lossy step. */}
+        {s.source && isCmykConversion(s.source.display) ? (
+          <div style={note} data-image-cmyk-converted>
+            {s.source.display === "cmyk-converted"
+              ? "This is a CMYK document. It was converted to sRGB through its embedded profile when it opened (Photoshop's default view: relative colorimetric with black-point compensation, approximated by the profile's perceptual table)."
+              : "This is a CMYK document without a usable profile. It was converted to sRGB with the plain ink formula, which is not colour-managed."}{" "}
+            The layers, the edits and the save-back are RGB; layers using a blend
+            mode other than Normal are not imported, because Photoshop blends
+            them in CMYK.
           </div>
         ) : null}
 

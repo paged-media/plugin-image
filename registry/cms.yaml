@@ -83,11 +83,24 @@
   # holds every non-corner patch (measured 1/255 — 8 is conservative
   # headroom across CMM minor versions).
   #
-  # NOT YET WIRED into the M4 image-js ingest slice: that path still rejects
-  # CMYK ("the M2 cast/CMS lane") because wiring needs image-js to take an
-  # image-cms dep (wasm-size budget I-07) + thread the embedded source ICC
-  # and a baked sRGB destination. The transform lane is complete and
-  # conformance-gated here; the editor-ingest wire-up is a separate task.
+  # WIRED (image-js `cmyk::InkTransform`): CMYK JPEG ingest, and CMYK PSD
+  # ingest — the merged composite and, for a layered open, every layer
+  # plate, through ONE compiled transform from the file's embedded
+  # profile (resource 1039). No usable profile → the device formula,
+  # reported as `CmykUncalibrated` (it used to be reported as managed).
+  #
+  # INTENT CONVENTION (Photoshop oracle, 2026-10): Photoshop's RGB view of
+  # a CMYK document under its default Color Settings is Adobe ACE,
+  # RELATIVE COLORIMETRIC + BLACK-POINT COMPENSATION (read from the app).
+  # moxcms 0.8.1 has no BPC; relcol without it is 28 levels off on the
+  # Coated FOGRA39 ink patches, while PERCEPTUAL (the profile's A2B0,
+  # black already at the PCS black) is within max 4 / mean 0.44 — as
+  # close as lcms2's own relcol+BPC (max 4 / mean 0.17). So the lane uses
+  # Perceptual and states it as "Photoshop's default view, approximated
+  # by the perceptual table". Saturated greens outside sRGB clip
+  # differently in ACE (up to 23 levels, identical for moxcms and lcms2).
+  # A profile whose perceptual table is not black-scaled would break the
+  # approximation; real BPC would be the fix (moxcms has none yet).
   gpu_tolerance:
     kind: channel_eps_u8
     value: 20
@@ -99,4 +112,4 @@
     - "4-ink-via-Layout::Rgba: moxcms DataColorSpace::Cmyk check_layout contract"
     - "differential oracle: lcms2-sys 4 raw FFI CMYK_8→RGB_8 (CI-only dev-dep, never shipped)"
   tests:
-    rust: ["image-cms/tests/cmyk_lane.rs"]
+    rust: ["image-cms/tests/cmyk_lane.rs", "image-conformance/tests/psd_cmyk_photoshop.rs"]
