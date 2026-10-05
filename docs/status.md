@@ -99,9 +99,17 @@ landed. How the parts fit is in
 - **PSD.** The composite decode takes 8- and 16-bit RGB, greyscale or CMYK, raw or RLE (not
   16-bit RLE); other modes and depths are refused, and a transparent document's white-matted
   merged colour is un-matted (CMYK: matted against the paper). Layers are imported from RGB
-  and CMYK files, with groups, clipping, user masks and fill opacity, within 384 MiB; a file
-  with smart objects, layer effects, adjustment layers, artboards, vector masks, group masks or
-  mask density/feather opens flattened, and says which (`image-psd/src/layer_pixels.rs`). A
+  and CMYK files within 384 MiB: pixel layers, groups and their masks (an isolated group blends
+  through its mask, a pass-through group's members each go through it), clipping, user masks,
+  fill opacity; smart objects as their stored render, accepted only where the file's merged
+  composite agrees inside each one's footprint (a stale render, as on a corpus mock-up, opens
+  flattened); Curves, Levels, Exposure, Invert and Hue/Saturation adjustment layers (curves
+  exact, the others within 1–4 levels of Photoshop-written layers); effects blocks that draw
+  nothing; and Color Overlay, as a solid layer clipped to its base above the base's clipped
+  layers (within 1 level). A file with other drawn effects, other adjustment layers (Photo
+  Filter and Brightness/Contrast differ from Photoshop's), artboards, vector masks or a
+  non-default mask density/feather opens flattened, and says which
+  (`PsdFile::layer_import_blockers` lists every reason; `image-psd/src/layer_pixels.rs`). A
   CMYK file's layers are converted to sRGB one by one and blended in RGB, which Photoshop
   does not do (it blends the inks), so a CMYK file also opens flattened when a layer or group
   uses a blend mode other than Normal (measured 9.9–50 ΔE00 p95 off), when it has no real
@@ -109,8 +117,11 @@ landed. How the parts fit is in
   over 1 % of the pixels (soft edges and partial opacity over different colours: a 60 % layer
   measured 61 levels off). Layers Photoshop writes for a 16-bit document (the `Lr16` block) are
   not read, so such a file opens flattened. Of the corpus's 77 CMYK files all now open (74
-  through their profile, 3 without one); none opens as layers yet: 72 have vector masks, 3 a
-  non-Normal blend, one exceeds the budget, one has no layers. Save-back is 8-bit RGB. "Apply to file" and
+  through their profile, 3 without one); none opens as layers yet, mostly for vector masks.
+  Across the 157-file corpus, 11 files open as layers today; the next walls are vector masks
+  (the first refusal for 78 files) and the 384 MiB budget, which canvas-sized layers reach on
+  mock-ups (35 files otherwise importable: 11–26 layers at 3500×2300 to 4500×3000 need
+  429–1338 MiB canvas-sized, 122–272 MiB at each layer's own bounds). Save-back is 8-bit RGB. "Apply to file" and
   the PNG and JPEG exporters encode the composite. The PSD exporter returns the retained file
   byte for byte only when the parameters are the identity and the pixels have not been edited since ingest; otherwise it
   runs the save-back, and when the save-back declines (a size change, a non-RGB or non-8-bit file) it exports nothing
@@ -147,5 +158,5 @@ landed. How the parts fit is in
   JPEG XL as planned, camera RAW and HEIC as out of scope ([ADR 456](adr/456-codecs.md)).
 - A writer for PSD descriptors, which are parsed read-only (`registry/psd-blocks.yaml`).
 - A runner for the GEGL oracle the registry names for some rows.
-- Rendering a smart object from its embedded source, layer effects, and reading PSD
+- Rendering a smart object from its embedded source, layer effects other than Color Overlay, and reading PSD
   adjustment layers back as adjustment layers.
