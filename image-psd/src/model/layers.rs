@@ -113,6 +113,62 @@ pub struct LayerRecord {
     pub channel_data: Vec<ChannelData>,
 }
 
+/// A mask's optional parameters (flags bit 4): density 0–255 (255 = the
+/// mask applies fully) and feather in pixels, for the user mask and the
+/// vector mask. Absent fields are the defaults (255, 0.0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MaskParameters {
+    pub user_density: u8,
+    pub user_feather: f64,
+    pub vector_density: u8,
+    pub vector_feather: f64,
+}
+
+impl MaskParameters {
+    /// Every parameter at its default — a mask that draws as if it had none.
+    pub fn is_default(&self) -> bool {
+        self.user_density == 255
+            && self.user_feather == 0.0
+            && self.vector_density == 255
+            && self.vector_feather == 0.0
+    }
+}
+
+impl LayerMaskData {
+    /// The mask parameters (Adobe Photoshop File Formats specification,
+    /// Layer mask / adjustment layer data: "Mask Parameters. Only present
+    /// if bit 4 of Flags set": a flags byte — bit 0 user mask density
+    /// (1 byte), bit 1 user mask feather (8-byte double), bit 2 vector
+    /// mask density, bit 3 vector mask feather — then the fields in that
+    /// order). `None` when the record has none or they do not read.
+    pub fn parameters(&self) -> Option<MaskParameters> {
+        if self.flags & 0x10 == 0 {
+            return None;
+        }
+        let mut r = crate::reader::ByteReader::new(self.raw.get(18..)?);
+        let which = r.u8().ok()?;
+        let mut p = MaskParameters {
+            user_density: 255,
+            user_feather: 0.0,
+            vector_density: 255,
+            vector_feather: 0.0,
+        };
+        if which & 1 != 0 {
+            p.user_density = r.u8().ok()?;
+        }
+        if which & 2 != 0 {
+            p.user_feather = f64::from_bits(r.u64().ok()?);
+        }
+        if which & 4 != 0 {
+            p.vector_density = r.u8().ok()?;
+        }
+        if which & 8 != 0 {
+            p.vector_feather = f64::from_bits(r.u64().ok()?);
+        }
+        Some(p)
+    }
+}
+
 impl LayerRecord {
     pub fn name(&self) -> String {
         self.addl
@@ -506,4 +562,44 @@ fn write_pascal_pad4(name: &PascalString, w: &mut ByteWriter) {
     let start = w.len();
     w.bytes(&name.raw);
     w.pad_to(4, start);
+}
+
+#[cfg(test)]
+mod mask_parameter_tests {
+    use super::*;
+
+    fn mask(flags: u8, params: &[u8]) -> LayerMaskData {
+        let mut raw = vec![0u8; 16];
+        raw.push(0); // default colour
+        raw.push(flags);
+        raw.extend_from_slice(params);
+        LayerMaskData {
+            top: 0,
+            left: 0,
+            bottom: 0,
+            right: 0,
+            default_color: 0,
+            flags,
+            raw,
+        }
+    }
+
+    #[test]
+    fn image_psd_mask_parameters_read_in_flag_order() {
+        // user density 212, vector feather 14.5 px.
+        let mut p = vec![0b1001u8, 212];
+        p.extend_from_slice(&14.5f64.to_bits().to_be_bytes());
+        let got = mask(0x10, &p).parameters().expect("present");
+        assert_eq!(got.user_density, 212);
+        assert_eq!(got.user_feather, 0.0);
+        assert_eq!(got.vector_feather, 14.5);
+        assert!(!got.is_default());
+        // Present but default: draws as if absent.
+        assert!(mask(0x10, &[0b0001, 255])
+            .parameters()
+            .unwrap()
+            .is_default());
+        // Flag bit 4 clear: none.
+        assert_eq!(mask(0x00, &[0b0001, 10]).parameters(), None);
+    }
 }

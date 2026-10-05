@@ -362,6 +362,17 @@ fn adjustment_of(layer: &LayerRecord) -> Result<Option<Adjustment>> {
     Ok(None)
 }
 
+/// Does the record's mask carry parameters that change what it draws?
+/// Parameters at their defaults (density 100 %, no feather) — 48 corpus
+/// records carry exactly those — draw as if absent; a non-default density
+/// or feather, or parameters that do not read, are not modelled.
+fn mask_parameters_matter(layer: &LayerRecord) -> bool {
+    layer
+        .mask
+        .as_ref()
+        .is_some_and(|m| m.flags & 0x10 != 0 && !m.parameters().is_some_and(|p| p.is_default()))
+}
+
 /// Is the record a smart object (its pixels a stored render)?
 fn is_smart(layer: &LayerRecord) -> bool {
     layer.addl.iter().any(|a| SMART_KEYS.contains(&&a.key))
@@ -765,7 +776,7 @@ impl PsdFile {
                             ),
                         );
                     }
-                    if has_mask && layer.mask.as_ref().is_some_and(|m| m.flags & 0x10 != 0) {
+                    if has_mask && mask_parameters_matter(layer) {
                         block(
                             "mask-parameters",
                             format!(
@@ -825,7 +836,7 @@ impl PsdFile {
                 );
             }
             if has_mask {
-                if layer.mask.as_ref().is_some_and(|m| m.flags & 0x10 != 0) {
+                if mask_parameters_matter(layer) {
                     block(
                         "mask-parameters",
                         format!(

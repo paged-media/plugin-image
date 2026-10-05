@@ -51,6 +51,7 @@ pub use color_mode::ColorModeData;
 pub use header::{ColorMode, FileHeader};
 pub use layers::{
     BlendRanges, ChannelInfo, GlobalLayerMask, LayerAndMaskInfo, LayerMaskData, LayerRecord,
+    MaskParameters,
 };
 pub use resources::{
     ImageResourceBlock, ImageResources, PascalString, ResolutionInfo, ResourceBody,
