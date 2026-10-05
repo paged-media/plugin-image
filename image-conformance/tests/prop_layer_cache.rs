@@ -250,7 +250,7 @@ fn stroke(
     if s.set_active(k).is_err() || !s.active().is_pixels() || s.active().rgba.is_16bit() {
         return Ok(());
     }
-    let mut px: Vec<u8> = s.active().rgba.raw().to_vec();
+    let mut px: Vec<u8> = s.active().rgba.canvas().raw().to_vec();
     let mut painted: Arc<[u8]> = Arc::from(px.clone());
     for n in 0..samples as u32 {
         let r = seed.wrapping_add(n.wrapping_mul(7919));

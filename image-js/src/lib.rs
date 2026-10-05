@@ -1421,7 +1421,7 @@ mod wasm {
                     Ok(Some(DecodedImage {
                         width: d.stack.width(),
                         height: d.stack.height(),
-                        rgba: d.stack.active().rgba.clone(),
+                        rgba: d.stack.active().rgba.canvas().clone(),
                         // A layer view of an already-ingested image; the
                         // transform ran at decode, not per layer.
                         display: crate::display::DisplayTreatment::AssumedSrgb,
@@ -3755,7 +3755,7 @@ mod wasm {
         let src = DecodedImage {
             width: w,
             height: h,
-            rgba: doc.stack.active().rgba.clone(),
+            rgba: doc.stack.active().rgba.canvas().clone(),
             // Same: the active layer's pixels are post-ingest.
             display: crate::display::DisplayTreatment::AssumedSrgb,
             depth_reduced: false,

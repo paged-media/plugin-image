@@ -305,7 +305,7 @@ pub struct Layer {
     /// site cannot assume four bytes per pixel; the `Arc` inside means
     /// a layer still shares the ingest's allocation and a snapshot is
     /// still a pointer copy.
-    pub rgba: crate::pixels::Pixels,
+    pub rgba: crate::pixels::LayerPixels,
     /// The layer MASK — a canvas-extent grayscale coverage field, or
     /// `None` for "fully opaque everywhere" (the overwhelming default,
     /// and cheaper than materializing a constant-one field per layer).
@@ -543,6 +543,15 @@ pub struct HistoryStats {
 /// once; a group whose members were scattered would composite as several
 /// runs, and none of its properties would then mean what the panel
 /// showed. NESTING works by the same rule at one level up: a nested
+/// One contributing layer's pixels as the fold takes them: canvas-sized
+/// (`rect` is `None`), or a bounded layer's rectangle and the pixels
+/// inside it.
+#[derive(Clone)]
+pub(crate) struct Plate {
+    pub px: Arc<[u8]>,
+    pub rect: Option<Region>,
+}
+
 /// group's run must lie inside its parent's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayerGroup {
@@ -690,7 +699,7 @@ impl LayerStack {
         // once, then swap the real buffer in.
         let dummy = vec![0u8; (width as usize) * (height as usize) * 4];
         let mut st = Self::from_image(width, height, Arc::from(dummy))?;
-        st.layers[0].rgba = rgba;
+        st.layers[0].rgba = rgba.into();
         Ok(st)
     }
 
@@ -713,7 +722,7 @@ impl LayerStack {
                 locked: false,
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
-                rgba: crate::pixels::Pixels::from_rgba8(rgba),
+                rgba: crate::pixels::Pixels::from_rgba8(rgba).into(),
                 kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
@@ -815,7 +824,8 @@ impl LayerStack {
                     Arc::from(vec![0u8; want].into_boxed_slice())
                 } else {
                     Arc::from(plate.rgba.clone().into_boxed_slice())
-                }),
+                })
+                .into(),
                 // A smart object's stored render arrives as pixels: the
                 // source is not rendered here (`smart_renders_agree`).
                 kind: match adjustment {
@@ -849,7 +859,8 @@ impl LayerStack {
                     locked: false,
                     opacity: f32::from(o.opacity) / 255.0,
                     blend: psd_blend_kernel(&o.blend_key),
-                    rgba: crate::pixels::Pixels::from_rgba8(Arc::from(solid.into_boxed_slice())),
+                    rgba: crate::pixels::Pixels::from_rgba8(Arc::from(solid.into_boxed_slice()))
+                        .into(),
                     kind: LayerKind::Pixels,
                     mask: None,
                     mask_enabled: true,
@@ -959,7 +970,7 @@ impl LayerStack {
                 locked: false,
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
-                rgba: crate::pixels::Pixels::from_rgba8(pixels),
+                rgba: crate::pixels::Pixels::from_rgba8(pixels).into(),
                 mask: None,
                 mask_enabled: true,
                 group: None,
@@ -1022,10 +1033,11 @@ impl LayerStack {
             ));
         }
         for layer in &mut self.layers {
-            let bpp = layer.rgba.bytes_per_pixel();
-            let depth = layer.rgba.depth();
-            let px = op.remap(layer.rgba.raw(), w, h, bpp, 0);
-            layer.rgba = crate::pixels::Pixels::from_raw(Arc::from(px.into_boxed_slice()), depth);
+            let canvas = layer.rgba.canvas();
+            let (bpp, depth) = (canvas.bytes_per_pixel(), canvas.depth());
+            let px = op.remap(canvas.raw(), w, h, bpp, 0);
+            layer.rgba =
+                crate::pixels::Pixels::from_raw(Arc::from(px.into_boxed_slice()), depth).into();
             if let Some(mask) = &layer.mask {
                 // Added area is revealed, as a reveal-all mask extends.
                 let m = op.remap(mask.data(), w, h, 1, 255);
@@ -1088,7 +1100,7 @@ impl LayerStack {
         match &mut layer.kind {
             LayerKind::Smart(src) => {
                 src.scale = scale;
-                layer.rgba = crate::pixels::Pixels::from_rgba8(rendered);
+                layer.rgba = crate::pixels::Pixels::from_rgba8(rendered).into();
                 Ok(())
             }
             _ => Err(IngestError::Unsupported(format!(
@@ -1154,7 +1166,7 @@ impl LayerStack {
                 locked: false,
                 opacity: 1.0,
                 blend: &COMPOSE_NORMAL,
-                rgba: crate::pixels::Pixels::from_rgba8(pixels),
+                rgba: crate::pixels::Pixels::from_rgba8(pixels).into(),
                 kind: LayerKind::Pixels,
                 // A new layer is unmasked; the mask is authored later.
                 mask: None,
@@ -1797,8 +1809,8 @@ impl LayerStack {
             )));
         }
         let outcome = {
-            let bpp = active.rgba.bytes_per_pixel();
-            let raw = active.rgba.raw();
+            let bpp = active.rgba.canvas().bytes_per_pixel();
+            let raw = active.rgba.canvas().raw();
             let view = FlatImage::new(self.width, self.height, bpp, raw)
                 .ok_or_else(|| IngestError::Decode("layer pixels are mis-sized".into()))?;
             // The layer's stable ID is the entry's SCOPE, so undo lands
@@ -1806,7 +1818,7 @@ impl LayerStack {
             // happens to be selected when the user reaches for it.
             self.journal.record(label, active.id as u64, &view, clipped)
         };
-        self.layers[self.active].rgba = pixels;
+        self.layers[self.active].rgba = pixels.into();
         if matches!(outcome, RecordOutcome::Recorded { .. }) {
             self.steps.push(Step::Pixels);
             self.undone.clear();
@@ -1999,8 +2011,8 @@ impl LayerStack {
         // The layer's OWN bytes, at its own depth — narrowing here
         // would make an undo lose precision the edit had kept.
         let depth = self.layers[idx].rgba.depth();
-        let bpp = self.layers[idx].rgba.bytes_per_pixel();
-        let mut buf: Vec<u8> = self.layers[idx].rgba.raw().to_vec();
+        let bpp = self.layers[idx].rgba.canvas().bytes_per_pixel();
+        let mut buf: Vec<u8> = self.layers[idx].rgba.canvas().raw().to_vec();
         let label = {
             let mut view = FlatImage::new(w, h, bpp, buf.as_mut_slice())?;
             if undo {
@@ -2010,7 +2022,7 @@ impl LayerStack {
             }
         }?;
         self.layers[idx].rgba =
-            crate::pixels::Pixels::from_raw(Arc::from(buf.into_boxed_slice()), depth);
+            crate::pixels::Pixels::from_raw(Arc::from(buf.into_boxed_slice()), depth).into();
         if idx != self.active {
             self.edit_mask = false;
         }
@@ -2102,10 +2114,10 @@ impl LayerStack {
     /// path applies (see the module docs) — the doors use it so a
     /// GPU-less realm still gets its one-layer document.
     pub fn composite_is_trivial(&self) -> bool {
-        let mut plates = self.plates(None).into_iter();
+        let mut plates = self.plates_indexed(None).into_iter();
         match (plates.next(), plates.next()) {
             (None, _) => true,
-            (Some((l, _)), None) => l.is_plain(),
+            (Some((i, _)), None) => self.layers[i].is_plain(),
             _ => false,
         }
     }
@@ -2114,15 +2126,26 @@ impl LayerStack {
     /// the pixels to composite (the active layer's may be overridden by
     /// an in-flight stroke). Hidden, zero-opacity and fully transparent
     /// layers drop out here — each is exactly the identity in the fold.
+    /// Canvas-sized: a bounded layer is expanded here (the reference fold
+    /// and other whole-canvas readers); the resident fold uses
+    /// [`Self::plates_indexed`], which keeps the bounds.
+    #[cfg_attr(not(any(test, feature = "reference-fold")), allow(dead_code))]
     fn plates<'a>(&'a self, override_active: Option<&'a Arc<[u8]>>) -> Vec<(&'a Layer, Arc<[u8]>)> {
         self.plates_indexed(override_active)
             .into_iter()
-            .map(|(i, px)| (&self.layers[i], px))
+            .map(|(i, p)| {
+                let px = match p.rect {
+                    Some(_) => self.layers[i].rgba.raw_arc(),
+                    None => p.px,
+                };
+                (&self.layers[i], px)
+            })
             .collect()
     }
 
-    /// [`Self::plates`] by layer index.
-    fn plates_indexed(&self, override_active: Option<&Arc<[u8]>>) -> Vec<(usize, Arc<[u8]>)> {
+    /// The contributing layers by index, each with its plate: canvas-sized,
+    /// or a bounded layer's own rectangle and pixels (ADR 464).
+    fn plates_indexed(&self, override_active: Option<&Arc<[u8]>>) -> Vec<(usize, Plate)> {
         self.layers
             .iter()
             .enumerate()
@@ -2133,18 +2156,28 @@ impl LayerStack {
                 // An OWNED `Arc` rather than a borrow: `Pixels` hands
                 // out a clone of its handle, not a reference into
                 // itself. The clone is a refcount bump, not a copy.
-                let px = match override_active {
-                    Some(o) if i == self.active => Arc::clone(o),
-                    _ => l.rgba.raw_arc(),
+                let plate = match (override_active, l.rgba.bounded()) {
+                    (Some(o), _) if i == self.active => Plate {
+                        px: Arc::clone(o),
+                        rect: None,
+                    },
+                    (_, Some(b)) => Plate {
+                        px: b.px.raw_arc(),
+                        rect: Some(b.rect),
+                    },
+                    _ => Plate {
+                        px: l.rgba.raw_arc(),
+                        rect: None,
+                    },
                 };
                 // An ADJUSTMENT layer has no pixels of its own — its
                 // `rgba` is a transparent placeholder — so the
                 // transparency skip would drop exactly the layers whose
                 // whole job is to change what is beneath them.
-                if l.is_pixels() && is_fully_transparent(&px) {
+                if l.is_pixels() && is_fully_transparent(&plate.px) {
                     return None;
                 }
-                Some((i, px))
+                Some((i, plate))
             })
             .collect()
     }
@@ -2172,7 +2205,12 @@ impl LayerStack {
             // The identity fold — the pixels ARE the composite. Handed
             // back as the very same allocation (an `Arc` clone), so a
             // one-layer document costs nothing to composite.
-            [(i, px)] if self.layers[*i].is_plain() => return Ok(Arc::clone(px)),
+            [(i, p)] if self.layers[*i].is_plain() => {
+                return Ok(match p.rect {
+                    Some(_) => self.layers[*i].rgba.raw_arc(),
+                    None => Arc::clone(&p.px),
+                })
+            }
             _ => {}
         }
         let ctx = ctx.ok_or_else(|| {
@@ -4219,7 +4257,7 @@ mod tests {
             }
         }
         s.layer_mut(base).expect("base").rgba =
-            crate::pixels::Pixels::from_rgba8(Arc::from(rgba.into_boxed_slice()));
+            crate::pixels::Pixels::from_rgba8(Arc::from(rgba.into_boxed_slice())).into();
         (s, base)
     }
 
@@ -4420,7 +4458,8 @@ mod tests {
         let px = s.add("Inner");
         s.layer_mut(px).expect("inner").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
             vec![80u8; 16 * 16 * 4].into_boxed_slice(),
-        ));
+        ))
+        .into();
         let adj = s.add_adjustment("Brighten", bright(0.5));
         let id = s.group_range(px, adj, "Set").expect("grouped");
         // ISOLATED explicitly. Pass-through is the default now, and
@@ -4520,11 +4559,13 @@ mod tests {
             let a = s.add("A");
             s.layer_mut(a).expect("a").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
                 vec![255u8; 16 * 16 * 4].into_boxed_slice(),
-            ));
+            ))
+            .into();
             let b = s.add("B");
             s.layer_mut(b).expect("b").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
                 vec![0u8; 16 * 16 * 4].into_boxed_slice(),
-            ));
+            ))
+            .into();
             // B is transparent black, so it must not hide A; give it real
             // alpha in its left half only.
             let mut px = vec![0u8; 16 * 16 * 4];
@@ -4535,7 +4576,7 @@ mod tests {
                 }
             }
             s.layer_mut(b).expect("b").rgba =
-                crate::pixels::Pixels::from_rgba8(Arc::from(px.into_boxed_slice()));
+                crate::pixels::Pixels::from_rgba8(Arc::from(px.into_boxed_slice())).into();
             (s, a, b)
         };
 
@@ -4576,11 +4617,13 @@ mod tests {
         let outer_px = s.add("OuterPlate");
         s.layer_mut(outer_px).expect("o").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
             vec![120u8; 16 * 16 * 4].into_boxed_slice(),
-        ));
+        ))
+        .into();
         let inner_px = s.add("InnerPlate");
         s.layer_mut(inner_px).expect("i").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
             vec![60u8; 16 * 16 * 4].into_boxed_slice(),
-        ));
+        ))
+        .into();
         let adj = s.add_adjustment("Brighten", bright(0.4));
 
         let outer = s.group_range(outer_px, adj, "Outer").expect("outer");
@@ -4618,7 +4661,8 @@ mod tests {
         let px = s.add("Inner");
         s.layer_mut(px).expect("i").rgba = crate::pixels::Pixels::from_rgba8(Arc::from(
             vec![250u8; 16 * 16 * 4].into_boxed_slice(),
-        ));
+        ))
+        .into();
         let outer = s.group_range(px, px, "Outer").expect("outer");
         s.group_range(px, px, "Inner").expect("inner");
         s.set_group_visible(outer, false)
@@ -4724,7 +4768,7 @@ mod tests {
     fn two_layers(w: u32, h: u32) -> LayerStack {
         let mut s = stack(w, h);
         let top = s.add("Top");
-        s.layers[top].rgba = crate::pixels::Pixels::from_rgba8(px(w, h, 255));
+        s.layers[top].rgba = crate::pixels::Pixels::from_rgba8(px(w, h, 255)).into();
         s
     }
 

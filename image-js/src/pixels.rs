@@ -223,3 +223,170 @@ mod tests {
         assert_eq!(&*back.to_rgba8(), &src[..]);
     }
 }
+
+/// A LAYER's pixels: either canvas-sized, or stored at the layer's BOUNDS
+/// — a rectangle of the canvas and the pixels inside it, everything
+/// outside transparent (ADR 464). A layered PSD import keeps each layer
+/// at its record's rectangle, which is what lets a many-layer mock-up fit
+/// in memory at all.
+///
+/// The two shapes are one type so a layer is one thing, but the BOUNDED
+/// bytes are never handed out as if they were a canvas: [`canvas`]
+/// expands them (once, cached, shared by clones), and the paths that can
+/// work on the bounds directly — the fold, persistence, the transparency
+/// check — ask for [`bounded`] instead.
+///
+/// [`canvas`]: Self::canvas
+/// [`bounded`]: Self::bounded
+#[derive(Clone, Debug)]
+pub enum LayerPixels {
+    Canvas(Pixels),
+    Bounded(Bounded),
+}
+
+/// The bounded shape: `px` covers `rect` (row-major, `rect.w × rect.h`)
+/// on a `canvas_w × canvas_h` canvas; `rect` lies inside the canvas.
+#[derive(Clone, Debug)]
+pub struct Bounded {
+    pub rect: image_core::Region,
+    pub px: Pixels,
+    pub canvas_w: u32,
+    pub canvas_h: u32,
+    /// The canvas-sized expansion, made the first time anything asks for
+    /// it and shared by every clone of this layer.
+    expanded: Arc<std::sync::OnceLock<Pixels>>,
+}
+
+impl Bounded {
+    /// `rect` is clipped to the canvas by the caller; `px` must cover it.
+    pub fn new(rect: image_core::Region, px: Pixels, canvas_w: u32, canvas_h: u32) -> Option<Self> {
+        let inside = rect.x >= 0
+            && rect.y >= 0
+            && rect.x as u64 + u64::from(rect.w) <= u64::from(canvas_w)
+            && rect.y as u64 + u64::from(rect.h) <= u64::from(canvas_h);
+        let fits = px.len() == rect.w as usize * rect.h as usize * px.bytes_per_pixel();
+        (inside && fits).then(|| Bounded {
+            rect,
+            px,
+            canvas_w,
+            canvas_h,
+            expanded: Arc::new(std::sync::OnceLock::new()),
+        })
+    }
+
+    /// The pixels placed on a transparent canvas — a fresh buffer, not
+    /// cached (for a caller that needs it once, such as an export).
+    pub fn expand(&self) -> Pixels {
+        let bpp = self.px.bytes_per_pixel();
+        let (cw, r) = (self.canvas_w as usize, self.rect);
+        let mut out = vec![0u8; cw * self.canvas_h as usize * bpp];
+        let row = r.w as usize * bpp;
+        let src = self.px.raw();
+        for y in 0..r.h as usize {
+            let d = ((r.y as usize + y) * cw + r.x as usize) * bpp;
+            out[d..d + row].copy_from_slice(&src[y * row..(y + 1) * row]);
+        }
+        Pixels::from_raw(Arc::from(out.into_boxed_slice()), self.px.depth())
+    }
+}
+
+impl From<Pixels> for LayerPixels {
+    fn from(p: Pixels) -> Self {
+        LayerPixels::Canvas(p)
+    }
+}
+
+impl LayerPixels {
+    /// The canvas-sized pixels. A bounded layer is expanded once and the
+    /// expansion kept (by this layer and its clones); paths that can use
+    /// the bounds should call [`bounded`](Self::bounded) first.
+    pub fn canvas(&self) -> &Pixels {
+        match self {
+            LayerPixels::Canvas(p) => p,
+            LayerPixels::Bounded(b) => b.expanded.get_or_init(|| b.expand()),
+        }
+    }
+
+    /// The bounded shape, when this layer has one.
+    pub fn bounded(&self) -> Option<&Bounded> {
+        match self {
+            LayerPixels::Bounded(b) => Some(b),
+            LayerPixels::Canvas(_) => None,
+        }
+    }
+
+    /// An 8-bit canvas-sized view WITHOUT keeping an expansion (an export
+    /// that visits every layer once must not leave each one expanded).
+    pub fn to_rgba8(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            LayerPixels::Canvas(p) => p.to_rgba8(),
+            LayerPixels::Bounded(b) => match b.expanded.get() {
+                Some(p) => p.to_rgba8(),
+                None => std::borrow::Cow::Owned(b.expand().to_rgba8().into_owned()),
+            },
+        }
+    }
+
+    /// The canvas-sized `Arc` (expanding a bounded layer, cached).
+    pub fn raw_arc(&self) -> Arc<[u8]> {
+        self.canvas().raw_arc()
+    }
+
+    pub fn is_16bit(&self) -> bool {
+        match self {
+            LayerPixels::Canvas(p) => p.is_16bit(),
+            LayerPixels::Bounded(b) => b.px.is_16bit(),
+        }
+    }
+
+    pub fn depth(&self) -> SampleDepth {
+        match self {
+            LayerPixels::Canvas(p) => p.depth(),
+            LayerPixels::Bounded(b) => b.px.depth(),
+        }
+    }
+
+    /// Bytes this layer's pixels occupy as stored (not counting a cached
+    /// expansion).
+    pub fn stored_bytes(&self) -> usize {
+        match self {
+            LayerPixels::Canvas(p) => p.len(),
+            LayerPixels::Bounded(b) => b.px.len(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod layer_pixel_tests {
+    use super::*;
+    use image_core::Region;
+
+    #[test]
+    fn a_bounded_layer_expands_onto_a_transparent_canvas() {
+        let px = Pixels::from_rgba8(Arc::from(vec![9u8; 2 * 4].into_boxed_slice()));
+        let b = Bounded::new(Region::new(1, 1, 2, 1), px, 4, 3).expect("inside");
+        let l = LayerPixels::Bounded(b);
+        let c = l.to_rgba8();
+        assert_eq!(c.len(), 4 * 3 * 4);
+        assert!(
+            c[..4 * 4 + 4].iter().all(|&v| v == 0),
+            "row 0 and (0,1) clear"
+        );
+        assert_eq!(&c[(4 + 1) * 4..(4 + 3) * 4], &[9u8; 8][..]);
+        assert!(c[(4 + 3) * 4..].iter().all(|&v| v == 0));
+        assert!(
+            Arc::ptr_eq(&l.raw_arc(), &l.clone().raw_arc()),
+            "one cached expansion"
+        );
+        assert!(
+            Bounded::new(
+                Region::new(3, 0, 2, 1),
+                Pixels::from_rgba8(Arc::from(vec![0u8; 8].into_boxed_slice())),
+                4,
+                3
+            )
+            .is_none(),
+            "outside the canvas"
+        );
+    }
+}

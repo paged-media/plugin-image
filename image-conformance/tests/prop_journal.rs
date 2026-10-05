@@ -134,7 +134,11 @@ fn check(stack: &LayerStack, m: &Model) -> Result<(), TestCaseError> {
     prop_assert_eq!(stack.len(), m.layers.len());
     for (l, (id, px)) in stack.layers().iter().zip(&m.layers) {
         prop_assert_eq!(l.id, *id);
-        prop_assert!(l.rgba.raw() == px.as_slice(), "layer {} pixels diverge", id);
+        prop_assert!(
+            l.rgba.canvas().raw() == px.as_slice(),
+            "layer {} pixels diverge",
+            id
+        );
     }
     prop_assert_eq!(stack.active_index(), m.active);
     let h = stack.history();
@@ -279,7 +283,7 @@ fn the_entry_cap_evicts_the_oldest_edit_and_says_so__feat__image_editor_undo_jou
     }
     assert_eq!(undone, cap, "exactly the retained window undoes");
     assert!(
-        stack.layers()[0].rgba.raw() == states[5].as_slice(),
+        stack.layers()[0].rgba.canvas().raw() == states[5].as_slice(),
         "undoing the whole window lands on the state after the 5 evicted edits"
     );
 }

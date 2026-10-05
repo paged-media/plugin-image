@@ -347,7 +347,7 @@ impl LayerStack {
                 locked,
                 opacity,
                 blend,
-                rgba: crate::pixels::Pixels::from_raw(px, depth),
+                rgba: crate::pixels::Pixels::from_raw(px, depth).into(),
                 mask,
                 group,
                 mask_enabled,
@@ -414,7 +414,8 @@ mod tests {
         s.group_range(1, 2, "G").expect("group");
         s.add("Deep");
         s.layers.last_mut().expect("layer").rgba =
-            crate::pixels::Pixels::from_rgba16(&(0..48).map(|i| i * 1000).collect::<Vec<u16>>());
+            crate::pixels::Pixels::from_rgba16(&(0..48).map(|i| i * 1000).collect::<Vec<u16>>())
+                .into();
         s
     }
 

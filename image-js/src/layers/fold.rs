@@ -80,9 +80,10 @@ use image_kernels::families::cast::{
 use image_kernels::families::compose::{ComposeParams, COMPOSE_NORMAL};
 use image_kernels::KernelDef;
 
-use super::{alpha_of, effective_coverage, LayerStack};
+use super::{alpha_of, effective_coverage, LayerStack, Plate};
 use crate::fill::{f16_to_rgba8, rgba8_to_f16};
 use crate::ingest::{AdjustParams, IngestError};
+use image_core::Region;
 
 /// Device bytes of plates the cache keeps between composites. Past it a
 /// plate is still uploaded for the composite that needs it, just not
@@ -137,10 +138,13 @@ impl CovKey {
 /// One step of the fold, in the order the fold runs them.
 #[derive(Clone)]
 pub(super) enum Step {
-    /// Blend a pixel plate into the accumulator.
+    /// Blend a pixel plate into the accumulator. With `rect` the plate is
+    /// a bounded layer's pixels inside that rectangle (ADR 464), blended
+    /// through a window of the accumulator.
     Pixel {
         layer: u32,
         px: Arc<[u8]>,
+        rect: Option<Region>,
         blend: &'static KernelDef,
         opacity: f32,
         cov: CovKey,
@@ -188,6 +192,7 @@ impl Step {
                 Step::Pixel {
                     layer,
                     px,
+                    rect,
                     blend,
                     opacity,
                     cov,
@@ -195,12 +200,14 @@ impl Step {
                 Step::Pixel {
                     layer: l2,
                     px: p2,
+                    rect: r2,
                     blend: b2,
                     opacity: o2,
                     cov: c2,
                 },
             ) => {
                 layer == l2
+                    && rect == r2
                     && Arc::ptr_eq(px, p2)
                     && std::ptr::eq(*blend, *b2)
                     && opacity.to_bits() == o2.to_bits()
@@ -407,10 +414,20 @@ impl LayerStack {
     /// the active one). The SAME walk the fold has always made — group
     /// opening and closing, the hidden-group skip, the clip base — just
     /// recorded instead of executed.
-    pub(super) fn plan_fold(&self, plates: &[(usize, Arc<[u8]>)]) -> (Vec<Step>, usize) {
+    pub(super) fn plan_fold(&self, plates: &[(usize, Plate)]) -> (Vec<Step>, usize) {
         let mut steps = Vec::new();
         let mut open: Vec<u32> = Vec::new();
-        let mut clip_base: Option<Arc<[u8]>> = None;
+        // The clip base: its layer index and plate. Its CANVAS-sized
+        // pixels (whose alpha is the clip) are asked for only when a
+        // clipped layer needs them, so a bounded layer that clips nothing
+        // is never expanded.
+        let mut clip_base: Option<(usize, &Plate)> = None;
+        let canvas_of = |(i, p): (usize, &Plate)| -> Arc<[u8]> {
+            match p.rect {
+                Some(_) => self.layers[i].rgba.raw_arc(),
+                None => Arc::clone(&p.px),
+            }
+        };
         // The base's (blend, opacity) while a clipping group is open.
         let mut clip_group: Option<(&'static KernelDef, f32)> = None;
         let close_clip = |steps: &mut Vec<Step>, g: &mut Option<(&'static KernelDef, f32)>| {
@@ -419,7 +436,7 @@ impl LayerStack {
             }
         };
         let mut checkpoint = None;
-        for (index, px) in plates {
+        for (index, plate) in plates {
             let layer = &self.layers[*index];
             if *index >= self.active && checkpoint.is_none() {
                 checkpoint = Some(steps.len());
@@ -457,7 +474,7 @@ impl LayerStack {
                 }
             }
             if layer.clipped {
-                let Some(base) = &clip_base else {
+                let Some(base) = clip_base else {
                     continue;
                 };
                 // The first clipped layer turns the base's step into the
@@ -465,17 +482,17 @@ impl LayerStack {
                 if clip_group.is_none() {
                     if let Some(Step::Pixel {
                         layer,
-                        px,
                         blend,
                         opacity,
                         cov,
+                        ..
                     }) = steps.last()
                     {
-                        if Arc::ptr_eq(px, base) {
+                        if *layer == self.layers[base.0].id {
                             clip_group = Some((*blend, *opacity));
                             let open_step = Step::ClipOpen {
                                 layer: *layer,
-                                px: Arc::clone(px),
+                                px: canvas_of(base),
                                 cov: cov.clone(),
                             };
                             *steps.last_mut().expect("non-empty") = open_step;
@@ -483,7 +500,7 @@ impl LayerStack {
                     }
                 }
             } else if layer.is_pixels() {
-                clip_base = Some(Arc::clone(px));
+                clip_base = Some((*index, plate));
             }
             let cov = CovKey {
                 own: super::multiply_coverage(
@@ -494,7 +511,7 @@ impl LayerStack {
                 // once, at its close; outside one (no base step to open
                 // it on) the clip falls back to confining coverage.
                 clip: if layer.clipped && clip_group.is_none() {
-                    clip_base.clone()
+                    clip_base.map(canvas_of)
                 } else {
                     None
                 },
@@ -509,7 +526,8 @@ impl LayerStack {
             }
             steps.push(Step::Pixel {
                 layer: layer.id,
-                px: Arc::clone(px),
+                px: Arc::clone(&plate.px),
+                rect: plate.rect,
                 blend: layer.blend,
                 opacity: layer.opacity,
                 cov,
@@ -614,6 +632,47 @@ impl LayerStack {
                 Step::Pixel {
                     layer,
                     px,
+                    rect: Some(rect),
+                    blend,
+                    opacity,
+                    cov,
+                } => {
+                    // A BOUNDED plate (ADR 464): blend it into a window of
+                    // the accumulator and write the window back into a
+                    // copy of it. The accumulator is never written in
+                    // place — a checkpoint may hold the same texture.
+                    let (rx, ry, rw, rh) = (rect.x as u32, rect.y as u32, rect.w, rect.h);
+                    let plate = cache.plate(batch, *layer, px, rw, rh)?;
+                    let mask = (!cov.is_none()).then(|| {
+                        batch.upload(
+                            rw,
+                            rh,
+                            TexFormat::R16Float,
+                            &mask_window(cov, w, (rx, ry, rw, rh)),
+                        )
+                    });
+                    let acc = st.acc.take().unwrap_or_else(|| ctx.zeros(w, h));
+                    let win = batch.target(rw, rh);
+                    batch.copy(&acc, (rx, ry), &win, (0, 0), rw, rh);
+                    let blended = batch.target(rw, rh);
+                    batch
+                        .dispatch(
+                            blend,
+                            &[&win, &plate],
+                            ComposeParams::new(*opacity).as_bytes(),
+                            mask.as_ref(),
+                            &blended,
+                        )
+                        .map_err(gpu_err)?;
+                    let out = batch.target(w, h);
+                    batch.copy(&acc, (0, 0), &out, (0, 0), w, h);
+                    batch.copy(&blended, (0, 0), &out, (rx, ry), rw, rh);
+                    st.acc = Some(out);
+                }
+                Step::Pixel {
+                    layer,
+                    px,
+                    rect: None,
                     blend,
                     opacity,
                     cov,
@@ -675,7 +734,7 @@ impl LayerStack {
     pub(super) async fn composite_resident(
         &self,
         ctx: &GpuContext,
-        plates: &[(usize, Arc<[u8]>)],
+        plates: &[(usize, Plate)],
     ) -> Result<Arc<[u8]>, IngestError> {
         let (w, h) = (self.width, self.height);
         let (steps, checkpoint) = self.plan_fold(plates);
@@ -881,6 +940,30 @@ fn window_f16(px: &[u8], w: u32, r: (u32, u32, u32, u32)) -> Vec<u8> {
     rgba8_to_f16(&win)
 }
 
+/// A BOUNDED plate's window `r` (canvas coordinates) as rgba16float:
+/// the plate's pixels where it covers the window, transparent elsewhere.
+fn window_f16_bounded(px: &[u8], b: Region, r: (u32, u32, u32, u32)) -> Vec<u8> {
+    let (x, y, rw, rh) = r;
+    let mut win = vec![0u8; rw as usize * rh as usize * 4];
+    let (bx, by) = (b.x as i64, b.y as i64);
+    for row in 0..rh as i64 {
+        let cy = y as i64 + row - by;
+        if cy < 0 || cy >= i64::from(b.h) {
+            continue;
+        }
+        for col in 0..rw as i64 {
+            let cx = x as i64 + col - bx;
+            if cx < 0 || cx >= i64::from(b.w) {
+                continue;
+            }
+            let s = ((cy * i64::from(b.w) + cx) * 4) as usize;
+            let d = ((row * i64::from(rw) + col) * 4) as usize;
+            win[d..d + 4].copy_from_slice(&px[s..s + 4]);
+        }
+    }
+    rgba8_to_f16(&win)
+}
+
 /// A step's r16float mask over the window — the same per-texel values
 /// the full-canvas mask holds there.
 fn mask_window(cov: &CovKey, w: u32, r: (u32, u32, u32, u32)) -> Vec<u8> {
@@ -964,6 +1047,7 @@ impl LayerStack {
                     Step::Pixel {
                         layer: l1,
                         px: p1,
+                        rect: None,
                         blend: b1,
                         opacity: o1,
                         cov: c1,
@@ -971,6 +1055,7 @@ impl LayerStack {
                     Step::Pixel {
                         layer: l2,
                         px: p2,
+                        rect: None,
                         blend: b2,
                         opacity: o2,
                         cov: c2,
@@ -1069,6 +1154,7 @@ impl LayerStack {
                 Step::Pixel {
                     layer,
                     px,
+                    rect,
                     blend,
                     opacity,
                     cov,
@@ -1076,11 +1162,13 @@ impl LayerStack {
                     // The plate's window: copied from the cached plate,
                     // or uploaded and premultiplied (premultiplying an
                     // opaque texel is exactly the identity, so this does
-                    // not depend on the whole plate's opacity).
+                    // not depend on the whole plate's opacity). A
+                    // bounded plate's cached texture is its own size, so
+                    // its window is always cut from its bytes.
                     let cached = cache
                         .plates
                         .get(layer)
-                        .filter(|(p, _)| Arc::ptr_eq(p, px))
+                        .filter(|(p, _)| rect.is_none() && Arc::ptr_eq(p, px))
                         .map(|(_, t)| t.clone());
                     let plate = match cached {
                         Some(t) => {
@@ -1089,8 +1177,11 @@ impl LayerStack {
                             out
                         }
                         None => {
-                            let src =
-                                batch.upload(rw, rh, TexFormat::Rgba16Float, &window_f16(px, w, r));
+                            let bytes = match rect {
+                                Some(b) => window_f16_bounded(px, *b, r),
+                                None => window_f16(px, w, r),
+                            };
+                            let src = batch.upload(rw, rh, TexFormat::Rgba16Float, &bytes);
                             let out = batch.target(rw, rh);
                             batch
                                 .dispatch(

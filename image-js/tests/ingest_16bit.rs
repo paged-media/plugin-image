@@ -146,14 +146,14 @@ fn a_16bit_layer_edit_journals_and_undoes_at_16_bits() {
 
     s.edit_active("paint", Region::new(0, 0, 4, 4), px16(4, 4, 0xABCD))
         .expect("unlocked");
-    assert_eq!(s.active().rgba.sample16(0, 0), 0xABCD);
+    assert_eq!(s.active().rgba.canvas().sample16(0, 0), 0xABCD);
     assert!(s.active().rgba.is_16bit(), "the edit must not narrow");
 
     // THE assertion. An undo that restored through an 8-bit view would
     // give 0x1200 here — the high byte preserved, the low byte gone.
     s.undo().expect("something to undo");
     assert_eq!(
-        s.active().rgba.sample16(0, 0),
+        s.active().rgba.canvas().sample16(0, 0),
         0x1234,
         "undo must restore the FULL sample, not its high byte"
     );
