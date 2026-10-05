@@ -35,7 +35,9 @@ export class DecodedHandle {
      * CMS rung 1 — what the RGB display transform did at decode, as a
      * discriminant the bundle maps to a label: 0 = ICC managed,
      * 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
-     * because an embedded profile was rejected. Surfaced so the panel
+     * because an embedded profile was rejected, 3 = CMYK converted to
+     * sRGB through its embedded profile, 4 = CMYK converted with the
+     * device formula (no usable profile). Surfaced so the panel
      * can STATE the colour treatment instead of leaving the user to
      * guess which numbers they are looking at.
      * @returns {number}
@@ -78,7 +80,9 @@ export class DecodedHandle {
      * CMS rung 1 — what the RGB display transform did at decode, as a
      * discriminant the bundle maps to a label: 0 = ICC managed,
      * 1 = sRGB assumed (no embedded profile), 2 = sRGB assumed
-     * because an embedded profile was rejected. Surfaced so the panel
+     * because an embedded profile was rejected, 3 = CMYK converted to
+     * sRGB through its embedded profile, 4 = CMYK converted with the
+     * device formula (no usable profile). Surfaced so the panel
      * can STATE the colour treatment instead of leaving the user to
      * guess which numbers they are looking at.
      * @param {number} arg0
@@ -1842,6 +1846,11 @@ export function layers_open(handle) {
  * image this door is given — the file's merged composite
  * (`layers::smart_renders_agree`); a disagreement declines the
  * import and leaves the flatten in place. Async for that reason.
+ *
+ * A CMYK document is checked the same way: its plates go through
+ * the conversion the composite took, the stack blends them in RGB,
+ * and the flatten must agree with the converted composite
+ * (`layers::cmyk_flatten_agrees`) or the import declines.
  *
  * `image_handle` must be the composite already ingested from the
  * same file (same extent); `psd_handle` is a `psd_open` handle.
