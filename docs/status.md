@@ -114,18 +114,22 @@ landed. How the parts fit is in
   adjustment layers (curves exact, the others within 1–4 levels of Photoshop-written layers);
   effects blocks that draw nothing; and Color Overlay, as a solid layer clipped to its base
   above the base's clipped layers (within 1 level). A file with other drawn effects, other
-  adjustment layers (Photo Filter and Brightness/Contrast differ from Photoshop's), artboards or
-  a group vector mask opens flattened, and says which (`PsdFile::layer_import_blockers` lists
+  adjustment layers (Photo Filter and Brightness/Contrast differ from Photoshop's), a group vector
+  mask or a feathered shape mask opens flattened; artboards import (members cut to the
+  artboard, its background beneath them), and says which (`PsdFile::layer_import_blockers` lists
   every reason; `image-psd/src/layer_pixels.rs`). A CMYK file's layers are converted to sRGB
   one by one and blended in RGB, which Photoshop does not do (it blends the inks), so a CMYK
   file opens flattened when a layer, group or overlay uses a mode other than Normal or Multiply
   (measured 9.9–50 ΔE00 p95 off on synthetic tiles), when it has no real merged data, or when
-  its RGB flatten is more than 8 levels off the converted composite on over 1 % of the pixels.
+  its RGB flatten is more than 8 levels off the converted composite on over 1 % of the pixels or
+  more than 2 levels off on over 5 % (a tint: Multiply over pale stock).
   Layers Photoshop writes for a 16-bit document (the `Lr16` block) are not read, so such a file
-  opens flattened. Across the 157-file private corpus, 80 files open as layers and are measured
-  against Photoshop's composite (3 did on 2026-10-04); the rest open flattened, the commonest
-  reasons being smart objects the composite does not vouch for (25), effects (17) and fill
-  opacity on special blend modes (8). Save-back is 8-bit RGB. "Apply to file" and
+  opens flattened. Across the 157-file private corpus, 76 files open as layers and are measured
+  against Photoshop's composite (3 did on 2026-10-04), all but one within 1.5 % of pixels more
+  than 2 levels off; the rest open flattened, the commonest reasons being smart objects the
+  composite does not vouch for (26, most of them Multiply smart objects in CMYK documents, which
+  need ink-space blending), effects (16), CMYK blending (12) and fill opacity on special blend
+  modes (8). Save-back is 8-bit RGB. "Apply to file" and
   the PNG and JPEG exporters encode the composite. The PSD exporter returns the retained file
   byte for byte only when the parameters are the identity and the pixels have not been edited since ingest; otherwise it
   runs the save-back, and when the save-back declines (a size change, a non-RGB or non-8-bit file) it exports nothing
