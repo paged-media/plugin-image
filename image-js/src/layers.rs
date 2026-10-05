@@ -2925,6 +2925,83 @@ pub fn smart_renders_agree(
     Ok(checked.len())
 }
 
+/// A CMYK document's layered flatten may differ from the file's own
+/// composite (both converted by the same transform) by more than this
+/// many levels on at most [`CMYK_FLATTEN_MAX_PCT`] of its pixels. The
+/// same bar a smart object's stored render must clear, for the same
+/// reason: it is the line between "anti-aliased edges mix a little
+/// differently" and "this is a different-looking image".
+pub const CMYK_FLATTEN_LEVELS: u8 = SMART_RENDER_LEVELS;
+
+/// The share of the canvas, in percent, that may disagree.
+pub const CMYK_FLATTEN_MAX_PCT: f64 = SMART_RENDER_MAX_PCT;
+
+/// How a CMYK document's RGB flatten compares with its converted merged
+/// composite, over the whole canvas (over white).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CmykFlattenAgreement {
+    /// Percent of pixels more than [`CMYK_FLATTEN_LEVELS`] off.
+    pub pct_off: f64,
+    /// Mean absolute difference (worst channel per pixel), in levels.
+    pub mean: f64,
+    /// Worst difference, in levels.
+    pub max: u8,
+}
+
+/// Measure `ours` (the stack's RGB flatten of a CMYK import) against
+/// `theirs` (the file's merged CMYK composite, converted by the SAME ink
+/// transform — so the CMM is not on trial here, only the blend space).
+pub fn cmyk_flatten_agreement(ours: &[u8], theirs: &[u8]) -> CmykFlattenAgreement {
+    let over_white = |p: &[u8], c: usize| -> i32 {
+        let a = u32::from(p[3]);
+        ((u32::from(p[c]) * a + 255 * (255 - a) + 127) / 255) as i32
+    };
+    let (mut n, mut off, mut sum, mut max) = (0usize, 0usize, 0u64, 0u32);
+    for (a, b) in ours.chunks_exact(4).zip(theirs.chunks_exact(4)) {
+        n += 1;
+        let d = (0..3)
+            .map(|c| (over_white(a, c) - over_white(b, c)).unsigned_abs())
+            .max()
+            .unwrap_or(0)
+            .max(u32::from(a[3].abs_diff(b[3])));
+        sum += u64::from(d);
+        max = max.max(d);
+        if d > u32::from(CMYK_FLATTEN_LEVELS) {
+            off += 1;
+        }
+    }
+    let n = n.max(1) as f64;
+    CmykFlattenAgreement {
+        pct_off: 100.0 * off as f64 / n,
+        mean: sum as f64 / n,
+        max: max.min(255) as u8,
+    }
+}
+
+/// Accept a CMYK document's layered import only when its RGB flatten
+/// agrees with the file's own composite (see [`CMYK_FLATTEN_LEVELS`]).
+/// Photoshop blends a CMYK document in CMYK; the stack blends the
+/// converted plates in RGB. Opaque pixels agree exactly; mixed ones
+/// (soft edges, partial opacity) by an amount that depends on the
+/// colours, which only this measurement can tell.
+pub fn cmyk_flatten_agrees(
+    ours: &[u8],
+    theirs: &[u8],
+) -> Result<CmykFlattenAgreement, IngestError> {
+    let a = cmyk_flatten_agreement(ours, theirs);
+    if a.pct_off > CMYK_FLATTEN_MAX_PCT {
+        return Err(IngestError::Unsupported(format!(
+            "layer import of a CMYK document whose layers, converted to RGB and blended \
+             there, disagree with Photoshop's CMYK composite ({:.1}% of the pixels more \
+             than {CMYK_FLATTEN_LEVELS} levels off, worst {}): Photoshop mixes the inks, \
+             the RGB stack mixes the converted colours, so the merged composite is kept \
+             instead",
+            a.pct_off, a.max
+        )));
+    }
+    Ok(a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3625,6 +3702,7 @@ mod tests {
         let import = image_psd::LayerImport {
             groups: Vec::new(),
             depth_reduced: false,
+            converted_from_cmyk: false,
             width: 4,
             height: 4,
             layers: vec![
@@ -3647,6 +3725,7 @@ mod tests {
         let import = image_psd::LayerImport {
             groups: Vec::new(),
             depth_reduced: false,
+            converted_from_cmyk: false,
             width: 4,
             height: 4,
             layers: vec![image_psd::LayerPlate {

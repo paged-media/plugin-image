@@ -55,6 +55,14 @@ pub enum DisplayTreatment {
     AssumedSrgb,
     /// A profile was present but did not compile; treated as sRGB.
     ProfileRejected,
+    /// The source was CMYK and was CONVERTED to sRGB through its embedded
+    /// profile at ingest. A lossy step in its own right — the session's
+    /// working space is RGB from here on, and saving writes RGB — so it is
+    /// stated the way a depth reduction is.
+    CmykConverted,
+    /// CMYK converted WITHOUT a usable profile: the multiplicative device
+    /// formula, not colour management.
+    CmykUncalibrated,
 }
 
 impl DisplayTreatment {
@@ -64,13 +72,20 @@ impl DisplayTreatment {
             Self::Managed => "ICC managed",
             Self::AssumedSrgb => "sRGB assumed",
             Self::ProfileRejected => "sRGB assumed (embedded profile rejected)",
+            Self::CmykConverted => "CMYK converted to sRGB (embedded profile)",
+            Self::CmykUncalibrated => "CMYK converted to sRGB (no usable profile — device formula)",
         }
     }
 
     /// Whether real colour management happened. `false` is not an error —
     /// it is the honest majority case.
     pub fn is_managed(self) -> bool {
-        matches!(self, Self::Managed)
+        matches!(self, Self::Managed | Self::CmykConverted)
+    }
+
+    /// The source was CMYK and the pixels are a conversion of its ink.
+    pub fn is_cmyk_conversion(self) -> bool {
+        matches!(self, Self::CmykConverted | Self::CmykUncalibrated)
     }
 }
 

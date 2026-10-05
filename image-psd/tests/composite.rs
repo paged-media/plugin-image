@@ -262,3 +262,139 @@ fn image_psd_global_merged_composite_sixteen_bit_rle_is_still_refused() {
     assert!(msg.contains("16-bit RLE"), "{msg}");
     assert!(msg.contains("unverified"), "the refusal cites why: {msg}");
 }
+
+// ─────────────────────────────── CMYK ────────────────────────────────
+//
+// A CMYK document's merged composite is decoded to INK by
+// `composite_cmyk8` (the conversion to RGB needs the file's profile and a
+// CMS, which this crate does not have). The polarity and the matte were
+// measured on Photoshop-written files
+// (`image-conformance/fixtures/photoshop/cmyk-stacks`, replayed in
+// `image-conformance/tests/psd_cmyk_photoshop.rs`); these pin the decode
+// on hand-built bytes.
+
+/// The planes are stored INVERTED (255 = no ink); the decode flips them
+/// to ink amounts, interleaved C, M, Y, K.
+#[test]
+#[allow(non_snake_case)]
+fn a_cmyk_composite_decodes_to_ink_not_to_stored_values__feat__image_psd_rendered() {
+    // 2×1 CMYK RAW planar. Pixel 0 = paper (stored 255 everywhere);
+    // pixel 1 = 100 % cyan + 40 % black (stored 0 / 255 / 255 / 153).
+    let payload: Vec<u8> = [[255u8, 0], [255, 255], [255, 255], [255, 153]].concat();
+    let bytes = psd_bytes(4, 2, 1, 8, 4, 0, &payload);
+    let file = PsdFile::parse(&bytes).expect("parse");
+    let c = file.composite_cmyk8().expect("decode");
+    assert_eq!((c.width, c.height), (2, 1));
+    assert_eq!(c.cmyk, vec![0, 0, 0, 0, 255, 0, 0, 102]);
+    assert!(c.alpha.is_none());
+    assert!(!c.depth_reduced);
+}
+
+/// The RGBA8 door does not pretend: a CMYK composite needs a colour
+/// transform, and the refusal says where the ink is.
+#[test]
+#[allow(non_snake_case)]
+fn a_cmyk_composite_is_not_handed_out_as_rgb__feat__image_psd_rendered() {
+    let cmyk = psd_model(4, 1, 1, ColorMode::Cmyk, false, 0, vec![0; 4]);
+    let err = cmyk.composite_rgba8().expect_err("needs a transform");
+    assert!(err.to_string().contains("composite_cmyk8"), "{err}");
+    let rgb = psd_model(3, 1, 1, ColorMode::Rgb, false, 0, vec![0; 3]);
+    assert!(
+        rgb.composite_cmyk8().is_err(),
+        "and the ink door is CMYK-only"
+    );
+}
+
+/// With the layer-count sign flag, the fifth channel is transparency and
+/// the stored ink is un-matted against the paper (stored 255) before the
+/// flip; without it, a fifth channel is a spot/alpha channel and the
+/// image is opaque.
+#[test]
+#[allow(non_snake_case)]
+fn a_transparent_cmyk_composite_is_unmatted_against_paper__feat__image_psd_rendered() {
+    // One pixel, 100 % magenta at α = 128: stored M = 0·α + 255·(1 − α).
+    let a = 128u8;
+    let stored_m = (255.0 * (1.0 - f32::from(a) / 255.0)).round() as u8;
+    let raw = vec![255, stored_m, 255, 255, a];
+    let with_flag = psd_model(5, 1, 1, ColorMode::Cmyk, true, 0, raw.clone());
+    let c = with_flag.composite_cmyk8().expect("decode");
+    assert_eq!(c.alpha.as_deref(), Some(&[a][..]));
+    assert_eq!(c.cmyk, vec![0, 255, 0, 0], "un-matted to full magenta");
+
+    let without = psd_model(5, 1, 1, ColorMode::Cmyk, false, 0, raw);
+    let c = without.composite_cmyk8().expect("decode");
+    assert!(c.alpha.is_none(), "an extra channel is not transparency");
+    assert_eq!(
+        c.cmyk,
+        vec![0, 255 - stored_m, 0, 0],
+        "and nothing is un-matted"
+    );
+}
+
+/// RLE: one count table for every channel's rows, channel-major — the
+/// same layout as RGB, four ink planes long.
+#[test]
+#[allow(non_snake_case)]
+fn a_cmyk_rle_composite_decodes__feat__image_psd_rendered() {
+    // 3×1, each plane one row packed as a run of 3 (header 0xFE = repeat
+    // 3 times), stored C=200, M=255, Y=100, K=255.
+    let rows: [u8; 4] = [200, 255, 100, 255];
+    let mut payload = Vec::new();
+    for _ in 0..4 {
+        payload.extend_from_slice(&2u16.to_be_bytes());
+    }
+    for v in rows {
+        payload.extend_from_slice(&[0xFE, v]);
+    }
+    let bytes = psd_bytes(4, 3, 1, 8, 4, 1, &payload);
+    let file = PsdFile::parse(&bytes).expect("parse");
+    let c = file.composite_cmyk8().expect("decode");
+    assert_eq!(c.cmyk, [55, 0, 155, 0].repeat(3));
+    // Sanity on the codec: the same run decodes through packbits.
+    let mut out = [0u8; 3];
+    packbits::decode(&[0xFE, 7], &mut out).expect("run");
+    assert_eq!(out, [7, 7, 7]);
+}
+
+/// 16-bit CMYK is accepted, reduced to the high byte, inverted, and
+/// reported — what Photoshop writes for a 16-bit document's composite is
+/// RAW (measured on the `normal-stack-16` fixture).
+#[test]
+#[allow(non_snake_case)]
+fn a_sixteen_bit_cmyk_composite_is_reduced_and_reported__feat__image_psd_rendered() {
+    // Stored big-endian: C 0x00FF, M 0xFFFF, Y 0x8000, K 0xFF00.
+    let raw = vec![0x00, 0xFF, 0xFF, 0xFF, 0x80, 0x00, 0xFF, 0x00];
+    let mut f = psd_model(4, 1, 1, ColorMode::Cmyk, false, 0, raw);
+    f.header.depth = 16;
+    let c = f.composite_cmyk8().expect("16-bit opens");
+    assert!(c.depth_reduced);
+    assert_eq!(c.cmyk, vec![255, 0, 0x7F, 0]);
+}
+
+/// A CMYK document is no longer a `colour-mode` blocker; what replaces it
+/// is precise: without real merged data nothing can vouch for an RGB
+/// blend of the converted layers (`cmyk-unverified`), and the RGBA8-only
+/// layer door refuses without a transform.
+#[test]
+#[allow(non_snake_case)]
+fn a_cmyk_document_is_judged_by_its_own_blockers__feat__image_psd_layer_import() {
+    let f = psd_model(4, 1, 1, ColorMode::Cmyk, false, 0, vec![0; 4]);
+    let cats: Vec<&str> = f
+        .layer_import_blockers()
+        .iter()
+        .map(|b| b.category)
+        .collect();
+    assert!(!cats.contains(&"colour-mode"), "{cats:?}");
+    assert!(cats.contains(&"cmyk-unverified"), "{cats:?}");
+    let err = f.layer_plates_rgba8().expect_err("needs the ink transform");
+    assert!(err.to_string().contains("layer_plates_rgba8_via"), "{err}");
+
+    // Lab is still a colour-mode blocker.
+    let lab = psd_model(3, 1, 1, ColorMode::Lab, false, 0, vec![0; 3]);
+    let cats: Vec<&str> = lab
+        .layer_import_blockers()
+        .iter()
+        .map(|b| b.category)
+        .collect();
+    assert!(cats.contains(&"colour-mode"), "{cats:?}");
+}

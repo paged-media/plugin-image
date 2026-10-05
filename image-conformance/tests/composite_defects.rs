@@ -68,6 +68,7 @@ fn flatten(layers: Vec<LayerPlate>) -> Option<Arc<[u8]>> {
         width: W,
         height: H,
         depth_reduced: false,
+        converted_from_cmyk: false,
         layers,
     })
     .expect("stack");

@@ -82,6 +82,35 @@ and `iccv4-enabled` features; `QcmsEngine` itself builds RGBA8-to-RGBA8 transfor
 `registry/cms.yaml:86-90` says the CMYK lane is not wired into `image-js`, and
 `image-js/src/ingest.rs:43-47` says the decode bridge does no CMS cast.
 
+## Amendment — 2026-10-05: CMYK PSDs, the intent convention, the reported treatment
+
+The decision stands (one seam, moxcms for the print lane, CPU at decode). What changed:
+
+- **CMYK PSDs are converted, through one transform per file.** `image-js/src/cmyk.rs`
+  `InkTransform` compiles the file's embedded profile (resource 1039) once; the merged
+  composite (`decode_psd`) and every layer plate of a layered open
+  (`PsdFile::layer_plates_rgba8_via`) go through it, so the two opens cannot disagree by
+  construction. `image-psd` stays CMS-free: it hands back ink (`composite_cmyk8`) and takes the
+  conversion as a function.
+- **The intent is Perceptual, as a stated approximation of Photoshop's view.** Photoshop's
+  default conversion of a CMYK document to RGB is Adobe ACE, relative colorimetric with
+  black-point compensation (read from the app by `scripts/photoshop/probes/cmyk-stacks.jsx`).
+  moxcms has no BPC; relative colorimetric without it is 28 levels off on Coated FOGRA39 ink
+  patches, perceptual is within 4 (mean 0.44) — as close as lcms2's own relcol + BPC. The
+  replay `image-conformance/tests/psd_cmyk_photoshop.rs` holds those numbers. A profile whose
+  perceptual table does not map black to the PCS black would break the approximation; real
+  BPC is the fix when moxcms offers it.
+- **The treatment is reported as what it was.** `DisplayTreatment` gained `CmykConverted` and
+  `CmykUncalibrated` (wire codes 3 and 4); the CMYK JPEG path now reports the device-formula
+  fallback instead of `Managed`, which retires that item of the Consequences above.
+- **The working space after a CMYK open is RGB.** Layers are blended in RGB after conversion.
+  Photoshop blends a CMYK document's inks, so a non-Normal blend, a file without real merged
+  data, or a flatten that strays from the converted composite declines the layered open
+  (`image-psd/src/layer_pixels.rs`, `image-js/src/layers.rs` `cmyk_flatten_agrees`).
+
+An RGB PSD's embedded profile is still not applied: doing so at `decode_psd` alone would make
+the flattened open and the layered open (whose plates are not transformed) disagree.
+
 ## Related
 
 - [ADR 003](https://github.com/paged-media/core/blob/main/docs/adr/003-lcms2-color.md) — core's engines: lcms2 native, qcms on wasm

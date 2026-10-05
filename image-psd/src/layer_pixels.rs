@@ -50,8 +50,14 @@
 //! refuses every file whose structure it does not model, and the caller
 //! keeps the flatten:
 //!
-//! * **not RGB at 8 or 16 bits** — 1/32-bit and CMYK/Lab are separate
-//!   lanes;
+//! * **not RGB or CMYK at 8 or 16 bits** — 1/32-bit, Lab and the indexed
+//!   modes are separate lanes;
+//! * in a **CMYK** document: a **non-normal blend** (layer or group;
+//!   Photoshop blends in CMYK, and the plates here are converted to RGB
+//!   first, which measurably does not reproduce it — see
+//!   [`CMYK_RGB_SAFE_BLENDS`]) or **no real merged data** (normal blending
+//!   still differs where colours mix, and only the composite can say
+//!   whether it does by enough to matter);
 //! * a **vector mask**, a mask with **density/feather parameters**, or a layer with both a user and a
 //!   "real" mask (channel −3) — none of these is modelled;
 //! * **layer effects** that are drawn (`lfx2`; a block whose effects are
@@ -90,6 +96,17 @@
 //! Photoshop drew when it saved the file; one it disagrees with declines
 //! the whole import. Without real merged data (resource 0x0421) nothing
 //! can vouch for a cache, so such a file declines here.
+//!
+//! # CMYK: converted plates, vouched for by the composite
+//!
+//! A CMYK document's plates are decoded as ink (stored inverted, like the
+//! merged composite) and converted to RGB by the caller's transform
+//! ([`PsdFile::layer_plates_rgba8_via`]); the stack then works in RGB and
+//! [`LayerImport::converted_from_cmyk`] says so. Because RGB mixing of
+//! converted colours is not CMYK mixing, the consumer must flatten the
+//! import once and compare it with the file's merged composite converted
+//! by the SAME transform before accepting it — the same shape as the
+//! smart-object check.
 //!
 //! Every refusal is a typed [`PsdError::Unsupported`] carrying the
 //! reason, which the panel shows verbatim. "It flattened and did not say
@@ -199,6 +216,11 @@ pub struct LayerImport {
     /// step the user can see stated is a different thing from one they
     /// cannot.
     pub depth_reduced: bool,
+    /// The document is CMYK and every plate was CONVERTED to RGB (by the
+    /// caller's transform) before it reached the stack, which composites
+    /// in RGB from here on. Reported like `depth_reduced`: the session's
+    /// working space is no longer the file's.
+    pub converted_from_cmyk: bool,
     /// BOTTOM-first, the order PSD stores them in and the order the
     /// layer stack composites in.
     pub layers: Vec<LayerPlate>,
@@ -231,8 +253,34 @@ const UNMODELLED: &[(&[u8; 4], &str)] = &[
     (b"clrL", "a Color Lookup adjustment layer"),
 ];
 
-/// Photoshop's eight special blend modes, where fill opacity is applied
-/// inside the blend rather than as a fade (so it is not layer opacity).
+/// Blend modes a CMYK document's layers may use and still import. The
+/// plates are converted to RGB one by one and the stack blends in RGB,
+/// while Photoshop blends in CMYK and converts the result; the two agree
+/// exactly where a layer is opaque, and NOT where colours mix.
+///
+/// Measured against our transform of Photoshop's own CMYK composite
+/// (`image-conformance/tests/psd_cmyk_photoshop.rs`, the `blend-modes`
+/// tiles: one feathered layer per mode over a three-ink background):
+/// every non-normal mode is far off across its whole footprint (ΔE00 p95
+/// 9.9–50, mean 4.9–43 levels), so it is declined here, before decoding.
+/// NORMAL is exact on opaque pixels and off only where it mixes (soft
+/// edges, opacity below 100 %: up to ~60 levels on a 60 % layer), which
+/// depends on the colours involved — so normal is admitted here and
+/// judged per file by the consumer against the file's own composite
+/// (`image-js`'s `cmyk_flatten_agrees`), the way a smart object's stored
+/// render is.
+pub const CMYK_RGB_SAFE_BLENDS: &[&[u8; 4]] = &[b"norm"];
+
+/// A CMYK document's ink transform as the import takes it: packed 4-ink
+/// CMYK8 (0 = no ink) in, the same number of RGBA8 pixels out.
+pub type InkToRgba8<'a> = &'a dyn Fn(&[u8]) -> Vec<u8>;
+
+/// A readable name for a blend-mode key in a refusal.
+fn blend_name(key: &[u8; 4]) -> String {
+    let s = String::from_utf8_lossy(key).trim().to_string();
+    format!("'{s}'")
+}
+
 /// The keys that make a layer a smart object.
 const SMART_KEYS: &[&[u8; 4]] = &[b"SoLd", b"PlLd", b"SoLE"];
 
@@ -257,6 +305,8 @@ struct Walk<'a> {
     blockers: Vec<ImportBlocker>,
 }
 
+/// Photoshop's eight special blend modes, where fill opacity is applied
+/// inside the blend rather than as a fade (so it is not layer opacity).
 const SPECIAL_FILL_MODES: &[&[u8; 4]] = &[
     b"idiv", b"lbrn", b"div ", b"lddg", b"vLit", b"lLit", b"hMix", b"diff",
 ];
@@ -337,14 +387,69 @@ impl PsdFile {
     /// RGBA8 plate, bottom-first. See the module docs for the exact set
     /// of files this declines (and why declining is the right answer).
     pub fn layer_plates_rgba8(&self) -> Result<LayerImport> {
+        if self.header.color_mode == ColorMode::Cmyk {
+            return Err(PsdError::Unsupported(
+                "layer import for color mode Cmyk needs the ink conversion: call \
+                 `layer_plates_rgba8_via` with the file's CMYK→RGB transform \
+                 (image-js builds it from the embedded profile)"
+                    .into(),
+            ));
+        }
+        self.layer_plates_impl(None)
+    }
+
+    /// [`Self::layer_plates_rgba8`] for a CMYK document: every plate's
+    /// ink goes through `ink_to_rgba8`, which takes packed 4-ink CMYK8
+    /// (0 = no ink, the convention [`crate::CompositeCmyk8`] uses) and
+    /// answers the same number of RGBA8 pixels (its alpha is ignored —
+    /// the layer's transparency channel supplies it). This crate has no
+    /// CMS, so the conversion is the caller's, and the caller must use
+    /// the SAME transform it used for the merged composite, or the layer
+    /// import and the flattened open disagree by construction.
+    ///
+    /// The plates are converted one by one and then composited in RGB,
+    /// which is not what Photoshop does (it composites in CMYK and
+    /// converts the result). For normal blending the two agree closely;
+    /// for the blend modes that do not, `import_walk` declines (see
+    /// [`CMYK_RGB_SAFE_BLENDS`]). On an RGB document the transform is not
+    /// called and this is [`Self::layer_plates_rgba8`].
+    pub fn layer_plates_rgba8_via(&self, ink_to_rgba8: InkToRgba8<'_>) -> Result<LayerImport> {
+        self.layer_plates_impl(Some(ink_to_rgba8))
+    }
+
+    /// MEASUREMENT ONLY: [`Self::layer_plates_rgba8_via`] without the
+    /// `cmyk-blend` blocker, so the conformance suite can keep measuring
+    /// how far RGB blending of converted plates lands from Photoshop's
+    /// CMYK blending — the evidence that blocker rests on. Every other
+    /// blocker still applies. Not for opening documents.
+    #[doc(hidden)]
+    pub fn layer_plates_rgba8_via_measuring_cmyk_blends(
+        &self,
+        ink_to_rgba8: InkToRgba8<'_>,
+    ) -> Result<LayerImport> {
+        self.layer_plates_checked(Some(ink_to_rgba8), true)
+    }
+
+    fn layer_plates_impl(&self, ink_to_rgba8: Option<InkToRgba8<'_>>) -> Result<LayerImport> {
+        self.layer_plates_checked(ink_to_rgba8, false)
+    }
+
+    fn layer_plates_checked(
+        &self,
+        ink_to_rgba8: Option<InkToRgba8<'_>>,
+        measuring_cmyk_blends: bool,
+    ) -> Result<LayerImport> {
         let h = &self.header;
         let Walk {
             pixel_layers,
             mut groups,
             group_records,
             masked,
-            blockers,
+            mut blockers,
         } = self.import_walk()?;
+        if measuring_cmyk_blends {
+            blockers.retain(|b| b.category != "cmyk-blend");
+        }
         if let Some(first) = blockers.into_iter().next() {
             return Err(PsdError::Unsupported(first.message));
         }
@@ -403,7 +508,7 @@ impl PsdFile {
                 rgba: if adjustment.is_some() {
                     Vec::new()
                 } else {
-                    self.layer_canvas_rgba8(layer, cw, ch)?
+                    self.layer_canvas_rgba8(layer, cw, ch, ink_to_rgba8)?
                 },
                 group,
                 mask: self.layer_mask_plate(layer, cw, ch)?,
@@ -421,6 +526,7 @@ impl PsdFile {
             width: cw,
             height: ch,
             depth_reduced: h.depth == 16,
+            converted_from_cmyk: h.color_mode == ColorMode::Cmyk,
             layers,
             groups,
         })
@@ -464,11 +570,13 @@ impl PsdFile {
                 ),
             );
         }
-        if h.color_mode != ColorMode::Rgb {
+        let cmyk = h.color_mode == ColorMode::Cmyk;
+        if h.color_mode != ColorMode::Rgb && !cmyk {
             block(
                 "colour-mode",
                 format!(
-                    "layer import for color mode {:?} (RGB only; CMYK/Lab are the M2 CMS lane)",
+                    "layer import for color mode {:?} (RGB, and CMYK through its \
+                     profile; Lab and the indexed modes are not imported)",
                     h.color_mode
                 ),
             );
@@ -676,6 +784,23 @@ impl PsdFile {
                         .iter()
                         .find_map(|a| a.lsct())
                         .and_then(|d| d.blend_key);
+                    let group_blend = lsct_blend.unwrap_or(layer.blend_key);
+                    if cmyk
+                        && &group_blend != b"pass"
+                        && !CMYK_RGB_SAFE_BLENDS.contains(&&group_blend)
+                    {
+                        block(
+                            "cmyk-blend",
+                            format!(
+                                "layer import of a CMYK document with a {} group (\"{}\"): \
+                                 Photoshop blends it in CMYK, and blending the converted \
+                                 layers in RGB does not reproduce it, so the merged \
+                                 composite is kept instead",
+                                blend_name(&group_blend),
+                                layer.name()
+                            ),
+                        );
+                    }
                     groups[g] = GroupPlate {
                         name: layer.name(),
                         blend_key: lsct_blend.unwrap_or(layer.blend_key),
@@ -712,6 +837,19 @@ impl PsdFile {
                 }
                 masked += 1;
             }
+            if cmyk && !CMYK_RGB_SAFE_BLENDS.contains(&&layer.blend_key) {
+                block(
+                    "cmyk-blend",
+                    format!(
+                        "layer import of a CMYK document with a {} blend (\"{}\"): \
+                         Photoshop blends it in CMYK, and blending the converted \
+                         layers in RGB does not reproduce it, so the merged \
+                         composite is kept instead",
+                        blend_name(&layer.blend_key),
+                        layer.name()
+                    ),
+                );
+            }
             smart |= is_smart(layer);
             pixel_layers.push((layer, open.last().copied()));
         }
@@ -727,6 +865,18 @@ impl PsdFile {
                 "layer import of a PSD with no layer records (the merged composite is \
                  all there is)"
                     .into(),
+            );
+        }
+        if cmyk && self.merged_data() != MergedData::Real {
+            block(
+                "cmyk-unverified",
+                format!(
+                    "layer import of a CMYK document without real merged data ({}): \
+                     its layers are blended in RGB after conversion, which only the \
+                     file's own composite can vouch for, so the merged composite is \
+                     kept instead",
+                    self.merged_data().as_str()
+                ),
             );
         }
         if smart && self.merged_data() != MergedData::Real {
@@ -822,7 +972,19 @@ impl PsdFile {
     /// buffers and place them at the layer rect, clipped to the canvas.
     /// A layer with no transparency channel is OPAQUE inside its rect
     /// (the PSD convention); everything outside stays transparent black.
-    fn layer_canvas_rgba8(&self, layer: &LayerRecord, cw: u32, ch: u32) -> Result<Vec<u8>> {
+    fn layer_canvas_rgba8(
+        &self,
+        layer: &LayerRecord,
+        cw: u32,
+        ch: u32,
+        ink_to_rgba8: Option<InkToRgba8<'_>>,
+    ) -> Result<Vec<u8>> {
+        let cmyk = self.header.color_mode == ColorMode::Cmyk;
+        if cmyk && ink_to_rgba8.is_none() {
+            return Err(PsdError::Unsupported(
+                "CMYK layer decode without an ink transform".into(),
+            ));
+        }
         let mut canvas = vec![0u8; (cw as usize) * (ch as usize) * 4];
         let lw = (layer.right - layer.left).max(0) as u32;
         let lh = (layer.bottom - layer.top).max(0) as u32;
@@ -833,15 +995,15 @@ impl PsdFile {
             return Ok(canvas);
         }
 
-        let mut r = vec![0u8; plane_len];
-        let mut g = vec![0u8; plane_len];
-        let mut b = vec![0u8; plane_len];
+        // Colour planes as STORED: R/G/B, or C/M/Y/K inverted (255 = no
+        // ink — the composite's convention, and an absent ink plane is
+        // therefore no ink).
+        let colour_planes = if cmyk { 4 } else { 3 };
+        let mut planes = vec![vec![if cmyk { 255u8 } else { 0u8 }; plane_len]; colour_planes];
         let mut a = vec![255u8; plane_len];
         for (ci, info) in layer.channels.iter().enumerate() {
             let dst = match info.id {
-                0 => &mut r,
-                1 => &mut g,
-                2 => &mut b,
+                id @ 0..=3 if (id as usize) < colour_planes => &mut planes[id as usize],
                 -1 => &mut a,
                 // The mask is read by `layer_mask_plate`; anything else
                 // here is a spot/extra channel with no composite meaning.
@@ -874,6 +1036,39 @@ impl PsdFile {
             dst.copy_from_slice(&plane);
         }
 
+        // The layer rect as interleaved RGB(A): straight for RGB, through
+        // the caller's transform for CMYK (ink = 255 − stored).
+        let rect_rgba: Vec<u8> = match ink_to_rgba8 {
+            Some(convert) if cmyk => {
+                let mut ink = vec![0u8; plane_len * 4];
+                for (i, px) in ink.chunks_exact_mut(4).enumerate() {
+                    for c in 0..4 {
+                        px[c] = 255 - planes[c][i];
+                    }
+                }
+                let out = convert(&ink);
+                if out.len() != plane_len * 4 {
+                    return Err(PsdError::Malformed {
+                        section: "layer channel image data",
+                        detail: format!(
+                            "the ink transform answered {} bytes for {plane_len} pixels",
+                            out.len()
+                        ),
+                    });
+                }
+                out
+            }
+            _ => {
+                let mut out = vec![0u8; plane_len * 4];
+                for (i, px) in out.chunks_exact_mut(4).enumerate() {
+                    px[0] = planes[0][i];
+                    px[1] = planes[1][i];
+                    px[2] = planes[2][i];
+                }
+                out
+            }
+        };
+
         for ly in 0..lh as i64 {
             let dy = layer.top as i64 + ly;
             if dy < 0 || dy >= ch as i64 {
@@ -886,9 +1081,7 @@ impl PsdFile {
                 }
                 let si = (ly * lw as i64 + lx) as usize;
                 let di = ((dy * cw as i64 + dx) as usize) * 4;
-                canvas[di] = r[si];
-                canvas[di + 1] = g[si];
-                canvas[di + 2] = b[si];
+                canvas[di..di + 3].copy_from_slice(&rect_rgba[si * 4..si * 4 + 3]);
                 canvas[di + 3] = a[si];
             }
         }

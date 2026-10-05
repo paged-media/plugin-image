@@ -35,11 +35,13 @@
 //! into interleaved RGBA8 pixels for the editor placement path
 //! (C-5 bytes in → decode → adjust → C-1 scene-layer composite).
 //!
-//! Scope (honest M4 cut, mirroring the M1 flatten oracle's corpus):
-//! 8-bit RGB[A] and Grayscale[+A], RAW (0) and RLE (1) compression, PSD
-//! and PSB count-table widths. 16/32-bit, CMYK/Lab/Indexed/Bitmap/Duotone
-//! and ZIP-compressed composites answer [`PsdError::Unsupported`] — the
-//! M2 cast/CMS lane. The PRESERVATION model is untouched: this is a pure
+//! Scope: 8- and 16-bit (reduced, reported) RGB[A] and Grayscale[+A]
+//! through [`PsdFile::composite_rgba8`]; 8- and 16-bit CMYK[+A] through
+//! [`PsdFile::composite_cmyk8`], which hands back INK (the conversion to
+//! RGB needs the file's ICC profile and a CMS, and lives in `image-js`).
+//! RAW (0) and RLE (1) compression, PSD and PSB count-table widths.
+//! 1/32-bit, Lab/Indexed/Bitmap/Duotone and ZIP-compressed composites
+//! answer [`PsdError::Unsupported`]. The PRESERVATION model is untouched: this is a pure
 //! READ over the already-parsed section (the verbatim re-emit guarantees
 //! hold regardless of whether the composite decodes).
 //!
@@ -158,10 +160,18 @@ impl PsdFile {
         let color_channels: usize = match h.color_mode {
             ColorMode::Rgb => 3,
             ColorMode::Grayscale => 1,
+            ColorMode::Cmyk => {
+                return Err(PsdError::Unsupported(
+                    "composite decode for color mode Cmyk to RGBA8 needs a colour \
+                     transform: read the ink with `composite_cmyk8` and convert it \
+                     through the file's profile (image-js does)"
+                        .into(),
+                ));
+            }
             other => {
                 return Err(PsdError::Unsupported(format!(
-                    "composite decode for color mode {other:?} (RGB/Grayscale only in \
-                     the M4 ingest slice; CMYK/Lab are the M2 cast/CMS lane)"
+                    "composite decode for color mode {other:?} (RGB/Grayscale, and CMYK \
+                     through `composite_cmyk8`; Lab and the indexed modes are not decoded)"
                 )));
             }
         };
@@ -202,18 +212,7 @@ impl PsdFile {
             // matted, every soft edge of a placed PSD came in lightened
             // toward white — up to ~200 levels at low alpha, measured
             // against Photoshop's own export).
-            let unmatte = |v: u8| -> u8 {
-                match a {
-                    255 => v,
-                    0 => 0,
-                    _ => {
-                        let al = f32::from(a) / 255.0;
-                        ((f32::from(v) - 255.0 * (1.0 - al)) / al)
-                            .round()
-                            .clamp(0.0, 255.0) as u8
-                    }
-                }
-            };
+            let unmatte = |v: u8| unmatte_white(v, a);
             let o = i * 4;
             rgba[o] = unmatte(r);
             rgba[o + 1] = unmatte(g);
@@ -226,6 +225,112 @@ impl PsdFile {
             rgba,
             depth_reduced,
         })
+    }
+}
+
+/// A decoded CMYK merged composite: the INK, not a colour. Turning ink
+/// into RGB needs the file's ICC profile and a CMS, which this crate
+/// deliberately does not have (it is plain data); `image-js` converts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeCmyk8 {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` bytes, row-major, interleaved C, M, Y, K as
+    /// INK AMOUNTS: 0 = no ink (paper), 255 = 100 % ink. The file stores
+    /// the inverse (see [`PsdFile::composite_cmyk8`]); this is already
+    /// flipped, so it is the convention an ICC CMYK device profile and
+    /// `image-js`'s ink cast expect.
+    pub cmyk: Vec<u8>,
+    /// Straight transparency, one byte per pixel, when the document has
+    /// it (the layer-count sign flag); `None` = opaque. The ink above is
+    /// already UN-MATTED, so it is straight colour like `alpha` is.
+    pub alpha: Option<Vec<u8>>,
+    /// The source was 16 bits per channel and was REDUCED to 8 here.
+    pub depth_reduced: bool,
+}
+
+impl PsdFile {
+    /// Decode a CMYK document's merged composite to straight 4-ink CMYK8.
+    ///
+    /// INK POLARITY. A CMYK PSD stores every ink plane INVERTED: 255 (or
+    /// 65535) is NO ink, 0 is 100 % ink. Measured, not assumed — the
+    /// `patches` fixture Photoshop recorded (`image-conformance/fixtures/
+    /// photoshop/cmyk-stacks`) fills known ink percentages, and its
+    /// paper-white patch stores 255 in all four planes while 100 % cyan
+    /// stores 0 in the cyan plane. This flips it back to ink amounts.
+    ///
+    /// CHANNELS. The header's channel count is 4 inks plus extras; the
+    /// first extra is transparency exactly when the layer-count sign flag
+    /// says so (the same rule as RGB). Any other extra channel — a saved
+    /// selection, a spot plate — is ignored: it has no composite meaning
+    /// in the merged image (the fixture carries one saved alpha channel
+    /// and an opaque merged image).
+    ///
+    /// MATTE. A transparent document's merged composite is matted against
+    /// the paper, i.e. against NO ink, which in the stored (inverted)
+    /// numbers is 255 — so the stored values obey the same
+    /// `v·α + 255·(1 − α)` the RGB composite does, and are un-matted the
+    /// same way before the flip.
+    ///
+    /// 16-bit is accepted, reduced to the high byte and reported, exactly
+    /// as for RGB.
+    pub fn composite_cmyk8(&self) -> Result<CompositeCmyk8> {
+        let h = &self.header;
+        if h.color_mode != ColorMode::Cmyk {
+            return Err(PsdError::Unsupported(format!(
+                "composite_cmyk8 on a {:?} document",
+                h.color_mode
+            )));
+        }
+        if h.depth != 8 && h.depth != 16 {
+            return Err(PsdError::Unsupported(format!(
+                "composite decode at depth {} (8- and 16-bit only; 1-bit and \
+                 32-bit float are separate lanes)",
+                h.depth
+            )));
+        }
+        if h.channels < 4 {
+            return Err(PsdError::Malformed {
+                section: "image data",
+                detail: format!("Cmyk needs 4 channel(s), header says {}", h.channels),
+            });
+        }
+        let planes = decode_planes(self)?;
+        let alpha = if self.layer_mask.transparency_in_merged {
+            planes.get(4).cloned()
+        } else {
+            None
+        };
+        let n = (h.width as usize) * (h.height as usize);
+        let mut cmyk = vec![0u8; n * 4];
+        for i in 0..n {
+            let a = alpha.as_ref().map_or(255, |p| p[i]);
+            for c in 0..4 {
+                cmyk[i * 4 + c] = 255 - unmatte_white(planes[c][i], a);
+            }
+        }
+        Ok(CompositeCmyk8 {
+            width: h.width,
+            height: h.height,
+            cmyk,
+            alpha,
+            depth_reduced: h.depth == 16,
+        })
+    }
+}
+
+/// Undo the merged composite's matte against white (`v·α + 255·(1 − α)`
+/// on the STORED value). Fully transparent pixels answer 0.
+fn unmatte_white(v: u8, a: u8) -> u8 {
+    match a {
+        255 => v,
+        0 => 0,
+        _ => {
+            let al = f32::from(a) / 255.0;
+            ((f32::from(v) - 255.0 * (1.0 - al)) / al)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        }
     }
 }
 

@@ -86,11 +86,11 @@ mod emit;
 mod parse;
 
 pub use abr::AbrFile;
-pub use composite::CompositeRgba8;
+pub use composite::{CompositeCmyk8, CompositeRgba8};
 pub use container::Container;
 pub use descriptor::{Descriptor, DescriptorValue, RefItem};
 pub use layer_pixels::{
-    GroupPlate, ImportBlocker, LayerImport, LayerPlate, MaskPlate, MAX_IMPORT_BYTES,
+    GroupPlate, ImportBlocker, InkToRgba8, LayerImport, LayerPlate, MaskPlate, MAX_IMPORT_BYTES,
 };
 pub use model::PsdFile;
 

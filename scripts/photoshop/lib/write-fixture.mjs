@@ -90,7 +90,10 @@ const fixture = {
     host_os: `macOS ${os}`,
   },
   stimulus_size: SIZE,
-  cases: reply.cases.map(({ id, params, output, profile, bits, files, values }) => ({
+  // Probe-level findings beyond the cases (e.g. the Color Settings'
+  // conversion options a colour probe reads), carried verbatim.
+  ...(reply.findings ? { findings: reply.findings } : {}),
+  cases: reply.cases.map(({ id, params, output, profile, bits, files, values, views }) => ({
     id,
     params,
     output,
@@ -98,6 +101,7 @@ const fixture = {
     bits,
     ...(files ? { files } : {}),
     ...(values ? { values } : {}),
+    ...(views ? { views } : {}),
   })),
 };
 fs.writeFileSync(path.join(outDir, `${name}.photoshop.json`), JSON.stringify(fixture, null, 2) + "\n");

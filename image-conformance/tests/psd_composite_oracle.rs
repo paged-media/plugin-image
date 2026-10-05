@@ -51,6 +51,17 @@
 //!    pixels over 2 levels; RGB over white, alpha raw) and ΔE00 (p95,
 //!    max).
 //!
+//! CMYK documents: the plates go through `layer_plates_rgba8_via` with
+//! the shipping ink transform (`image_js::ingest::psd_ink_transform`, the
+//! file's embedded profile), and `theirs` is Photoshop's merged CMYK
+//! composite converted by THAT SAME transform — so the comparison is
+//! ours-vs-Photoshop in one space and does not charge the CMM (measured
+//! separately against Photoshop's own conversion in
+//! `psd_cmyk_photoshop.rs`) to the layer decode. The shipping door's
+//! blend-space gate (`layers::cmyk_flatten_agrees`) is applied too, so a
+//! CMYK file is `compared` only when the door would import it, and the
+//! row records the gate's numbers (`cmyk_gate`) either way.
+//!
 //! Outcomes: `compared`, `refused` (the engine's own reason, reduced to
 //! a category) or `no-merged-data`. The aggregate ledger
 //! `fixtures/psd-corpus/composite-ledger.json` is keyed by SHA-256 and
@@ -110,6 +121,13 @@ struct Row {
     /// Smart objects checked against the composite: (count, worst % of a
     /// footprint off, worst mean levels).
     smart: Option<(usize, f64, f64)>,
+    /// A CMYK document's blend-space gate, when it was reached: (% of
+    /// pixels more than 8 levels off, mean, max).
+    cmyk_gate: Option<(f64, f64, u8)>,
+    /// What the flattened open (`ingest::decode_rgba8`, the merged
+    /// composite) does with the file: its colour treatment, or
+    /// `refused`.
+    opens: &'static str,
 }
 
 /// Reduce an engine refusal to a stable category, and drop anything
@@ -129,7 +147,13 @@ fn categorize(reason: &str) -> (String, String) {
             clean.push(ch);
         }
     }
-    let cat = if reason.contains("GROUP with a mask") {
+    let cat = if reason.contains("CMYK document with a") {
+        "cmyk-blend"
+    } else if reason.contains("CMYK document without real merged data") {
+        "cmyk-unverified"
+    } else if reason.contains("CMYK document whose layers") {
+        "cmyk-composite"
+    } else if reason.contains("GROUP with a mask") {
         "group-mask"
     } else if reason.contains("VECTOR MASK") || reason.contains("vector-derived") {
         "vector-mask"
@@ -187,19 +211,45 @@ fn evaluate(bytes: &[u8], ctx: &image_gpu::GpuContext) -> Result<Row, String> {
             b
         },
         smart: None,
+        cmyk_gate: None,
+        opens: match image_js::ingest::decode_rgba8(bytes) {
+            Ok(img) => {
+                use image_js::display::DisplayTreatment as D;
+                match img.display {
+                    D::Managed => "managed",
+                    D::AssumedSrgb => "assumed-srgb",
+                    D::ProfileRejected => "profile-rejected",
+                    D::CmykConverted => "cmyk-converted",
+                    D::CmykUncalibrated => "cmyk-uncalibrated",
+                }
+            }
+            Err(_) => "refused",
+        },
     };
     if merged != MergedData::Real {
         return Ok(row);
     }
     row.outcome = "refused";
-    let import = match psd.layer_plates_rgba8() {
+    // A CMYK document goes through the shipping conversion: its plates
+    // AND the merged composite through the SAME ink transform (the file's
+    // embedded profile), so `theirs` is Photoshop's CMYK composite in our
+    // RGB and the comparison is ours-vs-Photoshop in one space — the CMM
+    // is not on trial here, only the layer decode and the blend space.
+    let cmyk = psd.header.color_mode == image_psd::model::ColorMode::Cmyk;
+    let ink = image_js::ingest::psd_ink_transform(&psd);
+    let convert = |c: &[u8]| ink.to_rgba8(c);
+    let import = match if cmyk {
+        psd.layer_plates_rgba8_via(&convert)
+    } else {
+        psd.layer_plates_rgba8()
+    } {
         Ok(i) => i,
         Err(e) => {
             row.reason = Some(categorize(&e.to_string()));
             return Ok(row);
         }
     };
-    let theirs = match psd.composite_rgba8() {
+    let theirs = match merged_rgba8(&psd, &ink) {
         Ok(c) => c,
         Err(e) => {
             row.reason = Some(categorize(&format!("merged composite: {e}")));
@@ -222,7 +272,7 @@ fn evaluate(bytes: &[u8], ctx: &image_gpu::GpuContext) -> Result<Row, String> {
     };
     // The shipping gate: every smart object's stored render must agree
     // with the composite inside its own footprint.
-    let checked = image_js::layers::smart_render_agreement(&import, &ours, &theirs.rgba);
+    let checked = image_js::layers::smart_render_agreement(&import, &ours, &theirs);
     if !checked.is_empty() {
         for a in &checked {
             println!(
@@ -236,17 +286,51 @@ fn evaluate(bytes: &[u8], ctx: &image_gpu::GpuContext) -> Result<Row, String> {
             checked.iter().map(|a| a.mean).fold(0.0, f64::max),
         ));
     }
-    if let Err(e) = image_js::layers::smart_renders_agree(&import, &ours, &theirs.rgba) {
+    if let Err(e) = image_js::layers::smart_renders_agree(&import, &ours, &theirs) {
         row.reason = Some(categorize(&e.to_string()));
         return Ok(row);
+    }
+    // The CMYK gate the shipping door applies: the RGB blend of the
+    // converted plates must agree with the converted composite.
+    if cmyk {
+        let a = image_js::layers::cmyk_flatten_agreement(&ours, &theirs);
+        println!(
+            "    cmyk gate: {:.2}% off, mean {:.2}, max {}",
+            a.pct_off, a.mean, a.max
+        );
+        row.cmyk_gate = Some((a.pct_off, a.mean, a.max));
+        if let Err(e) = image_js::layers::cmyk_flatten_agrees(&ours, &theirs) {
+            row.reason = Some(categorize(&e.to_string()));
+            return Ok(row);
+        }
     }
     drop(import);
     // The decoder un-mattes a transparent document's merged composite,
     // so both sides are straight colour.
     let reference = Reference::Straight;
-    row.diff = Some(compare_rgba8(&ours, &theirs.rgba, reference));
+    row.diff = Some(compare_rgba8(&ours, &theirs, reference));
     row.outcome = "compared";
     Ok(row)
+}
+
+/// Photoshop's merged composite as straight RGBA8: decoded for RGB and
+/// Grayscale; for CMYK the ink through `ink` — the same transform the
+/// plates took.
+fn merged_rgba8(psd: &PsdFile, ink: &image_js::cmyk::InkTransform) -> Result<Vec<u8>, String> {
+    if psd.header.color_mode == image_psd::model::ColorMode::Cmyk {
+        let c = psd.composite_cmyk8().map_err(|e| e.to_string())?;
+        let mut rgba = ink.to_rgba8(&c.cmyk);
+        if let Some(a) = &c.alpha {
+            for (p, &al) in rgba.chunks_exact_mut(4).zip(a) {
+                p[3] = al;
+            }
+        }
+        Ok(rgba)
+    } else {
+        psd.composite_rgba8()
+            .map(|c| c.rgba)
+            .map_err(|e| e.to_string())
+    }
 }
 
 // ───────────────────────────── the ledger ─────────────────────────────
@@ -304,7 +388,9 @@ fn ledger_json(rows: &BTreeMap<String, Row>) -> String {
     let mut by_reason: BTreeMap<String, u64> = BTreeMap::new();
     let mut by_merged: BTreeMap<&str, u64> = BTreeMap::new();
     let mut by_blocker: BTreeMap<String, u64> = BTreeMap::new();
+    let mut by_opens: BTreeMap<&str, u64> = BTreeMap::new();
     for r in rows.values() {
+        *by_opens.entry(r.opens).or_default() += 1;
         for b in &r.blockers {
             *by_blocker.entry(b.to_string()).or_default() += 1;
         }
@@ -325,7 +411,7 @@ fn ledger_json(rows: &BTreeMap<String, Row>) -> String {
     };
     let mut s = String::new();
     s.push_str("{\n");
-    s.push_str("  \"about\": \"Merged-composite oracle over the private PSD corpus: Photoshop's own merged composite vs our layer-stack flatten. Keyed by SHA-256; aggregates and feature classification only. Generated by image-conformance/tests/psd_composite_oracle.rs.\",\n");
+    s.push_str("  \"about\": \"Merged-composite oracle over the private PSD corpus: Photoshop's own merged composite vs our layer-stack flatten (a CMYK document: both sides through the same conversion of its embedded profile, so the comparison is in one space). Keyed by SHA-256; aggregates and feature classification only. Generated by image-conformance/tests/psd_composite_oracle.rs.\",\n");
     let _ = writeln!(s, "  \"files\": {},", rows.len());
     let _ = writeln!(
         s,
@@ -349,6 +435,11 @@ fn ledger_json(rows: &BTreeMap<String, Row>) -> String {
         s,
         "  \"blockers\": {{{}}},",
         obj(by_blocker.into_iter().collect())
+    );
+    let _ = writeln!(
+        s,
+        "  \"opens\": {{{}}},",
+        obj(by_opens.iter().map(|(k, v)| (k.to_string(), *v)).collect())
     );
     s.push_str("  \"rows\": {\n");
     let n = rows.len();
@@ -380,10 +471,19 @@ fn ledger_json(rows: &BTreeMap<String, Row>) -> String {
             ),
             None => String::new(),
         };
+        let cmyk_gate = match r.cmyk_gate {
+            Some((pct, mean, max)) => format!(
+                ", \"cmyk_gate\": {{\"pct_off\": {}, \"mean\": {}, \"max\": {max}}}",
+                num(pct),
+                num(mean)
+            ),
+            None => String::new(),
+        };
         let _ = write!(
             s,
-            "    \"{sha}\": {{\"outcome\": \"{}\", \"merged_data\": \"{}\", \"width\": {}, \"height\": {}, \"features\": {}{blockers}{smart}{reason}{diff}}}",
+            "    \"{sha}\": {{\"outcome\": \"{}\", \"opens\": \"{}\", \"merged_data\": \"{}\", \"width\": {}, \"height\": {}, \"features\": {}{blockers}{smart}{cmyk_gate}{reason}{diff}}}",
             r.outcome,
+            r.opens,
             r.merged.as_str(),
             r.width,
             r.height,

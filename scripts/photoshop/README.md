@@ -10,6 +10,7 @@ bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/blend-modes.jsx
 bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/adjustments.jsx
 bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/filters.jsx
 bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/layer-stacks.jsx
+bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/cmyk-stacks.jsx
 # then re-measure and review the ledger diff:
 PAGED_PHOTOSHOP_LEDGER=write cargo test -p image-conformance --test oracle_photoshop
 ```
@@ -25,7 +26,9 @@ PAGED_PHOTOSHOP_LEDGER=write cargo test -p image-conformance --test oracle_photo
 Replays: `image-conformance/tests/oracle_photoshop.rs` (blend modes,
 adjustments, filters → `fixtures/photoshop/ledger.json`, every case
 classified `agreement` / `convention` / `defect` / `no-counterpart`) and
-`image-conformance/tests/psd_composite_photoshop.rs` (the layered PSDs).
+`image-conformance/tests/psd_composite_photoshop.rs` (the layered PSDs) and
+`image-conformance/tests/psd_cmyk_photoshop.rs` (the CMYK PSDs, each with
+Photoshop's own sRGB conversions under three intent/BPC settings).
 
 ## Traps, and what each step does about them
 
@@ -50,7 +53,14 @@ classified `agreement` / `convention` / `defect` / `no-counterpart`) and
   IEC61966-2.1). Each probe carries an `identity` case that the replay
   holds to agreement — the proof that no conversion happened. The user's
   Color Settings are read, never changed.
-- **Merged data.** `layer-stacks.jsx` sets "maximize compatibility" for
+- **CMYK.** `cmyk-stacks.jsx` names its profile (Coated FOGRA39) when it
+  creates each document, so the recording does not depend on the user's
+  Color Settings; it READS the Color Settings' conversion options (engine,
+  intent, black-point compensation) through the ActionManager and records
+  them as the fixture's `findings`. Every conversion runs on a duplicate
+  whose layers were merged first, with dither OFF (the default is on,
+  which would make the conversion non-deterministic).
+- **Merged data.** `layer-stacks.jsx` and `cmyk-stacks.jsx` set "maximize compatibility" for
   the run (restored afterwards) so every PSD carries Photoshop's real
   merged composite; the replay checks resource 0x0421 says so.
 - **Judge the artifact.** `osascript` exiting 0 says only that a string

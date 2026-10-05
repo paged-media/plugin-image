@@ -758,20 +758,54 @@ fn sniff(bytes: &[u8]) -> Option<Format> {
 
 fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, IngestError> {
     let file = PsdFile::parse(bytes).map_err(|e| IngestError::Decode(e.to_string()))?;
-    let composite = file.composite_rgba8().map_err(|e| match e {
+    let psd_err = |e: image_psd::PsdError| match e {
         image_psd::PsdError::Unsupported(s) => IngestError::Unsupported(s),
         other => IngestError::Decode(other.to_string()),
-    })?;
+    };
+    if file.header.color_mode == image_psd::model::ColorMode::Cmyk {
+        return decode_psd_cmyk(&file).map_err(psd_err);
+    }
+    let composite = file.composite_rgba8().map_err(psd_err)?;
     Ok(DecodedImage {
         width: composite.width,
         height: composite.height,
         rgba: composite.rgba.into(),
-        // PSD carries its profile in the image-resource block, which the
-        // merged-composite decode does not surface yet — stated as
-        // assumed rather than silently claimed as managed.
+        // An RGB PSD's own profile (resource 1039) is not applied yet —
+        // stated as assumed rather than silently claimed as managed. The
+        // CMYK branch above does read it.
         display: crate::display::DisplayTreatment::AssumedSrgb,
         depth_reduced: composite.depth_reduced,
     })
+}
+
+/// A CMYK PSD's merged composite, converted to straight RGBA8 through
+/// the file's embedded profile (resource 1039) — or the device formula
+/// when it has none, and the treatment says which. The SAME conversion
+/// ([`psd_ink_transform`]) converts the layer plates of a layered open.
+fn decode_psd_cmyk(file: &PsdFile) -> Result<DecodedImage, image_psd::PsdError> {
+    let composite = file.composite_cmyk8()?;
+    let ink = psd_ink_transform(file);
+    let mut rgba = ink.to_rgba8(&composite.cmyk);
+    if let Some(alpha) = &composite.alpha {
+        for (px, &a) in rgba.chunks_exact_mut(4).zip(alpha) {
+            px[3] = a;
+        }
+    }
+    Ok(DecodedImage {
+        width: composite.width,
+        height: composite.height,
+        rgba: rgba.into(),
+        display: ink.treatment(),
+        depth_reduced: composite.depth_reduced,
+    })
+}
+
+/// The CMYK→RGB conversion of a PSD: its embedded ICC profile through
+/// the print lane, else the device formula. One function, so the merged
+/// composite, the layer plates and the conformance oracle cannot drift
+/// apart.
+pub fn psd_ink_transform(file: &PsdFile) -> crate::cmyk::InkTransform {
+    crate::cmyk::InkTransform::for_profile(file.resources.icc_profile())
 }
 
 /// Full-frame decode through an `ImageSource` adapter, widened to RGBA8.
@@ -873,6 +907,7 @@ fn decode_source<S: ImageSource>(
     }
 
     let n = w as usize * h as usize;
+    let mut cmyk_managed = false;
     let rgba: Vec<u8> = match channels {
         ChannelLayout::Rgba => buf,
         ChannelLayout::Gray => {
@@ -894,7 +929,8 @@ fn decode_source<S: ImageSource>(
             // colour-managed via the embedded ICC when present, else the
             // uncalibrated device formula. `buf` is packed 4-byte true ink
             // (the JPEG adapter already applied the Adobe-APP14 re-inversion).
-            let (rgba, _managed) = crate::cmyk::cmyk8_to_rgba8(&buf, embedded_icc.as_deref())?;
+            let (rgba, managed) = crate::cmyk::cmyk8_to_rgba8(&buf, embedded_icc.as_deref())?;
+            cmyk_managed = managed;
             rgba
         }
         ChannelLayout::Cmyka => unreachable!("rejected above"),
@@ -911,7 +947,14 @@ fn decode_source<S: ImageSource>(
     // above (its cast consumed the same embedded profile), so only the
     // RGB-ish layouts are transformed here.
     let display = if matches!(channels, ChannelLayout::Cmyk) {
-        crate::display::DisplayTreatment::Managed
+        // Said as what it was: a CMYK conversion, through the profile or
+        // through the device formula (this used to read "ICC managed"
+        // for both).
+        if cmyk_managed {
+            crate::display::DisplayTreatment::CmykConverted
+        } else {
+            crate::display::DisplayTreatment::CmykUncalibrated
+        }
     } else {
         crate::display::to_working_srgb(&mut rgba, embedded_icc.as_deref())
     };
