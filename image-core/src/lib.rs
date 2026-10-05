@@ -61,7 +61,7 @@ pub use crop::{
     apply_drag, frame_corners, hit_handle, normalize_angle, rotate_point, AspectLock, CropRect,
     Handle,
 };
-pub use curve::{curve_lut, identity_lut};
+pub use curve::{curve_lut, curve_lut_natural, identity_lut};
 pub use format::{
     AlphaMode, ChannelLayout, ColorSpaceRef, IccHash, NamedSpace, PixelFormat, SampleDepth,
     Transfer, TransferCurve,

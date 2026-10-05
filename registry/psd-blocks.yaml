@@ -175,11 +175,31 @@
     - "Adobe Photoshop File Format specification — Channel Image Data (per-channel decode; ids 0/1/2 = R/G/B, -1 = transparency; a layer with no transparency channel is opaque inside its rect)"
     - "Adobe Photoshop File Format specification — Additional Layer Information: lsct section dividers (group markers refuse the import), luni (canonical name)"
     - "spec §10.4 — decode-on-demand read over the retained parse; no re-encode, no mutation"
-  # DECLINED, with a stated reason, rather than approximated: groups
-  # (lsct), clipping layers, layer masks (-2/-3), non-8-bit-RGB, and an
-  # over-budget canvas (MAX_IMPORT_BYTES — plates are canvas-extent).
+    - "Smart objects (SoLd/PlLd/SoLE) import as their STORED render, accepted only where the file's merged composite (0x0421 real) agrees inside each smart object's footprint (image-js smart_renders_agree: <= 1% of it more than 8 levels off). Photoshop's live render of three disputed corpus files equals the stored composite exactly, so the composite is a sound judge; a stale cache (corpus Letter Head: logo and text moved) declines [OBS]"
+    - "Photoshop-written fixtures: image-conformance/fixtures/photoshop/layer-stacks/ and adjustment-layers/ (scripts/photoshop/probes/*.jsx), replayed by psd_composite_photoshop.rs and psd_adjustment_layers.rs"
+  # Imported: pixel layers, groups (lsct, nested, pass-through), clipping,
+  # user masks (-2), fill opacity, smart objects as vouched-for stored
+  # renders, and the adjustment layers below. DECLINED, each with a stated
+  # reason (PsdFile::layer_import_blockers lists every one): vector masks
+  # (vmsk/vsms, -3), layer effects, other adjustment keys, artboards, group
+  # masks, mask density/feather, fill opacity on special modes and groups,
+  # non-RGB, and an over-budget canvas (MAX_IMPORT_BYTES — plates are
+  # canvas-extent).
   tests:
-    rust: ["image-conformance/tests/psd_layer_import.rs", "image-psd/src/layer_pixels.rs", "image-psd/tests/annual_fixture.rs"]
+    rust: ["image-conformance/tests/psd_layer_import.rs", "image-conformance/tests/psd_adjustment_layers.rs", "image-psd/src/layer_pixels.rs", "image-psd/tests/annual_fixture.rs"]
+
+- id: image.psd.addl.adjustment
+  state_row: image.psd.layer-import
+  tier: parsed           # READ (image-psd/src/adjustment.rs) into the layer stack's adjust chain; the block bytes stay preserved-opaque for re-emission
+  oracle: photoshop      # adjustment layers Photoshop 27.10 wrote, composited by our stack vs its merged composite (psd_adjustment_layers.rs EXPECT)
+  provenance:
+    - "Adobe Photoshop File Formats specification — Adjustment Layers: Levels (`levl`: version, 29 records of in-floor/in-ceiling/out-floor/out-ceiling/gamma×100, composite then channels, optional `Lvls` extension), Curves (`curv`), Exposure (`expA`: version, exposure, offset, gamma as f32), Invert (`nvrt`, empty), Hue/Saturation (`hue2`: version, colorize flag, colorize/master triples, six ranges of four bounds + a triple) [PUB]"
+    - "Curves layout checked on Photoshop-written blocks: a pad byte, a u16 version, a u32 map of the curves present (bit 0 composite, then the channels), points stored as (OUTPUT, INPUT); the `Crv ` extension repeats them keyed by channel index [OBS]"
+    - "Rendering, measured against Photoshop 27.10: Curves is a NATURAL cubic spline (image_core::curve_lut_natural, 0 levels apart) with channel curves before the composite one; Levels per channel then composite (other order 13 off), as tables within 1-3 levels; Exposure with offset/gamma = ((lin(x)·2^e + offset)^(1/gamma)) in 2.2-gamma light, within 1; an adjustment layer's OPACITY scales its coverage (60 % moves each pixel 60 % of the way) [OBS]"
+  # DECLINED: Levels records past R/G/B, Hue/Saturation ranges moved off
+  # their default bounds, a non-normal blend mode on an adjustment layer.
+  tests:
+    rust: ["image-psd/src/adjustment.rs (unit)", "image-conformance/tests/psd_adjustment_layers.rs"]
 
 # ── PSD descriptor-family primitives ─────────────────────────────────
 # Neither of these is a top-level PSD *block*; they are the two

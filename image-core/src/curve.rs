@@ -84,6 +84,77 @@ pub fn curve_lut(points: &[(f32, f32)]) -> [u8; 256] {
     lut
 }
 
+/// Build the 256-entry tone LUT the way PHOTOSHOP's Curves does: a
+/// NATURAL cubic spline through the control points (second derivative 0
+/// at both ends), flat beyond the first and last point, the result
+/// clamped to `[0, 1]`. Unlike [`curve_lut`] it can overshoot between
+/// steep points — Photoshop's does, and a PSD's Curves adjustment layer
+/// must render as Photoshop renders it. Measured 2026-10-05 against a
+/// Curves adjustment layer Photoshop 27.10 wrote (five points): 0 levels
+/// apart on every code, where the monotone spline is up to 4 apart.
+///
+/// Natural cubic spline: the standard tridiagonal system for the knot
+/// second derivatives (e.g. Burden & Faires, Numerical Analysis, §3.5);
+/// no reference reading. Degenerate input as [`curve_lut`].
+pub fn curve_lut_natural(points: &[(f32, f32)]) -> [u8; 256] {
+    let mut pts: Vec<(f64, f64)> = points
+        .iter()
+        .map(|&(i, o)| (f64::from(i.clamp(0.0, 1.0)), f64::from(o.clamp(0.0, 1.0))))
+        .collect();
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+    pts.dedup_by(|a, b| (a.0 - b.0).abs() < f64::from(f32::EPSILON));
+    if pts.is_empty() {
+        return identity_lut();
+    }
+    if pts.len() == 1 {
+        return [quantize(pts[0].1 as f32); 256];
+    }
+    let n = pts.len() - 1;
+    let h: Vec<f64> = (0..n).map(|i| pts[i + 1].0 - pts[i].0).collect();
+    // Solve for c (half the second derivative) with c[0] = c[n] = 0:
+    // h[i-1]·c[i-1] + 2(h[i-1]+h[i])·c[i] + h[i]·c[i+1] = 3(Δ[i] − Δ[i-1]).
+    let mut c = vec![0.0f64; n + 1];
+    if n > 1 {
+        let delta: Vec<f64> = (0..n).map(|i| (pts[i + 1].1 - pts[i].1) / h[i]).collect();
+        // Thomas algorithm over the interior knots 1..n-1.
+        let m = n - 1;
+        let mut diag = vec![0.0f64; m];
+        let mut rhs = vec![0.0f64; m];
+        for k in 0..m {
+            let i = k + 1;
+            diag[k] = 2.0 * (h[i - 1] + h[i]);
+            rhs[k] = 3.0 * (delta[i] - delta[i - 1]);
+            if k > 0 {
+                let w = h[i - 1] / diag[k - 1];
+                diag[k] -= w * h[i - 1];
+                rhs[k] -= w * rhs[k - 1];
+            }
+        }
+        for k in (0..m).rev() {
+            let i = k + 1;
+            let next = if k + 1 < m { h[i] * c[i + 1] } else { 0.0 };
+            c[i] = (rhs[k] - next) / diag[k];
+        }
+    }
+    let mut lut = [0u8; 256];
+    for (code, slot) in lut.iter_mut().enumerate() {
+        let x = code as f64 / 255.0;
+        let y = if x <= pts[0].0 {
+            pts[0].1
+        } else if x >= pts[n].0 {
+            pts[n].1
+        } else {
+            let i = (0..n).rfind(|&i| pts[i].0 <= x).unwrap_or(0);
+            let dx = x - pts[i].0;
+            let b = (pts[i + 1].1 - pts[i].1) / h[i] - h[i] * (2.0 * c[i] + c[i + 1]) / 3.0;
+            let d = (c[i + 1] - c[i]) / (3.0 * h[i]);
+            pts[i].1 + b * dx + c[i] * dx * dx + d * dx * dx * dx
+        };
+        *slot = quantize(y as f32);
+    }
+    lut
+}
+
 /// The identity ramp `lut[k] = k` (the `[(0,0),(1,1)]` curve).
 pub fn identity_lut() -> [u8; 256] {
     let mut lut = [0u8; 256];
@@ -178,6 +249,29 @@ fn eval_hermite(xs: &[f32], ys: &[f32], m: &[f32], t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The five-point S curve Photoshop 27.10 wrote into a Curves
+    /// adjustment layer, and the codes Photoshop's merged composite maps
+    /// them to (sampled every 16).
+    #[test]
+    fn image_core_curve_lut_natural_matches_photoshop() {
+        let pts = [
+            (0.0, 0.0),
+            (64.0, 40.0),
+            (128.0, 150.0),
+            (192.0, 220.0),
+            (255.0, 255.0),
+        ]
+        .map(|(i, o): (f32, f32)| (i / 255.0, o / 255.0));
+        let lut = curve_lut_natural(&pts);
+        let photoshop = [
+            0, 5, 12, 23, 40, 64, 92, 122, 150, 173, 192, 207, 220, 231, 240, 248,
+        ];
+        for (k, &want) in photoshop.iter().enumerate() {
+            assert_eq!(lut[k * 16], want, "code {}", k * 16);
+        }
+        assert_eq!(curve_lut_natural(&[(0.0, 0.0), (1.0, 1.0)]), identity_lut());
+    }
 
     // feat: image.editor.curves — control-points → tone LUT. Naming
     // carries the feature tag until the state feature_test macro ships.

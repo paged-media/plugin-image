@@ -102,6 +102,7 @@
 //! flags), Additional Layer Information (`lsct` section dividers, `luni`
 //! names, `vmsk`/`vsms` vector masks).
 
+use crate::adjustment::Adjustment;
 use crate::composite::MergedData;
 use crate::model::ColorMode;
 use crate::model::{LayerRecord, PsdFile, SectionKind};
@@ -113,7 +114,7 @@ use crate::{PsdError, Result};
 pub const MAX_IMPORT_BYTES: usize = 384 * 1024 * 1024;
 
 /// One pixel-bearing PSD layer, ready for the layer stack.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayerPlate {
     /// The canonical name (`luni` when present, else the legacy Pascal).
     pub name: String,
@@ -138,6 +139,9 @@ pub struct LayerPlate {
     pub group: Option<usize>,
     /// The layer's user mask, canvas-extent.
     pub mask: Option<MaskPlate>,
+    /// The layer is an ADJUSTMENT: no pixels of its own (`rgba` is
+    /// empty), the adjustment transforms what is below it.
+    pub adjustment: Option<Adjustment>,
     /// The plate is a SMART OBJECT's stored render (`SoLd`/`PlLd`/`SoLE`),
     /// not pixels of its own. The import is only sound once the consumer
     /// has checked these plates against the merged composite (module
@@ -178,7 +182,7 @@ pub struct GroupPlate {
 }
 
 /// The whole importable layer tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayerImport {
     pub width: u32,
     pub height: u32,
@@ -203,22 +207,19 @@ const UNMODELLED: &[(&[u8; 4], &str)] = &[
     (b"artb", "an artboard"),
     (b"artd", "an artboard"),
     (b"abdd", "an artboard"),
-    (b"levl", "a Levels adjustment layer"),
-    (b"curv", "a Curves adjustment layer"),
-    (b"hue2", "a Hue/Saturation adjustment layer"),
-    (b"hue ", "a Hue/Saturation adjustment layer"),
+    // `levl`, `curv`, `hue2`, `expA` and `nvrt` are READ
+    // (`crate::adjustment`); the legacy `hue ` is not.
+    (b"hue ", "a legacy Hue/Saturation adjustment layer"),
     (b"brit", "a Brightness/Contrast adjustment layer"),
     (b"blnc", "a Color Balance adjustment layer"),
     (b"mixr", "a Channel Mixer adjustment layer"),
     (b"phfl", "a Photo Filter adjustment layer"),
     (b"post", "a Posterize adjustment layer"),
     (b"thrs", "a Threshold adjustment layer"),
-    (b"nvrt", "an Invert adjustment layer"),
     (b"selc", "a Selective Color adjustment layer"),
     (b"vibA", "a Vibrance adjustment layer"),
     (b"blwh", "a Black & White adjustment layer"),
     (b"grdm", "a Gradient Map adjustment layer"),
-    (b"expA", "an Exposure adjustment layer"),
     (b"clrL", "a Color Lookup adjustment layer"),
 ];
 
@@ -259,12 +260,20 @@ fn addl_payload(a: &crate::model::AdditionalLayerInfo) -> &[u8] {
         .unwrap_or(&[])
 }
 
+/// The record's adjustment, when it is an adjustment layer this module
+/// reads.
+fn adjustment_of(layer: &LayerRecord) -> Result<Option<Adjustment>> {
+    for a in &layer.addl {
+        if Adjustment::KEYS.contains(&&a.key) {
+            return Adjustment::parse(&a.key, addl_payload(a));
+        }
+    }
+    Ok(None)
+}
+
 /// Is the record a smart object (its pixels a stored render)?
 fn is_smart(layer: &LayerRecord) -> bool {
-    layer
-        .addl
-        .iter()
-        .any(|a| SMART_KEYS.contains(&&a.key))
+    layer.addl.iter().any(|a| SMART_KEYS.contains(&&a.key))
 }
 
 /// The record's fill opacity (`iOpa`), 255 when absent.
@@ -321,6 +330,7 @@ impl PsdFile {
 
         let mut layers = Vec::with_capacity(pixel_layers.len());
         for (layer, group) in pixel_layers {
+            let adjustment = adjustment_of(layer)?;
             // Fill opacity folds into opacity (see the refusals above).
             let opacity =
                 ((u32::from(layer.opacity) * u32::from(fill_opacity(layer)) + 127) / 255) as u8;
@@ -330,10 +340,17 @@ impl PsdFile {
                 opacity,
                 hidden: (layer.flags & 0x02) != 0,
                 clipped: layer.clipping != 0,
-                rgba: self.layer_canvas_rgba8(layer, cw, ch)?,
+                // An adjustment has no pixels of its own (its channels
+                // hold an empty rect or a mask).
+                rgba: if adjustment.is_some() {
+                    Vec::new()
+                } else {
+                    self.layer_canvas_rgba8(layer, cw, ch)?
+                },
                 group,
                 mask: self.layer_mask_plate(layer, cw, ch)?,
                 smart: is_smart(layer),
+                adjustment,
             });
         }
         Ok(LayerImport {
@@ -425,6 +442,44 @@ impl PsdFile {
                         layer.name()
                     ),
                 );
+            }
+            match adjustment_of(layer) {
+                Ok(Some(adj)) => {
+                    // The stack runs an adjustment as `mix(backdrop,
+                    // adjusted, coverage × opacity)` — Photoshop's NORMAL
+                    // mode. Another mode blends the adjusted result back.
+                    if &layer.blend_key != b"norm" {
+                        block(
+                            "adjustment-layers",
+                            format!(
+                                "layer import of an adjustment layer in blend mode {:?} \
+                                 (\"{}\"): only normal is modelled, so the merged composite \
+                                 is kept instead",
+                                String::from_utf8_lossy(&layer.blend_key),
+                                layer.name()
+                            ),
+                        );
+                    }
+                    if let Some(what) = adj.unmodelled() {
+                        block(
+                            "adjustment-layers",
+                            format!(
+                                "layer import of an adjustment layer with {what} (\"{}\"): not \
+                                 modelled, so the merged composite is kept instead",
+                                layer.name()
+                            ),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => block(
+                    "adjustment-layers",
+                    format!(
+                        "layer import of an adjustment layer that could not be read (\"{}\"): \
+                         {e}, so the merged composite is kept instead",
+                        layer.name()
+                    ),
+                ),
             }
             let fill = fill_opacity(layer);
             if fill < 255 && SPECIAL_FILL_MODES.contains(&&layer.blend_key) {

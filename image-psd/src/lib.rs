@@ -69,6 +69,7 @@
 #![forbid(unsafe_code)]
 
 pub mod abr;
+pub mod adjustment;
 pub mod composite;
 pub mod compression;
 pub mod container;

@@ -732,7 +732,8 @@ impl LayerStack {
             .collect();
         let mut layers = Vec::with_capacity(import.layers.len());
         for (i, plate) in import.layers.iter().enumerate() {
-            if plate.rgba.len() != want {
+            let adjustment = plate.adjustment.as_ref().map(psd_adjust_params);
+            if adjustment.is_none() && plate.rgba.len() != want {
                 return Err(IngestError::Decode(format!(
                     "PSD layer \"{}\" is {} bytes for {width}×{height} (expected {want})",
                     plate.name,
@@ -750,12 +751,17 @@ impl LayerStack {
                 locked: false,
                 opacity: plate.opacity as f32 / 255.0,
                 blend: psd_blend_kernel(&plate.blend_key),
-                rgba: crate::pixels::Pixels::from_rgba8(Arc::from(
-                    plate.rgba.clone().into_boxed_slice(),
-                )),
+                rgba: crate::pixels::Pixels::from_rgba8(if adjustment.is_some() {
+                    Arc::from(vec![0u8; want].into_boxed_slice())
+                } else {
+                    Arc::from(plate.rgba.clone().into_boxed_slice())
+                }),
                 // A smart object's stored render arrives as pixels: the
                 // source is not rendered here (`smart_renders_agree`).
-                kind: LayerKind::Pixels,
+                kind: match adjustment {
+                    Some(params) => LayerKind::Adjustment(Box::new(params)),
+                    None => LayerKind::Pixels,
+                },
                 mask: plate.mask.as_ref().map(|m| {
                     Arc::new(
                         SelectionCoverage::from_data(width, height, m.coverage.clone())
@@ -2184,7 +2190,12 @@ impl LayerStack {
                     h,
                     &straight,
                     params,
-                    effective_coverage(layer.live_mask(), clip, w, h),
+                    with_opacity(
+                        effective_coverage(layer.live_mask(), clip, w, h),
+                        layer.opacity,
+                        w,
+                        h,
+                    ),
                 )
                 .await?;
                 acc = premultiply(ctx, &adjusted, w, h).await?;
@@ -2512,6 +2523,145 @@ async fn unpremultiply(
         h,
     )
     .await
+}
+
+/// An adjustment layer's coverage with its OPACITY folded in: the chain
+/// mixes `mix(backdrop, adjusted, coverage)`, so opacity is a uniform
+/// scale of the coverage (an unmasked layer's coverage being 1). That is
+/// Photoshop's rule — an adjustment at 60 % moves each pixel 60 % of the
+/// way, and the backdrop's alpha is untouched. The fold used to ignore an
+/// adjustment layer's opacity: a Curves layer at 60 % came out at full
+/// strength, 13 levels from Photoshop's composite.
+pub(crate) fn with_opacity(
+    cov: Option<Arc<SelectionCoverage>>,
+    opacity: f32,
+    w: u32,
+    h: u32,
+) -> Option<Arc<SelectionCoverage>> {
+    if opacity >= 1.0 {
+        return cov;
+    }
+    let o = opacity.clamp(0.0, 1.0);
+    let scale = |v: u8| (f32::from(v) * o).round() as u8;
+    let data = match &cov {
+        Some(c) => c.data().iter().map(|&v| scale(v)).collect(),
+        None => vec![scale(255); (w as usize) * (h as usize)],
+    };
+    SelectionCoverage::from_data(w, h, data).map(Arc::new)
+}
+
+/// One Levels record as a 256-entry table: the input range normalised,
+/// raised to 1/gamma, mapped onto the output range.
+fn levels_lut(r: &image_psd::adjustment::LevelsRecord) -> [u8; 256] {
+    let (ib, iw) = (f64::from(r.in_black), f64::from(r.in_white));
+    let (ob, ow) = (f64::from(r.out_black), f64::from(r.out_white));
+    let g = (f64::from(r.gamma_x100) / 100.0).max(0.01);
+    let mut lut = [0u8; 256];
+    for (x, slot) in lut.iter_mut().enumerate() {
+        let t = ((x as f64 - ib) / (iw - ib).max(1.0)).clamp(0.0, 1.0);
+        *slot = (ob + t.powf(1.0 / g) * (ow - ob)).round().clamp(0.0, 255.0) as u8;
+    }
+    lut
+}
+
+/// Photoshop's Exposure as a table: the code decoded to light with a 2.2
+/// power, scaled by 2^exposure, offset, raised to 1/gamma, re-encoded.
+/// Measured on a Photoshop-written layer (exposure 0.4, offset −0.03,
+/// gamma 1.2): within 1 level.
+fn exposure_lut(exposure: f32, offset: f32, gamma: f32) -> [u8; 256] {
+    let (e, o, g) = (
+        f64::from(exposure),
+        f64::from(offset),
+        f64::from(gamma).max(0.01),
+    );
+    let mut lut = [0u8; 256];
+    for (x, slot) in lut.iter_mut().enumerate() {
+        let light = (x as f64 / 255.0).powf(2.2) * e.exp2() + o;
+        let v = light.max(0.0).powf(1.0 / g).min(1.0).powf(1.0 / 2.2);
+        *slot = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    lut
+}
+
+/// A PSD adjustment layer as the adjust chain's parameters. Only what
+/// `image_psd::adjustment::Adjustment::unmodelled` lets through reaches
+/// here, so every field it reads has a counterpart.
+pub fn psd_adjust_params(adj: &image_psd::adjustment::Adjustment) -> AdjustParams {
+    use image_psd::adjustment::Adjustment;
+    let mut p = AdjustParams::default();
+    let lut = |pts: &[(u8, u8)]| {
+        let pts: Vec<(f32, f32)> = pts
+            .iter()
+            .map(|&(i, o)| (f32::from(i) / 255.0, f32::from(o) / 255.0))
+            .collect();
+        // Photoshop's Curves is a natural cubic spline (`curve_lut_natural`).
+        image_core::curve_lut_natural(&pts)
+    };
+    match adj {
+        Adjustment::Curves { curves } => {
+            p.curve_lut = curves[0].as_deref().map(lut);
+            if curves[1..].iter().any(Option::is_some) {
+                let id = lut(&[(0, 0), (255, 255)]);
+                p.curve_rgb = Some(Box::new(
+                    [1, 2, 3].map(|c| curves[c].as_deref().map_or(id, lut)),
+                ));
+            }
+        }
+        // Levels as TABLES, the way Photoshop applies them: each channel's
+        // record first, then the composite's — so a per-channel OUTPUT
+        // range, which the levels stages have no field for, is exact too.
+        // Measured on Photoshop-written layers: within 2 levels (channel
+        // then composite; the other order is 13 off).
+        Adjustment::Levels { records, .. } => {
+            p.curve_lut = Some(levels_lut(&records[0]));
+            if records[1..].iter().any(|r| !r.is_identity()) {
+                p.curve_rgb = Some(Box::new([1, 2, 3].map(|c| levels_lut(&records[c]))));
+            }
+        }
+        // Plain exposure is the exposure stage (it agrees with Photoshop
+        // within 2 levels); an offset or gamma becomes a table.
+        Adjustment::Exposure {
+            exposure,
+            offset,
+            gamma,
+        } => {
+            if *offset == 0.0 && *gamma == 1.0 {
+                p.exposure_ev = *exposure;
+            } else {
+                p.curve_lut = Some(exposure_lut(*exposure, *offset, *gamma));
+            }
+        }
+        Adjustment::Invert => p.invert = true,
+        Adjustment::HueSaturation {
+            colorized,
+            colorize,
+            master,
+            ranges,
+            ..
+        } => {
+            let hsl = |t: &[i16; 3]| {
+                [
+                    f32::from(t[0]),
+                    f32::from(t[1]) / 100.0,
+                    f32::from(t[2]) / 100.0,
+                    0.0,
+                ]
+            };
+            p.hue_sat.master = hsl(master);
+            for (k, r) in ranges.iter().enumerate() {
+                p.hue_sat.ranges[k] = hsl(r);
+            }
+            if *colorized {
+                p.hue_sat.colorize = [
+                    1.0,
+                    f32::from(colorize[0]).rem_euclid(360.0),
+                    f32::from(colorize[1]) / 100.0,
+                    f32::from(colorize[2]) / 100.0,
+                ];
+            }
+        }
+    }
+    p
 }
 
 /// Levels (over white) beyond which a pixel of a smart object's
@@ -3302,6 +3452,7 @@ mod tests {
             group: None,
             mask: None,
             smart: false,
+            adjustment: None,
             name: name.to_string(),
             blend_key: *key,
             opacity,
@@ -3340,6 +3491,7 @@ mod tests {
                 group: None,
                 mask: None,
                 smart: false,
+                adjustment: None,
                 name: "short".into(),
                 blend_key: *b"norm",
                 opacity: 255,

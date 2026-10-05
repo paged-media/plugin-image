@@ -145,9 +145,11 @@ pub(super) enum Step {
         opacity: f32,
         cov: CovKey,
     },
-    /// Run the adjust chain over the accumulator.
+    /// Run the adjust chain over the accumulator, through the layer's
+    /// coverage scaled by its opacity.
     Adjust {
         params: Box<AdjustParams>,
+        opacity: f32,
         cov: CovKey,
     },
     /// Park the accumulator and start an isolated group's own.
@@ -202,12 +204,17 @@ impl Step {
                     && cov.same(c2)
             }
             (
-                Step::Adjust { params, cov },
+                Step::Adjust {
+                    params,
+                    opacity,
+                    cov,
+                },
                 Step::Adjust {
                     params: p2,
+                    opacity: o2,
                     cov: c2,
                 },
-            ) => params == p2 && cov.same(c2),
+            ) => params == p2 && opacity.to_bits() == o2.to_bits() && cov.same(c2),
             (Step::Open { group }, Step::Open { group: g2 }) => group == g2,
             (
                 Step::ClipOpen { layer, px, cov },
@@ -486,6 +493,7 @@ impl LayerStack {
             if let Some(params) = layer.adjust_params() {
                 steps.push(Step::Adjust {
                     params: Box::new(params.clone()),
+                    opacity: layer.opacity,
                     cov,
                 });
                 continue;
@@ -609,7 +617,11 @@ impl LayerStack {
                         .map_err(gpu_err)?;
                     st.acc = Some(out);
                 }
-                Step::Adjust { params, cov } => {
+                Step::Adjust {
+                    params,
+                    opacity,
+                    cov,
+                } => {
                     // The adjust chain runs through the pipeline on CPU
                     // bytes, so the accumulator comes back here — exactly
                     // as it did before, and only for this step.
@@ -621,9 +633,15 @@ impl LayerStack {
                         None => vec![0u8; (w as usize) * (h as usize) * 8],
                     };
                     let straight = super::unpremultiply(ctx, &acc, w, h).await?;
-                    let adjusted =
-                        crate::ingest::adjust_f16(ctx, w, h, &straight, params, cov.coverage(w, h))
-                            .await?;
+                    let adjusted = crate::ingest::adjust_f16(
+                        ctx,
+                        w,
+                        h,
+                        &straight,
+                        params,
+                        super::with_opacity(cov.coverage(w, h), *opacity, w, h),
+                    )
+                    .await?;
                     let premul = super::premultiply(ctx, &adjusted, w, h).await?;
                     st.acc = Some(batch.upload(w, h, TexFormat::Rgba16Float, &premul));
                 }
