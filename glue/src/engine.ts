@@ -1270,11 +1270,11 @@ export interface ImageEngine {
   /** Open the stack from a retained PSD parse — the file's own layer
    *  tree instead of its flattened composite. Resolves to the layer
    *  count; REJECTS with the engine's stated reason for every PSD the
-   *  layer model does not reproduce (vector masks, effects, adjustment
-   *  layers, CMYK, over budget, a smart object whose stored render the
-   *  file's own composite does not vouch for), and the caller then keeps
-   *  the flatten. Async: a file with smart objects is composited once to
-   *  check them. */
+   *  layer model does not reproduce (group masks, mask feather/density,
+   *  effects, adjustment layers, CMYK, over budget, a smart object whose
+   *  stored render the file's own composite does not vouch for), and
+   *  the caller then keeps the flatten. Async: a file with smart objects
+   *  is composited once to check them. */
   layersOpenFromPsd(imageHandle: number, psdHandle: number): Promise<number>;
   layersClose(): void;
   /** The bound handle, or -1. */

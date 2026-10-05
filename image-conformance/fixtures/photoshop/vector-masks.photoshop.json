@@ -1,0 +1,318 @@
+{
+  "fixture": "vector-masks",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/vector-masks.jsx",
+    "script_sha256": "15fc1c7f0f1b289e845f8b6cf355957feb0f793aea618b93906b073b73f13ffa",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-05T10:25:44.988Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "rect-fractional",
+      "params": {
+        "what": "rectangle with edges at .25/.5/.75/.3"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/rect-fractional.psd",
+        "vector-masks/rect-fractional.png"
+      ]
+    },
+    {
+      "id": "edge-ramp",
+      "params": {
+        "what": "16 rectangles, edges at every 1/16 px"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/edge-ramp.psd",
+        "vector-masks/edge-ramp.png"
+      ]
+    },
+    {
+      "id": "triangle",
+      "params": {
+        "what": "diagonal edges"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/triangle.psd",
+        "vector-masks/triangle.png"
+      ]
+    },
+    {
+      "id": "star-even-odd",
+      "params": {
+        "what": "self-intersecting star, fill rule 1"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/star-even-odd.psd",
+        "vector-masks/star-even-odd.png"
+      ]
+    },
+    {
+      "id": "circle",
+      "params": {
+        "what": "four smooth Bezier knots"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/circle.psd",
+        "vector-masks/circle.png"
+      ]
+    },
+    {
+      "id": "open-curve",
+      "params": {
+        "what": "OPEN curved subpath: fills as if a straight line closed it"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/open-curve.psd",
+        "vector-masks/open-curve.png"
+      ]
+    },
+    {
+      "id": "subtract",
+      "params": {
+        "what": "combine, then subtract"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/subtract.psd",
+        "vector-masks/subtract.png"
+      ]
+    },
+    {
+      "id": "intersect",
+      "params": {
+        "what": "combine, then intersect"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/intersect.psd",
+        "vector-masks/intersect.png"
+      ]
+    },
+    {
+      "id": "exclude",
+      "params": {
+        "what": "combine, then exclude"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/exclude.psd",
+        "vector-masks/exclude.png"
+      ]
+    },
+    {
+      "id": "first-subtract",
+      "params": {
+        "what": "a first component that subtracts starts from a full mask"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/first-subtract.psd",
+        "vector-masks/first-subtract.png"
+      ]
+    },
+    {
+      "id": "add-subtract-add",
+      "params": {
+        "what": "three components in order"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/add-subtract-add.psd",
+        "vector-masks/add-subtract-add.png"
+      ]
+    },
+    {
+      "id": "per-sample-intersect",
+      "params": {
+        "what": "intersect of edges at 10.25 and 10.75: the samples between them"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/per-sample-intersect.psd",
+        "vector-masks/per-sample-intersect.png"
+      ]
+    },
+    {
+      "id": "per-sample-seam",
+      "params": {
+        "what": "two triangles sharing an anti-aliased diagonal: no seam"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/per-sample-seam.psd",
+        "vector-masks/per-sample-seam.png"
+      ]
+    },
+    {
+      "id": "user-and-vector",
+      "params": {
+        "what": "feathered user mask x diagonal vector mask"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/user-and-vector.psd",
+        "vector-masks/user-and-vector.png"
+      ]
+    },
+    {
+      "id": "user-disabled",
+      "params": {
+        "what": "user mask disabled, vector mask applied"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/user-disabled.psd",
+        "vector-masks/user-disabled.png"
+      ]
+    },
+    {
+      "id": "vector-disabled-with-user",
+      "params": {
+        "what": "vector mask disabled, user mask applied"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/vector-disabled-with-user.psd",
+        "vector-masks/vector-disabled-with-user.png"
+      ]
+    },
+    {
+      "id": "vector-disabled",
+      "params": {
+        "what": "a disabled vector mask alone: kept, not applied"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/vector-disabled.psd",
+        "vector-masks/vector-disabled.png"
+      ]
+    },
+    {
+      "id": "partial-layer",
+      "params": {
+        "what": "a layer smaller than the canvas, mask reaching past it"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/partial-layer.psd",
+        "vector-masks/partial-layer.png"
+      ]
+    },
+    {
+      "id": "star-non-zero",
+      "params": {
+        "what": "the star with its component's fill rule patched to 2 (non-zero)"
+      },
+      "profile": "none",
+      "bits": 8,
+      "files": [
+        "vector-masks/star-non-zero.psd",
+        "vector-masks/star-non-zero.png"
+      ]
+    },
+    {
+      "id": "component-hole",
+      "params": {
+        "what": "inner rectangle patched to CONTINUE the outer one's component (0xFFFF): an even-odd hole"
+      },
+      "profile": "none",
+      "bits": 8,
+      "files": [
+        "vector-masks/component-hole.psd",
+        "vector-masks/component-hole.png"
+      ]
+    },
+    {
+      "id": "inverted",
+      "params": {
+        "what": "vector mask flags patched to 1 (invert)"
+      },
+      "profile": "none",
+      "bits": 8,
+      "files": [
+        "vector-masks/inverted.psd",
+        "vector-masks/inverted.png"
+      ]
+    },
+    {
+      "id": "shape-fill",
+      "params": {
+        "what": "a solid-colour fill layer with a vector mask (shape layer)"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/shape-fill.psd",
+        "vector-masks/shape-fill.png"
+      ]
+    },
+    {
+      "id": "shape-ellipse",
+      "params": {
+        "what": "a live ellipse shape layer"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/shape-ellipse.psd",
+        "vector-masks/shape-ellipse.png"
+      ]
+    },
+    {
+      "id": "vector-feather",
+      "params": {
+        "what": "a vector mask with a 3 px feather (REFUSED: mask-parameters)"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/vector-feather.psd",
+        "vector-masks/vector-feather.png"
+      ]
+    },
+    {
+      "id": "group-vector-mask",
+      "params": {
+        "what": "a group with a vector mask (REFUSED: group-mask)"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "vector-masks/group-vector-mask.psd",
+        "vector-masks/group-vector-mask.png"
+      ]
+    }
+  ]
+}

@@ -801,6 +801,9 @@ impl LayerStack {
                 }
             }
             let adjustment = plate.adjustment.as_ref().map(psd_adjust_params);
+            // The user and vector masks fold into the layer's one mask
+            // (`psd_vector_mask::plate_mask`).
+            let mask = crate::psd_vector_mask::plate_mask(plate, width, height);
             if adjustment.is_none() && plate.rgba.len() != want {
                 return Err(IngestError::Decode(format!(
                     "PSD layer \"{}\" is {} bytes for {width}×{height} (expected {want})",
@@ -832,13 +835,13 @@ impl LayerStack {
                     Some(params) => LayerKind::Adjustment(Box::new(params)),
                     None => LayerKind::Pixels,
                 },
-                mask: plate.mask.as_ref().map(|m| {
+                mask_enabled: mask.as_ref().is_none_or(|m| m.enabled),
+                mask: mask.map(|m| {
                     Arc::new(
-                        SelectionCoverage::from_data(width, height, m.coverage.clone())
+                        SelectionCoverage::from_data(width, height, m.coverage)
                             .expect("a canvas-extent mask"),
                     )
                 }),
-                mask_enabled: plate.mask.as_ref().is_none_or(|m| m.enabled),
                 group: plate.group.map(group_id),
                 clipped: plate.clipped,
             });
@@ -2906,6 +2909,7 @@ pub fn smart_render_agreement(
     };
     let mut out = Vec::new();
     for plate in import.layers.iter().filter(|p| p.smart) {
+        let mask = crate::psd_vector_mask::plate_mask(plate, import.width, import.height);
         let mut footprint = 0usize;
         let mut off = 0usize;
         let mut sum = 0u64;
@@ -2913,7 +2917,7 @@ pub fn smart_render_agreement(
             if px[3] == 0 {
                 continue;
             }
-            if let Some(m) = plate.mask.as_ref().filter(|m| m.enabled) {
+            if let Some(m) = mask.as_ref().filter(|m| m.enabled) {
                 if m.coverage[i] == 0 {
                     continue;
                 }
@@ -3728,6 +3732,7 @@ mod tests {
             clipped: false,
             group: None,
             mask: None,
+            vector_mask: None,
             smart: false,
             adjustment: None,
             color_overlay: None,
@@ -3770,6 +3775,7 @@ mod tests {
                 clipped: false,
                 group: None,
                 mask: None,
+                vector_mask: None,
                 smart: false,
                 adjustment: None,
                 color_overlay: None,

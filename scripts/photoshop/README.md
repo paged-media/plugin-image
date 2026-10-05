@@ -11,6 +11,7 @@ bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/adjustments.jsx
 bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/filters.jsx
 bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/layer-stacks.jsx
 bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/cmyk-stacks.jsx
+bash scripts/photoshop/run-probe.sh scripts/photoshop/probes/vector-masks.jsx
 # then re-measure and review the ledger diff:
 PAGED_PHOTOSHOP_LEDGER=write cargo test -p image-conformance --test oracle_photoshop
 ```
@@ -29,6 +30,9 @@ classified `agreement` / `convention` / `defect` / `no-counterpart`) and
 `image-conformance/tests/psd_composite_photoshop.rs` (the layered PSDs) and
 `image-conformance/tests/psd_cmyk_photoshop.rs` (the CMYK PSDs, each with
 Photoshop's own sRGB conversions under three intent/BPC settings).
+`image-conformance/tests/psd_vector_masks_photoshop.rs` (vector masks: the
+merged composite, and the render Photoshop caches in each masked layer's
+channel −2).
 
 ## Traps, and what each step does about them
 
@@ -67,5 +71,11 @@ Photoshop's own sRGB conversions under three intent/BPC settings).
   came back. `write-fixture.mjs` refuses a reply with any case error, a
   document left open, a missing output, or an output that is not a
   16-bit PNG of the stimulus size.
+- **What the DOM cannot say.** The scripting DOM sets no fill rule, no
+  multi-subpath component and no invert flag on a vector mask.
+  `vector-masks.jsx` writes such a case with the DOM, patches the one
+  field in the saved bytes (BINARY file I/O), has Photoshop OPEN the
+  patched file and SAVE it again — so the recorded PSD and its composite
+  are still Photoshop's own.
 - **ExtendScript** is ES3 and the text crosses an Apple event: plain
   ASCII only (the runner checks), no `JSON`, no `let`.
