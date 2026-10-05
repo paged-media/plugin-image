@@ -52,8 +52,7 @@
 //!
 //! * **not RGB at 8 or 16 bits** — 1/32-bit and CMYK/Lab are separate
 //!   lanes;
-//! * **a group with a mask of its own**, a **vector mask**, a mask with
-//!   **density/feather parameters**, or a layer with both a user and a
+//! * a **vector mask**, a mask with **density/feather parameters**, or a layer with both a user and a
 //!   "real" mask (channel −3) — none of these is modelled;
 //! * **layer effects** that are drawn (`lfx2`; a block whose effects are
 //!   all off draws nothing and imports) other than a Color Overlay,
@@ -73,8 +72,9 @@
 //! CLIPPING (the record's clipping byte); GROUPS — the bounding divider
 //! below a group's members and the folder record above them, with the
 //! folder's name, blend (`pass` = pass-through), opacity and visibility,
-//! nested; LAYER MASKS (channel −2: the mask rectangle, the default
-//! colour outside it, the disabled and invert flags); and SMART OBJECTS
+//! nested, with a GROUP's own mask; LAYER MASKS (channel −2: the mask
+//! rectangle, the default colour outside it, the disabled and invert
+//! flags); and SMART OBJECTS
 //! as their stored render ([`LayerPlate::smart`]).
 //!
 //! # Smart objects: the stored render, vouched for by the composite
@@ -185,6 +185,8 @@ pub struct GroupPlate {
     pub hidden: bool,
     /// The enclosing group (index into [`LayerImport::groups`]).
     pub parent: Option<usize>,
+    /// The folder's user mask, canvas-extent.
+    pub mask: Option<MaskPlate>,
 }
 
 /// The whole importable layer tree.
@@ -250,6 +252,7 @@ fn unmodelled_category(what: &str) -> &'static str {
 struct Walk<'a> {
     pixel_layers: Vec<(&'a LayerRecord, Option<usize>)>,
     groups: Vec<GroupPlate>,
+    group_records: Vec<Option<&'a LayerRecord>>,
     masked: usize,
     blockers: Vec<ImportBlocker>,
 }
@@ -337,7 +340,8 @@ impl PsdFile {
         let h = &self.header;
         let Walk {
             pixel_layers,
-            groups,
+            mut groups,
+            group_records,
             masked,
             blockers,
         } = self.import_walk()?;
@@ -408,6 +412,11 @@ impl PsdFile {
                 color_overlay,
             });
         }
+        for (g, record) in group_records.iter().enumerate() {
+            if let Some(record) = record {
+                groups[g].mask = self.layer_mask_plate(record, cw, ch)?;
+            }
+        }
         Ok(LayerImport {
             width: cw,
             height: ch,
@@ -466,6 +475,8 @@ impl PsdFile {
         }
         let mut pixel_layers = Vec::new();
         let mut groups: Vec<GroupPlate> = Vec::new();
+        // Each group's folder record, when it carries a mask to decode.
+        let mut group_records: Vec<Option<&LayerRecord>> = Vec::new();
         let mut open: Vec<usize> = Vec::new();
         let mut masked = 0usize;
         let mut smart = false;
@@ -620,7 +631,9 @@ impl PsdFile {
                         opacity: 255,
                         hidden: false,
                         parent: open.last().copied(),
+                        mask: None,
                     });
+                    group_records.push(None);
                     open.push(groups.len() - 1);
                     continue;
                 }
@@ -644,15 +657,19 @@ impl PsdFile {
                             ),
                         );
                     }
-                    if has_mask {
+                    if has_mask && layer.mask.as_ref().is_some_and(|m| m.flags & 0x10 != 0) {
                         block(
-                            "group-mask",
+                            "mask-parameters",
                             format!(
-                                "layer import of a GROUP with a mask (\"{}\"): group masks \
-                                 are not modelled, so the merged composite is kept instead",
+                                "layer import of a group mask with density/feather parameters \
+                                 (\"{}\"): not modelled, so the merged composite is kept instead",
                                 layer.name()
                             ),
                         );
+                    }
+                    if has_mask {
+                        masked += 1;
+                        group_records[g] = Some(layer);
                     }
                     let lsct_blend = layer
                         .addl
@@ -665,6 +682,7 @@ impl PsdFile {
                         opacity: layer.opacity,
                         hidden: (layer.flags & 0x02) != 0,
                         parent: groups[g].parent,
+                        mask: None,
                     };
                     continue;
                 }
@@ -728,6 +746,7 @@ impl PsdFile {
         Ok(Walk {
             pixel_layers,
             groups,
+            group_records,
             masked,
             blockers,
         })

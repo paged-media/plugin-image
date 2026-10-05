@@ -72,6 +72,8 @@ use image_psd::model::{
     GlobalImageData, LayerMaskData, LayerRecord, LsctData, PascalString, PsdFile, SectionKind,
 };
 
+use image_gpu::SelectionCoverage;
+
 use crate::ingest::IngestError;
 
 /// What the PSD save-back did to the layer structure — the panel turns
@@ -643,15 +645,54 @@ fn named_record(name: &str, kind: Option<LsctData>) -> (PascalString, Vec<Additi
     (PascalString::new(&legacy), addl)
 }
 
+/// A canvas-extent user mask as channel −2 plus its mask record: the
+/// rect is the canvas, the default colour 0 (outside the rect is hidden),
+/// flags bit 1 = mask disabled, two pad bytes.
+fn mask_channel(
+    cov: &SelectionCoverage,
+    enabled: bool,
+    width: u32,
+    height: u32,
+    container: image_psd::Container,
+) -> Result<(ChannelInfo, ChannelData, LayerMaskData), IngestError> {
+    let cd = ChannelData::encode_rle(cov.data(), container, height, width)
+        .map_err(|e| IngestError::Decode(e.to_string()))?;
+    let info = ChannelInfo {
+        id: -2,
+        data_len: 2 + cd.bytes.len() as u64,
+    };
+    let flags = if enabled { 0 } else { 0x02 };
+    let mut raw = Vec::with_capacity(20);
+    for v in [0i32, 0, height as i32, width as i32] {
+        raw.extend_from_slice(&v.to_be_bytes());
+    }
+    raw.extend_from_slice(&[0, flags, 0, 0]);
+    Ok((
+        info,
+        cd,
+        LayerMaskData {
+            top: 0,
+            left: 0,
+            bottom: height as i32,
+            right: width as i32,
+            default_color: 0,
+            flags,
+            raw,
+        },
+    ))
+}
+
 /// A group's opening (`OpenFolder`, above its members) or closing
 /// (`BoundingDivider`, below them) record: no pixels, four empty
-/// channels.
+/// channels, and the group's mask on the folder record when it has one.
+#[allow(clippy::too_many_arguments)]
 fn section_record(
     name: &str,
     lsct: LsctData,
     opacity: u8,
     flags: u8,
     blend_key: [u8; 4],
+    mask: Option<(&SelectionCoverage, bool, u32, u32)>,
     container: image_psd::Container,
 ) -> Result<LayerRecord, IngestError> {
     let mut channels = Vec::new();
@@ -665,6 +706,15 @@ fn section_record(
         });
         channel_data.push(cd);
     }
+    let mask = match mask {
+        Some((cov, enabled, width, height)) => {
+            let (info, cd, record) = mask_channel(cov, enabled, width, height, container)?;
+            channels.push(info);
+            channel_data.push(cd);
+            Some(record)
+        }
+        None => None,
+    };
     let (name_legacy, addl) = named_record(name, Some(lsct));
     Ok(LayerRecord {
         top: 0,
@@ -678,7 +728,7 @@ fn section_record(
         clipping: 0,
         flags,
         filler: 0,
-        mask: None,
+        mask,
         blend_ranges: BlendRanges::default(),
         name_legacy,
         addl,
@@ -752,6 +802,9 @@ pub fn psd_write_stack(
             opacity_u8(g.opacity),
             if g.visible { 0 } else { 0x02 },
             key,
+            g.mask
+                .as_deref()
+                .map(|m| (m, g.mask_enabled, stack.width(), stack.height())),
             container,
         )?);
         Ok(())
@@ -776,6 +829,7 @@ pub fn psd_write_stack(
                 255,
                 0,
                 *b"norm",
+                None,
                 container,
             )?);
             open.push(g);
@@ -796,30 +850,11 @@ pub fn psd_write_stack(
         }
         let mask = match &layer.mask {
             Some(cov) => {
-                let cd = ChannelData::encode_rle(cov.data(), container, height, width)
-                    .map_err(|e| IngestError::Decode(e.to_string()))?;
-                channels.push(ChannelInfo {
-                    id: -2,
-                    data_len: 2 + cd.bytes.len() as u64,
-                });
+                let (info, cd, record) =
+                    mask_channel(cov, layer.mask_enabled, width, height, container)?;
+                channels.push(info);
                 channel_data.push(cd);
-                // Rect (the canvas), default colour 0 (outside the rect is
-                // hidden), flags bit 1 = mask disabled, two pad bytes.
-                let flags = if layer.mask_enabled { 0 } else { 0x02 };
-                let mut raw = Vec::with_capacity(20);
-                for v in [0i32, 0, height as i32, width as i32] {
-                    raw.extend_from_slice(&v.to_be_bytes());
-                }
-                raw.extend_from_slice(&[0, flags, 0, 0]);
-                Some(LayerMaskData {
-                    top: 0,
-                    left: 0,
-                    bottom: height as i32,
-                    right: width as i32,
-                    default_color: 0,
-                    flags,
-                    raw,
-                })
+                Some(record)
             }
             None => None,
         };
@@ -1110,6 +1145,32 @@ mod tests {
                 a.name
             );
         }
+    }
+
+    /// A GROUP's mask is written on its folder record and read back,
+    /// switch included.
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_group_mask_is_written_and_imports_back__feat__image_psd_layer_import() {
+        let mut s = layered_stack();
+        let id = s.groups()[0].id;
+        let cov = SelectionCoverage::from_data(4, 2, vec![255, 200, 100, 0, 0, 50, 150, 255])
+            .expect("cov");
+        s.set_group_mask(id, Some(std::sync::Arc::new(cov.clone())), false)
+            .expect("group mask");
+        let mut file = PsdFile::parse(&psd_4x2()).expect("seed");
+        let composite = vec![0u8; 4 * 2 * 4];
+        psd_write_stack(&mut file, &s, &composite).expect("written");
+        let bytes = file.write().expect("bytes");
+        let f = PsdFile::parse(&bytes).expect("parse");
+        let import = f.layer_plates_rgba8().expect("a masked group imports");
+        let back = crate::layers::LayerStack::from_psd_plates(&import).expect("stack");
+        let g = &back.groups()[0];
+        assert_eq!(
+            g.mask.as_deref().map(|m| m.data().to_vec()),
+            Some(cov.data().to_vec())
+        );
+        assert!(!g.mask_enabled, "the switch survives");
     }
 
     #[test]

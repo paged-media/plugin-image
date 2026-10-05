@@ -455,6 +455,26 @@ pub fn mask_from_grey(width: u32, height: u32, rgba: &[u8]) -> Option<SelectionC
 /// layer that is both masked and clipped is confined by both. Returning
 /// `None` when neither exists keeps the constant-one fast path, so an
 /// ordinary layer still pays nothing for a feature it does not use.
+/// Two coverages multiplied (`None` is full coverage). One side alone is
+/// returned as is, so its `Arc` — and the fold's cache of it — survives.
+pub(crate) fn multiply_coverage(
+    a: Option<Arc<SelectionCoverage>>,
+    b: Option<Arc<SelectionCoverage>>,
+) -> Option<Arc<SelectionCoverage>> {
+    match (a, b) {
+        (None, x) | (x, None) => x,
+        (Some(a), Some(b)) => {
+            let data = a
+                .data()
+                .iter()
+                .zip(b.data())
+                .map(|(&x, &y)| ((u32::from(x) * u32::from(y) + 127) / 255) as u8)
+                .collect();
+            SelectionCoverage::from_data(a.width(), a.height(), data).map(Arc::new)
+        }
+    }
+}
+
 fn effective_coverage(
     own: Option<&Arc<SelectionCoverage>>,
     clip: Option<&[u8]>,
@@ -542,6 +562,11 @@ pub struct LayerGroup {
     pub pass_through: bool,
     /// The enclosing group, for nesting. `None` is a top-level group.
     pub parent: Option<u32>,
+    /// The GROUP's mask (a PSD folder's user mask): canvas-extent
+    /// coverage the group's composite blends through.
+    pub mask: Option<Arc<SelectionCoverage>>,
+    /// A disabled mask is kept, not applied.
+    pub mask_enabled: bool,
 }
 
 impl LayerGroup {
@@ -550,8 +575,19 @@ impl LayerGroup {
     /// Pass-through is the declared mode, but an opacity below 1 forces
     /// isolation regardless — Photoshop's rule, and the honest one:
     /// fading a group that has no composite of its own is not defined.
+    ///
+    /// A MASK does not: Photoshop keeps a masked pass-through group
+    /// pass-through — its members still blend straight into what is below,
+    /// each through the group's mask (measured: isolating it put a
+    /// multiply member 25 levels off). See [`LayerStack::pass_through_mask`].
     pub fn isolates(&self) -> bool {
         !self.pass_through || self.opacity < 1.0
+    }
+
+    /// The mask the group's composite blends through, when there is one
+    /// and it is switched on.
+    pub fn live_mask(&self) -> Option<&Arc<SelectionCoverage>> {
+        self.mask.as_ref().filter(|_| self.mask_enabled)
     }
 
     pub fn blend_name(&self) -> &'static str {
@@ -736,6 +772,13 @@ impl LayerStack {
                 pass_through: &plate.blend_key == b"pass",
                 blend: psd_blend_kernel(&plate.blend_key),
                 parent: plate.parent.map(group_id),
+                mask: plate.mask.as_ref().map(|m| {
+                    Arc::new(
+                        SelectionCoverage::from_data(width, height, m.coverage.clone())
+                            .expect("a canvas-extent mask"),
+                    )
+                }),
+                mask_enabled: plate.mask.as_ref().is_none_or(|m| m.enabled),
             })
             .collect();
         let mut layers: Vec<Layer> = Vec::with_capacity(n_layers);
@@ -1456,6 +1499,8 @@ impl LayerStack {
             // "folder": members reach the stack below.
             pass_through: true,
             parent,
+            mask: None,
+            mask_enabled: true,
         });
         for l in &mut self.layers[lo..=hi] {
             l.group = Some(id);
@@ -1488,6 +1533,58 @@ impl LayerStack {
 
     /// The enclosing chain of `gid`, OUTERMOST first — what the fold
     /// compares against to decide which groups to open and close.
+    /// Set (or clear) a GROUP's mask and its switch. Not an undo step:
+    /// group masks arrive with a PSD import, the panel does not edit them
+    /// yet.
+    pub fn set_group_mask(
+        &mut self,
+        id: u32,
+        mask: Option<Arc<SelectionCoverage>>,
+        enabled: bool,
+    ) -> Result<(), IngestError> {
+        let (w, h) = (self.width, self.height);
+        if let Some(m) = &mask {
+            if m.width() != w || m.height() != h {
+                return Err(IngestError::Unsupported(format!(
+                    "group mask is {}×{}, the canvas {w}×{h}",
+                    m.width(),
+                    m.height()
+                )));
+            }
+        }
+        let g = self
+            .groups
+            .iter_mut()
+            .find(|g| g.id == id)
+            .ok_or_else(|| IngestError::Unsupported(format!("no group {id}")))?;
+        g.mask = mask;
+        g.mask_enabled = enabled;
+        self.structure_generation += 1;
+        Ok(())
+    }
+
+    /// The masks of the PASS-THROUGH groups around `gid` (innermost
+    /// first, up to the nearest isolated one, whose own mask applies when
+    /// it closes), multiplied: what a member of `gid` composites through.
+    /// A single mask comes back as its own `Arc`.
+    pub(crate) fn pass_through_mask(&self, gid: Option<u32>) -> Option<Arc<SelectionCoverage>> {
+        let mut out = None;
+        let mut cur = gid;
+        let mut depth = 0;
+        while let Some(id) = cur {
+            let Some(g) = self.groups.iter().find(|g| g.id == id) else {
+                break;
+            };
+            if g.isolates() || depth > MAX_GROUP_DEPTH * 2 {
+                break;
+            }
+            out = multiply_coverage(out, g.live_mask().cloned());
+            cur = g.parent;
+            depth += 1;
+        }
+        out
+    }
+
     fn chain_of(&self, gid: Option<u32>) -> Vec<u32> {
         let mut out = Vec::new();
         let mut cur = gid;
@@ -1597,7 +1694,13 @@ impl LayerStack {
             return Ok(stack);
         };
         // One dispatch, the same one a layer takes — a group is a plate
-        // like any other once its members have been folded.
+        // like any other once its members have been folded, its mask
+        // included.
+        let mask = multiply_coverage(g.live_mask().cloned(), self.pass_through_mask(g.parent));
+        let mask = mask.map(|cov| {
+            SelectionMask::from_fn(w, h, |x, y| f32::from(cov.coverage_at(x, y)) / 255.0)
+                .into_bytes()
+        });
         image_gpu::execute_tile_once_async(
             ctx,
             g.blend,
@@ -1606,7 +1709,7 @@ impl LayerStack {
                 TileInput { f16_bytes: &inner },
             ],
             ComposeParams::new(g.opacity).as_bytes(),
-            None,
+            mask.as_deref(),
             w,
             h,
         )
@@ -2237,7 +2340,16 @@ impl LayerStack {
                     &straight,
                     params,
                     with_opacity(
-                        effective_coverage(layer.live_mask(), clip, w, h),
+                        effective_coverage(
+                            multiply_coverage(
+                                layer.live_mask().cloned(),
+                                self.pass_through_mask(layer.group),
+                            )
+                            .as_ref(),
+                            clip,
+                            w,
+                            h,
+                        ),
                         layer.opacity,
                         w,
                         h,
@@ -2267,8 +2379,12 @@ impl LayerStack {
             };
             // Lower the layer's coverage to the ABI mask. `None` keeps
             // the constant-1 fast path, so an unmasked layer pays nothing.
-            let mask_bytes: Option<Vec<u8>> = effective_coverage(layer.live_mask(), clip, w, h)
-                .map(|cov| {
+            let own = multiply_coverage(
+                layer.live_mask().cloned(),
+                self.pass_through_mask(layer.group),
+            );
+            let mask_bytes: Option<Vec<u8>> =
+                effective_coverage(own.as_ref(), clip, w, h).map(|cov| {
                     SelectionMask::from_fn(w, h, |x, y| f32::from(cov.coverage_at(x, y)) / 255.0)
                         .bytes()
                         .to_vec()

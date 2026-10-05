@@ -175,6 +175,9 @@ pub(super) enum Step {
     Close {
         group: u32,
         blend: Option<(&'static KernelDef, f32)>,
+        /// The group's live mask (`own`; no clip), through which its
+        /// composite blends.
+        cov: CovKey,
     },
 }
 
@@ -232,13 +235,15 @@ impl Step {
                 },
             ) => std::ptr::eq(*blend, *b2) && opacity.to_bits() == o2.to_bits(),
             (
-                Step::Close { group, blend },
+                Step::Close { group, blend, cov },
                 Step::Close {
                     group: g2,
                     blend: b2,
+                    cov: c2,
                 },
             ) => {
                 group == g2
+                    && cov.same(c2)
                     && match (blend, b2) {
                         (None, None) => true,
                         (Some((d, o)), Some((d2, o2))) => {
@@ -387,6 +392,7 @@ impl FoldCache {
             .iter()
             .filter_map(|s| match s {
                 Step::Pixel { layer, .. } | Step::ClipOpen { layer, .. } => Some(*layer),
+                Step::Close { group, .. } => Some(*group),
                 _ => None,
             })
             .collect();
@@ -480,7 +486,10 @@ impl LayerStack {
                 clip_base = Some(Arc::clone(px));
             }
             let cov = CovKey {
-                own: layer.live_mask().cloned(),
+                own: super::multiply_coverage(
+                    layer.live_mask().cloned(),
+                    self.pass_through_mask(layer.group),
+                ),
                 // Inside a clipping group the base's alpha is applied
                 // once, at its close; outside one (no base step to open
                 // it on) the clip falls back to confining coverage.
@@ -515,13 +524,19 @@ impl LayerStack {
     }
 
     fn close_step(&self, gid: u32) -> Step {
+        let g = self.groups.iter().find(|g| g.id == gid);
         Step::Close {
             group: gid,
-            blend: self
-                .groups
-                .iter()
-                .find(|g| g.id == gid)
-                .map(|g| (g.blend, g.opacity)),
+            blend: g.map(|g| (g.blend, g.opacity)),
+            cov: CovKey {
+                own: g.and_then(|g| {
+                    super::multiply_coverage(
+                        g.live_mask().cloned(),
+                        self.pass_through_mask(g.parent),
+                    )
+                }),
+                clip: None,
+            },
         }
     }
 
@@ -573,9 +588,10 @@ impl LayerStack {
                         batch, &base, &inner, &outer, blend, *opacity, w, h,
                     )?);
                 }
-                Step::Close { blend, .. } => {
+                Step::Close { group, blend, cov } => {
                     let inner = st.acc.take();
                     let parked = st.parked.pop().flatten();
+                    let mask = cache.mask(batch, *group, cov, w, h);
                     st.acc = match blend {
                         None => parked,
                         Some((def, opacity)) => {
@@ -587,7 +603,7 @@ impl LayerStack {
                                     def,
                                     &[&a, &b],
                                     ComposeParams::new(*opacity).as_bytes(),
-                                    None,
+                                    mask.as_ref(),
                                     &out,
                                 )
                                 .map_err(gpu_err)?;
@@ -1025,9 +1041,12 @@ impl LayerStack {
         for step in &steps[prefix.len()..] {
             match step {
                 Step::Open { .. } => parked.push(acc.take()),
-                Step::Close { blend, .. } => {
+                Step::Close { blend, cov, .. } => {
                     let inner = acc.take();
                     let outer = parked.pop().flatten();
+                    let mask = (!cov.is_none()).then(|| {
+                        batch.upload(rw, rh, TexFormat::R16Float, &mask_window(cov, w, r))
+                    });
                     acc = match blend {
                         None => outer,
                         Some((def, opacity)) => {
@@ -1039,7 +1058,7 @@ impl LayerStack {
                                     def,
                                     &[&a, &b],
                                     ComposeParams::new(*opacity).as_bytes(),
-                                    None,
+                                    mask.as_ref(),
                                     &out,
                                 )
                                 .map_err(gpu_err)?;

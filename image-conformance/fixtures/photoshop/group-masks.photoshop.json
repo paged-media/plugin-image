@@ -1,0 +1,90 @@
+{
+  "fixture": "group-masks",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/group-masks.jsx",
+    "script_sha256": "465f6dc4a6f685d2d36a35c719de4b10b3e28f5531af4894fca58a5a18cb62a8",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-05T10:10:12.885Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "pass-through-masked",
+      "params": {
+        "what": "pass-through group (normal + multiply member) with a feathered mask"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "group-masks/pass-through-masked.psd",
+        "group-masks/pass-through-masked.png"
+      ]
+    },
+    {
+      "id": "isolated-masked",
+      "params": {
+        "what": "isolated normal group with a feathered mask"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "group-masks/isolated-masked.psd",
+        "group-masks/isolated-masked.png"
+      ]
+    },
+    {
+      "id": "isolated-60-masked",
+      "params": {
+        "what": "isolated group at 60% with a hard mask"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "group-masks/isolated-60-masked.psd",
+        "group-masks/isolated-60-masked.png"
+      ]
+    },
+    {
+      "id": "group-mask-disabled",
+      "params": {
+        "what": "pass-through group whose mask is switched off"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "group-masks/group-mask-disabled.psd",
+        "group-masks/group-mask-disabled.png"
+      ]
+    },
+    {
+      "id": "group-and-member-masks",
+      "params": {
+        "what": "member mask (bottom half) inside a group mask (middle band)"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "group-masks/group-and-member-masks.psd",
+        "group-masks/group-and-member-masks.png"
+      ]
+    },
+    {
+      "id": "nested-masked",
+      "params": {
+        "what": "a masked group inside a masked group"
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "group-masks/nested-masked.psd",
+        "group-masks/nested-masked.png"
+      ]
+    }
+  ]
+}

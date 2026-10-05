@@ -37,16 +37,17 @@
 //! buffers are kept separate so a caller can store each once, by
 //! content hash, and share it across revisions that did not change it.
 //!
-//! Manifest layout, little-endian: `"PGIL"`, u32 version (1), u32 width,
+//! Manifest layout, little-endian: `"PGIL"`, u32 version (2), u32 width,
 //! u32 height, u32 active, u32 next_id; u32 group count and per group
 //! {u32 id, str name, u8 visible, f32 opacity, str blend, u8 pass_through,
-//! i64 parent (-1 = none)}; u32 layer count and per layer {u32 id, str
+//! i64 parent (-1 = none), u8 mask_enabled, i64 mask slot (-1 = none)}; u32 layer count and per layer {u32 id, str
 //! name, u8 visible, u8 locked, f32 opacity, str blend, u8 clipped, i64
 //! group, u8 mask_enabled, u8 kind (0 pixels, 1 adjustment, 2 smart), u8
 //! depth (8 | 16), u32 pixel slot, i64 mask slot (-1 = none), then for an
 //! adjustment u32 n + n f32 (`AdjustParams::to_wire`), for a smart object
 //! u32 width, u32 height, f32 scale, u32 source slot}. A `str` is u32
-//! length + UTF-8.
+//! length + UTF-8. Version 1 (no group masks: a group ends at its parent)
+//! is still read.
 //!
 //! The history is not persisted: a reopened stack starts with none.
 
@@ -60,7 +61,7 @@ use super::{Layer, LayerGroup, LayerKind, LayerStack, SmartSource};
 use crate::ingest::{AdjustParams, IngestError};
 
 const MAGIC: &[u8; 4] = b"PGIL";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 struct W(Vec<u8>);
 
@@ -153,6 +154,12 @@ impl LayerStack {
             w.str(g.blend.id);
             w.u8(g.pass_through as u8);
             w.i64(g.parent.map_or(-1, i64::from));
+            w.u8(g.mask_enabled as u8);
+            let mask = g
+                .mask
+                .as_ref()
+                .map(|m| slot(Arc::from(m.data().to_vec().into_boxed_slice())));
+            w.i64(mask.map_or(-1, i64::from));
         }
         w.u32(self.layers.len() as u32);
         for l in &self.layers {
@@ -207,7 +214,7 @@ impl LayerStack {
             return Err(IngestError::Decode("not a layer manifest".into()));
         }
         let version = r.u32()?;
-        if version != VERSION {
+        if version != VERSION && version != 1 {
             return Err(IngestError::Unsupported(format!(
                 "layer manifest version {version} (this engine reads {VERSION})"
             )));
@@ -224,14 +231,45 @@ impl LayerStack {
         };
         let mut groups = Vec::new();
         for _ in 0..r.u32()? {
+            let (id, name, visible, opacity) = (r.u32()?, r.str()?, r.u8()? != 0, r.f32()?);
+            let (blend, pass_through, parent) = (
+                blend(&r.str()?)?,
+                r.u8()? != 0,
+                u32::try_from(r.i64()?).ok(),
+            );
+            let (mask_enabled, mask) = if version >= 2 {
+                let enabled = r.u8()? != 0;
+                let mask = match u32::try_from(r.i64()?).ok() {
+                    Some(slot) => {
+                        let data = buffer(slot)?;
+                        Some(Arc::new(
+                            SelectionCoverage::from_data(width, height, data.to_vec()).ok_or_else(
+                                || {
+                                    IngestError::Decode(format!(
+                                        "layer manifest: group mask {slot} is {} bytes for \
+                                         {width}x{height}",
+                                        data.len()
+                                    ))
+                                },
+                            )?,
+                        ))
+                    }
+                    None => None,
+                };
+                (enabled, mask)
+            } else {
+                (true, None)
+            };
             groups.push(LayerGroup {
-                id: r.u32()?,
-                name: r.str()?,
-                visible: r.u8()? != 0,
-                opacity: r.f32()?,
-                blend: blend(&r.str()?)?,
-                pass_through: r.u8()? != 0,
-                parent: u32::try_from(r.i64()?).ok(),
+                id,
+                name,
+                visible,
+                opacity,
+                blend,
+                pass_through,
+                parent,
+                mask,
+                mask_enabled,
             });
         }
         let mut layers = Vec::new();
@@ -406,6 +444,44 @@ mod tests {
             _ => panic!("layer 2 is the adjustment"),
         }
         assert!(back.layers[3].rgba.is_16bit(), "16-bit stays 16-bit");
+    }
+
+    /// A GROUP's mask (version 2) comes back with its switch; a version-1
+    /// manifest — no group mask fields — still opens, its groups unmasked.
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_group_mask_round_trips_and_version_1_still_reads__feat__image_editor_layers() {
+        let mut s = rich();
+        let cov = SelectionCoverage::from_data(4, 3, (0..12).map(|i| 255 - i * 10).collect())
+            .expect("cov");
+        s.groups[0].mask = Some(Arc::new(cov.clone()));
+        s.groups[0].mask_enabled = false;
+        let (m, bufs) = s.export();
+        let back = LayerStack::import(&m, &bufs).expect("import");
+        let g = &back.groups[0];
+        assert_eq!(
+            g.mask.as_deref().map(|c| c.data().to_vec()),
+            Some(cov.data().to_vec())
+        );
+        assert!(!g.mask_enabled, "the switch survives");
+
+        // Version 1: the same manifest without the group's two mask fields.
+        let plain = rich();
+        let (m2, bufs2) = plain.export();
+        let mut v1 = m2.clone();
+        v1[4..8].copy_from_slice(&1u32.to_le_bytes());
+        // The group record ends with u8 mask_enabled + i64 mask slot (-1):
+        // nine bytes, the first group's last ones before the layer count.
+        let tail = [1u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let at = v1
+            .windows(9)
+            .position(|w| w == tail)
+            .expect("the group's mask fields");
+        v1.drain(at..at + 9);
+        let old = LayerStack::import(&v1, &bufs2).expect("a version-1 manifest opens");
+        assert_eq!(old.groups.len(), 1);
+        assert!(old.groups[0].mask.is_none() && old.groups[0].mask_enabled);
+        assert_eq!(old.len(), plain.len());
     }
 
     #[test]
