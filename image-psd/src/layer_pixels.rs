@@ -52,9 +52,13 @@
 //!
 //! * **not RGB at 8 or 16 bits** — 1/32-bit and CMYK/Lab are separate
 //!   lanes;
-//! * **a group with a mask of its own**, a **vector mask**, a mask with
-//!   **density/feather parameters**, or a layer with both a user and a
-//!   "real" mask (channel −3) — none of these is modelled;
+//! * **a group with a mask of its own** (user or vector), a mask with
+//!   **density/feather parameters** (user or vector — Photoshop applies
+//!   them live, outside every stored mask), a **vector mask whose
+//!   records Photoshop's observed semantics do not cover** (a version
+//!   other than 3, an unknown path operation or fill rule, records that
+//!   do not frame), and a "real" user mask (channel −3) without the
+//!   vector mask it belongs beside — none of these is modelled;
 //! * **layer effects** (`lfx2` / `lrFX`), **adjustment layers** (their
 //!   pixels are not stored; the adjustment is) and **artboards** —
 //!   importing them as plain pixel layers would draw something else;
@@ -72,7 +76,11 @@
 //! below a group's members and the folder record above them, with the
 //! folder's name, blend (`pass` = pass-through), opacity and visibility,
 //! nested; LAYER MASKS (channel −2: the mask rectangle, the default
-//! colour outside it, the disabled and invert flags); and SMART OBJECTS
+//! colour outside it, the disabled and invert flags; channel −3 and the
+//! record's "real" fields when a vector mask sits beside it); VECTOR
+//! MASKS (`vmsk`/`vsms`, [`crate::vector_mask`]) as paths the consumer
+//! draws and multiplies with the user mask — except on fill/shape
+//! layers, whose stored pixels already are the shape; and SMART OBJECTS
 //! as their stored render ([`LayerPlate::smart`]).
 //!
 //! # Smart objects: the stored render, vouched for by the composite
@@ -104,7 +112,8 @@
 
 use crate::composite::MergedData;
 use crate::model::ColorMode;
-use crate::model::{LayerRecord, PsdFile, SectionKind};
+use crate::model::{LayerMaskData, LayerRecord, PsdFile, SectionKind};
+use crate::vector_mask::VectorMask;
 use crate::{PsdError, Result};
 
 /// Ceiling on the total plate memory an import may allocate. Canvas
@@ -113,7 +122,7 @@ use crate::{PsdError, Result};
 pub const MAX_IMPORT_BYTES: usize = 384 * 1024 * 1024;
 
 /// One pixel-bearing PSD layer, ready for the layer stack.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayerPlate {
     /// The canonical name (`luni` when present, else the legacy Pascal).
     pub name: String,
@@ -136,8 +145,18 @@ pub struct LayerPlate {
     /// The innermost enclosing group, as an index into
     /// [`LayerImport::groups`]; `None` at the top level.
     pub group: Option<usize>,
-    /// The layer's user mask, canvas-extent.
+    /// The layer's USER mask, canvas-extent: channel −2, or channel −3
+    /// (the "real" user mask) when a vector mask sits beside it. Never
+    /// Photoshop's cached render of the vector mask (see
+    /// [`LayerPlate::vector_mask`]).
     pub mask: Option<MaskPlate>,
+    /// The layer's VECTOR MASK as paths in canvas pixels, when it clips
+    /// the plate's pixels. The consumer rasterizes it and multiplies it
+    /// with [`LayerPlate::mask`] (what Photoshop does: its own cached
+    /// render of the pair is their product). A disabled one (`disabled`)
+    /// is kept, not applied. `None` on a fill/shape layer, whose stored
+    /// pixels already are the shape's render.
+    pub vector_mask: Option<VectorMask>,
     /// The plate is a SMART OBJECT's stored render (`SoLd`/`PlLd`/`SoLE`),
     /// not pixels of its own. The import is only sound once the consumer
     /// has checked these plates against the merged composite (module
@@ -165,6 +184,19 @@ pub struct MaskPlate {
     pub enabled: bool,
 }
 
+/// Every mask one layer record carries ([`PsdFile::layer_masks`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerMasks {
+    /// The user mask (channel −2, or −3 beside a vector mask).
+    pub user: Option<MaskPlate>,
+    /// The vector mask's paths.
+    pub vector: Option<VectorMask>,
+    /// Photoshop's cached render of the vector mask (times the user mask
+    /// when there is one), channel −2 flagged as rendered. Not imported;
+    /// the rasterizer's oracle.
+    pub cached_render: Option<MaskPlate>,
+}
+
 /// A group (a Photoshop layer folder) as its folder record stores it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupPlate {
@@ -178,7 +210,7 @@ pub struct GroupPlate {
 }
 
 /// The whole importable layer tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayerImport {
     pub width: u32,
     pub height: u32,
@@ -261,10 +293,7 @@ fn addl_payload(a: &crate::model::AdditionalLayerInfo) -> &[u8] {
 
 /// Is the record a smart object (its pixels a stored render)?
 fn is_smart(layer: &LayerRecord) -> bool {
-    layer
-        .addl
-        .iter()
-        .any(|a| SMART_KEYS.contains(&&a.key))
+    layer.addl.iter().any(|a| SMART_KEYS.contains(&&a.key))
 }
 
 /// The record's fill opacity (`iOpa`), 255 when absent.
@@ -275,6 +304,64 @@ fn fill_opacity(layer: &LayerRecord) -> u8 {
         .find(|a| &a.key == b"iOpa")
         .and_then(|a| addl_payload(a).first().copied())
         .unwrap_or(255)
+}
+
+/// Fill-layer content keys: solid colour, gradient, pattern, and the
+/// stroked-shape content block (`vscg`).
+const SHAPE_CONTENT_KEYS: &[&[u8; 4]] = &[b"SoCo", b"GdFl", b"PtFl", b"vscg"];
+
+/// Is the record a fill/shape layer? Then its STORED PIXELS are already
+/// the shape's render — the fill clipped by the vector mask (and the
+/// stroke, which may lie outside it) — and Photoshop does not apply the
+/// vector mask to them a second time. [OBS] Photoshop 27: a solid-colour
+/// shape layer's transparency channel equals the path's render to two
+/// levels and its composite equals that channel to one level, where
+/// applying the mask again is 64 levels off on the edge. Across the
+/// corpus (`psd_vector_mask_corpus`), the transparency of 1,603 of 1,783
+/// `SoCo`/`vscg` vector-mask layers matches our render of the path to 8
+/// levels on 99.5 % of the layer rectangle, and 58 more are opaque
+/// outside the path (their strokes); the pixel layers with a vector mask
+/// carry unmasked pixels and a separate cached render instead.
+fn is_shape_content(layer: &LayerRecord) -> bool {
+    layer
+        .addl
+        .iter()
+        .any(|a| SHAPE_CONTENT_KEYS.contains(&&a.key))
+}
+
+/// The record's vector mask block payload (`vmsk`, or `vsms`, which
+/// shape layers carry; the same layout).
+fn vector_mask_payload(layer: &LayerRecord) -> Option<&[u8]> {
+    layer
+        .addl
+        .iter()
+        .find(|a| &a.key == b"vmsk" || &a.key == b"vsms")
+        .map(addl_payload)
+}
+
+/// The REAL user mask's rectangle, background and flags: the tail of a
+/// 36+-byte mask-data record, after the mask parameters when flags bit 4
+/// says they are present. [PUB] Layer Mask / Adjustment Layer Data;
+/// [OBS] Photoshop writes it exactly when a layer has both a user and a
+/// vector mask, and the parameters (density / feather, one byte of
+/// presence bits then a `u8` or an `f64` per bit) precede it.
+fn real_mask(m: &LayerMaskData) -> Option<(i32, i32, i32, i32, u8, u8)> {
+    let raw = &m.raw;
+    let mut at = 18usize;
+    if m.flags & 0x10 != 0 {
+        let present = *raw.get(at)?;
+        at += 1;
+        for (bit, len) in [(0x01u8, 1usize), (0x02, 8), (0x04, 1), (0x08, 8)] {
+            if present & bit != 0 {
+                at += len;
+            }
+        }
+    }
+    let tail = raw.get(at..at + 18)?;
+    let flags = tail[0];
+    let default_color = tail[1];
+    let int = |o: usize| i32::from_be_bytes([tail[o], tail[o + 1], tail[o + 2], tail[o + 3]]);
+    Some((int(2), int(6), int(10), int(14), default_color, flags))
 }
 
 /// The user-mask channel ids: −2 the user mask, −3 the "real" user mask
@@ -324,6 +411,7 @@ impl PsdFile {
             // Fill opacity folds into opacity (see the refusals above).
             let opacity =
                 ((u32::from(layer.opacity) * u32::from(fill_opacity(layer)) + 127) / 255) as u8;
+            let masks = self.layer_masks(layer, cw, ch)?;
             layers.push(LayerPlate {
                 name: layer.name(),
                 blend_key: layer.blend_key,
@@ -332,7 +420,9 @@ impl PsdFile {
                 clipped: layer.clipping != 0,
                 rgba: self.layer_canvas_rgba8(layer, cw, ch)?,
                 group,
-                mask: self.layer_mask_plate(layer, cw, ch)?,
+                mask: masks.user,
+                // A shape layer's pixels already ARE its path's render.
+                vector_mask: masks.vector.filter(|_| !is_shape_content(layer)),
                 smart: is_smart(layer),
             });
         }
@@ -399,20 +489,7 @@ impl PsdFile {
         let mut smart = false;
         for layer in &self.layer_mask.layers {
             let kind = layer.addl.iter().find_map(|a| a.lsct()).map(|d| d.kind);
-            if layer
-                .addl
-                .iter()
-                .any(|a| &a.key == b"vmsk" || &a.key == b"vsms")
-            {
-                block(
-                    "vector-mask",
-                    format!(
-                        "layer import of a PSD with a VECTOR MASK (\"{}\"): vector masks \
-                         are not modelled, so the merged composite is kept instead",
-                        layer.name()
-                    ),
-                );
-            }
+            let vmsk = vector_mask_payload(layer);
             for (_, what) in UNMODELLED
                 .iter()
                 .filter(|(key, _)| layer.addl.iter().any(|a| &a.key == *key))
@@ -470,6 +547,17 @@ impl PsdFile {
                             ),
                         );
                     }
+                    if vmsk.is_some() {
+                        block(
+                            "group-mask",
+                            format!(
+                                "layer import of a GROUP with a vector mask (\"{}\"): group \
+                                 masks are not modelled, so the merged composite is kept \
+                                 instead",
+                                layer.name()
+                            ),
+                        );
+                    }
                     if has_mask {
                         block(
                             "group-mask",
@@ -496,24 +584,63 @@ impl PsdFile {
                 }
                 _ => {}
             }
-            if layer.channels.iter().any(|c| c.id == REAL_USER_MASK) {
+            if let Some(payload) = vmsk {
+                if let Err(e) = VectorMask::parse(payload, h.width, h.height) {
+                    block(
+                        "vector-mask",
+                        format!(
+                            "layer import of a VECTOR MASK that cannot be drawn faithfully \
+                             (\"{}\": {e}), so the merged composite is kept instead",
+                            layer.name()
+                        ),
+                    );
+                }
+                masked += 1;
+            }
+            let has_real = layer.channels.iter().any(|c| c.id == REAL_USER_MASK);
+            if has_real && vmsk.is_none() {
                 block(
                     "vector-mask",
                     format!(
-                        "layer import of a layer with both a user and a vector-derived \
-                         mask (\"{}\"): not modelled, so the merged composite is kept \
-                         instead",
+                        "layer import of a \"real\" user mask (channel −3) without the \
+                         vector mask it belongs beside (\"{}\"): not modelled, so the \
+                         merged composite is kept instead",
+                        layer.name()
+                    ),
+                );
+            }
+            if has_real && layer.mask.as_ref().and_then(real_mask).is_none() {
+                block(
+                    "malformed",
+                    format!(
+                        "layer \"{}\" has a real user mask channel (−3) but its mask data \
+                         carries no real-mask rectangle",
                         layer.name()
                     ),
                 );
             }
             if has_mask {
-                if layer.mask.as_ref().is_some_and(|m| m.flags & 0x10 != 0) {
+                if let Some(m) = layer.mask.as_ref().filter(|m| m.flags & 0x10 != 0) {
+                    // [PUB] one byte of presence bits: 0 user density,
+                    // 1 user feather, 2 vector density, 3 vector feather.
+                    let present = m.raw.get(18).copied().unwrap_or(0);
+                    let which = [
+                        (0x01, "user-mask density"),
+                        (0x02, "user-mask feather"),
+                        (0x04, "vector-mask density"),
+                        (0x08, "vector-mask feather"),
+                    ]
+                    .iter()
+                    .filter(|(bit, _)| present & bit != 0)
+                    .map(|(_, what)| *what)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                     block(
                         "mask-parameters",
                         format!(
-                            "layer import of a mask with density/feather parameters \
-                             (\"{}\"): not modelled, so the merged composite is kept instead",
+                            "layer import of a mask with density/feather parameters ({which}; \
+                             \"{}\"): Photoshop applies them live, they are not modelled, so \
+                             the merged composite is kept instead",
                             layer.name()
                         ),
                     );
@@ -559,13 +686,32 @@ impl PsdFile {
         })
     }
 
-    /// The layer's user mask (channel −2) at canvas extent: the record's
-    /// default colour everywhere, the decoded mask inside its rectangle,
-    /// inverted when flags bit 2 says so. `None` without a mask channel.
-    fn layer_mask_plate(&self, layer: &LayerRecord, cw: u32, ch: u32) -> Result<Option<MaskPlate>> {
-        let Some(ci) = layer.channels.iter().position(|c| c.id == USER_MASK) else {
-            return Ok(None);
+    /// Every mask a layer record carries, decoded at a `cw`×`ch` canvas.
+    ///
+    /// Which channel holds what ([OBS], Photoshop 27): with a vector mask
+    /// beside a user mask, channel −3 is the user mask (described by the
+    /// mask data's REAL fields) and channel −2 is Photoshop's cached
+    /// render of the two combined, flagged "came from rendering other
+    /// data" (flags bit 3). With a vector mask alone, −2 is that render
+    /// of the vector mask. With the vector mask DISABLED, Photoshop
+    /// writes no render and −2 is the plain user mask. The render is a
+    /// CACHE of what the vector and user masks draw, so the import never
+    /// takes it as a user mask — the consumer draws the vector mask from
+    /// its paths — but it is decoded here, as [`LayerMasks::cached_render`],
+    /// because it is the oracle the rasterizer is held to.
+    pub fn layer_masks(&self, layer: &LayerRecord, cw: u32, ch: u32) -> Result<LayerMasks> {
+        let vmsk = vector_mask_payload(layer);
+        let vector = vmsk.map(|p| VectorMask::parse(p, cw, ch)).transpose()?;
+        let real = layer.channels.iter().position(|c| c.id == REAL_USER_MASK);
+        let main = layer.channels.iter().position(|c| c.id == USER_MASK);
+        let mut out = LayerMasks {
+            user: None,
+            vector,
+            cached_render: None,
         };
+        if real.is_none() && main.is_none() {
+            return Ok(out);
+        }
         let Some(m) = layer.mask.as_ref() else {
             return Err(PsdError::Malformed {
                 section: "layer mask data",
@@ -575,9 +721,41 @@ impl PsdFile {
                 ),
             });
         };
-        let mut coverage = vec![m.default_color; (cw as usize) * (ch as usize)];
-        let mw = (m.right - m.left).max(0) as u32;
-        let mh = (m.bottom - m.top).max(0) as u32;
+        let main_fields = (m.top, m.left, m.bottom, m.right, m.default_color, m.flags);
+        if let Some(ci) = real {
+            let fields = real_mask(m).ok_or_else(|| PsdError::Malformed {
+                section: "layer mask data",
+                detail: format!(
+                    "layer \"{}\" has a real user mask channel but no real-mask fields",
+                    layer.name()
+                ),
+            })?;
+            out.user = Some(self.mask_channel(layer, ci, fields, cw, ch)?);
+        }
+        if let Some(ci) = main {
+            let plate = self.mask_channel(layer, ci, main_fields, cw, ch)?;
+            if vmsk.is_some() && m.flags & 0x08 != 0 {
+                out.cached_render = Some(plate);
+            } else if out.user.is_none() {
+                out.user = Some(plate);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Decode mask channel `ci` described by `(top, left, bottom, right,
+    /// default colour, flags)` at canvas extent.
+    fn mask_channel(
+        &self,
+        layer: &LayerRecord,
+        ci: usize,
+        (top, left, bottom, right, default_color, flags): (i32, i32, i32, i32, u8, u8),
+        cw: u32,
+        ch: u32,
+    ) -> Result<MaskPlate> {
+        let mut coverage = vec![default_color; (cw as usize) * (ch as usize)];
+        let mw = (right - left).max(0) as u32;
+        let mh = (bottom - top).max(0) as u32;
         if mw > 0 && mh > 0 {
             let data = layer
                 .channel_data
@@ -599,12 +777,12 @@ impl PsdFile {
                 });
             }
             for my in 0..mh as i64 {
-                let dy = m.top as i64 + my;
+                let dy = top as i64 + my;
                 if dy < 0 || dy >= ch as i64 {
                     continue;
                 }
                 for mx in 0..mw as i64 {
-                    let dx = m.left as i64 + mx;
+                    let dx = left as i64 + mx;
                     if dx < 0 || dx >= cw as i64 {
                         continue;
                     }
@@ -613,15 +791,15 @@ impl PsdFile {
                 }
             }
         }
-        if m.flags & 0x04 != 0 {
+        if flags & 0x04 != 0 {
             for v in &mut coverage {
                 *v = 255 - *v;
             }
         }
-        Ok(Some(MaskPlate {
+        Ok(MaskPlate {
             coverage,
-            enabled: m.flags & 0x02 == 0,
-        }))
+            enabled: flags & 0x02 == 0,
+        })
     }
 
     /// One layer's canvas-extent straight RGBA8: decode its modeled

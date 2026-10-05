@@ -175,11 +175,42 @@
     - "Adobe Photoshop File Format specification — Channel Image Data (per-channel decode; ids 0/1/2 = R/G/B, -1 = transparency; a layer with no transparency channel is opaque inside its rect)"
     - "Adobe Photoshop File Format specification — Additional Layer Information: lsct section dividers (group markers refuse the import), luni (canonical name)"
     - "spec §10.4 — decode-on-demand read over the retained parse; no re-encode, no mutation"
-  # DECLINED, with a stated reason, rather than approximated: groups
-  # (lsct), clipping layers, layer masks (-2/-3), non-8-bit-RGB, and an
-  # over-budget canvas (MAX_IMPORT_BYTES — plates are canvas-extent).
+  # DECLINED, with a stated reason, rather than approximated: the
+  # categories in layer_pixels.rs's module docs (colour mode, effects,
+  # adjustment layers, artboards, group masks, mask parameters, an
+  # undrawable vector mask, unvouched smart objects) and an over-budget
+  # canvas (MAX_IMPORT_BYTES — plates are canvas-extent). Vector masks
+  # import since image.psd.addl.vmsk.
   tests:
     rust: ["image-conformance/tests/psd_layer_import.rs", "image-psd/src/layer_pixels.rs", "image-psd/tests/annual_fixture.rs"]
+
+- id: image.psd.addl.vmsk
+  state_row: image.psd.roundtrip
+  tier: rendered         # vmsk/vsms parsed to paths (image-psd/src/vector_mask.rs) and DRAWN the way Photoshop draws them (image-js/src/psd_vector_mask.rs) into the layer import's one mask; the block itself still re-emits verbatim (preservation untouched)
+  oracle: photoshop      # probes/vector-masks.jsx fixtures (merged composite + the render Photoshop caches in channel -2), and the corpus lane psd_vector_mask_corpus.rs (314 cached renders)
+  provenance:
+    - "Adobe Photoshop File Formats Specification — Additional Layer Information, Vector mask setting (vmsk / vsms): version, flags bit 0 invert / bit 1 not link / bit 2 disable, then path records [PUB]"
+    - "Adobe Photoshop File Formats Specification — Path resource format: 26-byte records, selectors 0/3 subpath length, 1/2 closed and 4/5 open Bezier knots (preceding control, anchor, leaving control; each vertical then horizontal, signed fixed 8.24 of the document height / width), 6 fill rule, 7 clipboard, 8 initial fill [PUB]"
+    - "Adobe Photoshop File Formats Specification — Layer Mask / Adjustment Layer Data: the REAL user mask fields (flags, background, rectangle) after the mask parameters; parameter presence bits 0-3 = user density / user feather / vector density / vector feather [PUB]"
+    - "Photoshop 27.10, masks built with each choice and the saved bytes diffed: the subpath length record carries the per-COMPONENT path operation at bytes 4-5 (0 exclude, 1 combine, 2 subtract, 3 intersect; 0xFFFF = this subpath continues the previous component) and the component index at bytes 14-15 [OBS]"
+    - "Photoshop 27.10, single fields of its own files patched and re-opened: bytes 6-7 are the component's fill rule (2 non-zero; 1, and 0 on a head, even-odd — a self-intersecting star and an inner subpath of the same component are holes under 1, filled under 2); the initial-fill record (selector 8) changes nothing when set to 1; flag bit 0 inverts, bit 2 disables, bit 1 changes no pixel; an OPEN subpath fills as if closed by a straight line, whatever its end handles [OBS]"
+    - "Photoshop 27.10 renders: components fold in order; a FIRST component that subtracts starts from a full mask, any other first operation adds; the booleans are per SAMPLE (two triangles sharing an anti-aliased diagonal leave no seam; an intersect of edges 1/2 px apart keeps exactly the samples between them) [OBS]"
+    - "Photoshop 27.10 renders: coverage is a count over 17 x 15 point samples per pixel (edges at every 1/16 px: left edges step 15 levels with one 30-level step at .5, top edges step 17); sample offsets 31/64 of a sample cell (pinned to (7/16, 1/2] by the ramp, chosen by the diagonals and the corpus) [OBS]"
+    - "Photoshop 27.10 + corpus: channel -2 of a layer with an enabled vector mask is Photoshop's cached RENDER (mask flags bit 3 'came from rendering other data'), the vector mask times the user mask; beside a vector mask the user mask moves to channel -3 with the real-mask fields; a disabled vector mask gets no render and -2 is the plain user mask; the render excludes vector feather / density, which Photoshop applies live [OBS]"
+    - "Photoshop 27.10 + corpus: a fill/shape layer's (SoCo / GdFl / PtFl / vscg) stored transparency already IS the shape's render (1,603 of 1,783 corpus shape layers match it, 58 more carry strokes outside the path) and its composite applies it once — the vector mask is not applied a second time [OBS]"
+  # DECLINED, with a stated reason: vector masks on GROUPS (category
+  # group-mask, like group user masks), vector feather / density
+  # (mask-parameters), a version other than 3, an unknown operation or
+  # fill rule, records that do not frame (vector-mask). MEASURED GAP:
+  # Photoshop's Bezier flattening is matched on average (its circles are
+  # ~0.02 px small), not chord for chord — curved edge pixels up to ~18
+  # levels, 0.0004 % of corpus mask pixels more than 2 levels off.
+  tests:
+    rust:
+      - "image-psd/src/vector_mask.rs (unit: vector_mask_records_parse_to_canvas_pixels, _flags_and_operations_decode, _continuation_subpaths_join_their_component, _refuses_what_it_cannot_frame)"
+      - "image-js/src/psd_vector_mask.rs (unit: edges_count_samples_on_photoshops_17_by_15_grid, fill_rule_decides_a_self_intersecting_star, components_fold_per_sample_in_order, invert_open_subpaths_and_the_user_mask_product)"
+      - "image-conformance/tests/psd_vector_masks_photoshop.rs (photoshop_vector_masks_import_as_recorded)"
+      - "image-conformance/tests/psd_vector_mask_corpus.rs (opt-in corpus lane: vector_masks_draw_as_photoshops_cached_renders)"
 
 # ── PSD descriptor-family primitives ─────────────────────────────────
 # Neither of these is a top-level PSD *block*; they are the two

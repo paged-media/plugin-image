@@ -732,6 +732,9 @@ impl LayerStack {
             .collect();
         let mut layers = Vec::with_capacity(import.layers.len());
         for (i, plate) in import.layers.iter().enumerate() {
+            // The user and vector masks fold into the layer's one mask
+            // (`psd_vector_mask::plate_mask`).
+            let mask = crate::psd_vector_mask::plate_mask(plate, width, height);
             if plate.rgba.len() != want {
                 return Err(IngestError::Decode(format!(
                     "PSD layer \"{}\" is {} bytes for {width}×{height} (expected {want})",
@@ -756,13 +759,13 @@ impl LayerStack {
                 // A smart object's stored render arrives as pixels: the
                 // source is not rendered here (`smart_renders_agree`).
                 kind: LayerKind::Pixels,
-                mask: plate.mask.as_ref().map(|m| {
+                mask_enabled: mask.as_ref().is_none_or(|m| m.enabled),
+                mask: mask.map(|m| {
                     Arc::new(
-                        SelectionCoverage::from_data(width, height, m.coverage.clone())
+                        SelectionCoverage::from_data(width, height, m.coverage)
                             .expect("a canvas-extent mask"),
                     )
                 }),
-                mask_enabled: plate.mask.as_ref().is_none_or(|m| m.enabled),
                 group: plate.group.map(group_id),
                 clipped: plate.clipped,
             });
@@ -2556,6 +2559,7 @@ pub fn smart_render_agreement(
     };
     let mut out = Vec::new();
     for plate in import.layers.iter().filter(|p| p.smart) {
+        let mask = crate::psd_vector_mask::plate_mask(plate, import.width, import.height);
         let mut footprint = 0usize;
         let mut off = 0usize;
         let mut sum = 0u64;
@@ -2563,7 +2567,7 @@ pub fn smart_render_agreement(
             if px[3] == 0 {
                 continue;
             }
-            if let Some(m) = plate.mask.as_ref().filter(|m| m.enabled) {
+            if let Some(m) = mask.as_ref().filter(|m| m.enabled) {
                 if m.coverage[i] == 0 {
                     continue;
                 }
@@ -3301,6 +3305,7 @@ mod tests {
             clipped: false,
             group: None,
             mask: None,
+            vector_mask: None,
             smart: false,
             name: name.to_string(),
             blend_key: *key,
@@ -3339,6 +3344,7 @@ mod tests {
                 clipped: false,
                 group: None,
                 mask: None,
+                vector_mask: None,
                 smart: false,
                 name: "short".into(),
                 blend_key: *b"norm",

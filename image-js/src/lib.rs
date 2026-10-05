@@ -72,6 +72,7 @@ pub mod layers;
 pub mod mip;
 pub mod paths;
 pub mod pixels;
+pub mod psd_vector_mask;
 pub mod retouch;
 pub mod saveback;
 pub mod selection;
