@@ -80,7 +80,63 @@ pub struct CompositeRgba8 {
 const COMPRESSION_RAW: u16 = 0;
 const COMPRESSION_RLE: u16 = 1;
 
+/// What resource 0x0421 (version info) says about the merged composite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergedData {
+    /// `hasRealMergedData` = 1: the composite is Photoshop's own render.
+    Real,
+    /// `hasRealMergedData` = 0: the composite is a placeholder (the file
+    /// was saved without "maximize compatibility").
+    NotReal,
+    /// No 0x0421 resource at all — nothing vouches for the composite.
+    Absent,
+}
+
+impl MergedData {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergedData::Real => "real",
+            MergedData::NotReal => "flag-false",
+            MergedData::Absent => "no-version-info",
+        }
+    }
+}
+
+/// Version-info resource id (Adobe Photoshop File Format specification,
+/// Image Resource IDs: 0x0421 "Version Info … hasRealMergedData").
+pub const RESOURCE_VERSION_INFO: u16 = 0x0421;
+
 impl PsdFile {
+    /// Read `hasRealMergedData` from the retained 0x0421 block.
+    ///
+    /// The block is kept verbatim (`raw_block`: signature, id, padded
+    /// Pascal name, u32 size, data); the data is `u32 version`, then the
+    /// flag byte.
+    pub fn merged_data(&self) -> MergedData {
+        let Some(block) = self
+            .resources
+            .blocks
+            .iter()
+            .find(|b| b.id == RESOURCE_VERSION_INFO)
+        else {
+            return MergedData::Absent;
+        };
+        let Some(raw) = block.raw_block.as_deref() else {
+            return MergedData::Absent;
+        };
+        // 4 sig + 2 id, then the Pascal name padded to an even total.
+        let Some(&name_len) = raw.get(6) else {
+            return MergedData::Absent;
+        };
+        let name_total = (1 + name_len as usize).next_multiple_of(2);
+        let data_at = 6 + name_total + 4;
+        match raw.get(data_at + 4) {
+            Some(0) => MergedData::NotReal,
+            Some(_) => MergedData::Real,
+            None => MergedData::Absent,
+        }
+    }
+
     /// Decode the merged composite to straight RGBA8. See the module
     /// docs for the supported subset; everything outside it is a clean
     /// [`PsdError::Unsupported`] (never a wrong-looking image).

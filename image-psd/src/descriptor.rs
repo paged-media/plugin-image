@@ -162,13 +162,14 @@ impl std::fmt::Debug for Key {
 
 /// One node of the descriptor value tree.
 ///
-/// Every OSType the Adobe specification lists and that can be framed
-/// from the bytes alone is modelled. The three that cannot —
-/// `obj ` (reference), `ObAr` and `UnFl` — are rejected with a named
-/// error rather than skipped, because a descriptor item is **not**
-/// length-delimited: a reader that cannot decode a value also cannot
-/// find the next one. Spec §4.1 `[OBS]`: none of the three occurred in
-/// ~89,000 descriptor values, so this is a hedge, not a gap in practice.
+/// Every OSType the Adobe specification lists is modelled, plus three it
+/// does not list whose layout was established by observation of PSD
+/// corpus files (`ObAr`, `UnFl`, `Pth `; see `registry/psd-blocks.yaml`).
+/// Anything else is rejected with a named error rather than skipped,
+/// because a descriptor item is **not** length-delimited: a reader that
+/// cannot decode a value also cannot find the next one. None of these
+/// occurred in ~89,000 `.abr` descriptor values; in PSD files they are
+/// common — every smart object with a warp mesh carries an `ObAr`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DescriptorValue {
     /// `Objc` — a nested descriptor.
@@ -203,6 +204,51 @@ pub enum DescriptorValue {
     /// PSD big-endian rule (spec §5.5: the erodible height map is
     /// little-endian float32 inside a `tdta`).
     RawData(Vec<u8>),
+    /// `obj ` — a reference: an ordered list of reference items
+    /// (Adobe specification, "Reference structure").
+    Reference(Vec<RefItem>),
+    /// `ObAr` — an object array: a version word, then a descriptor
+    /// whose items are typically `UnFl` arrays (a warp's mesh points:
+    /// `Hrzn` and `Vrtc`, one value per point). [OBS]
+    ObjectArray(Descriptor),
+    /// `UnFl` — a unit code, a count, then that many 8-byte doubles. [OBS]
+    UnitFloats { unit: [u8; 4], values: Vec<f64> },
+    /// `Pth ` — a length-prefixed opaque path (a file reference written
+    /// by e.g. a Displace smart filter). Kept as bytes. [OBS]
+    Path(Vec<u8>),
+}
+
+/// One item of an `obj ` reference (Adobe specification, "Reference
+/// structure"): the OSType says which form follows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefItem {
+    /// `prop` — class name, class id, property key.
+    Property { name: String, class: Key, key: Key },
+    /// `Clss` — class name, class id.
+    Class { name: String, class: Key },
+    /// `Enmr` — class name, class id, type key, enum value.
+    Enumerated {
+        name: String,
+        class: Key,
+        type_key: Key,
+        value: Key,
+    },
+    /// `rele` — class name, class id, offset.
+    Offset {
+        name: String,
+        class: Key,
+        offset: u32,
+    },
+    /// `Idnt` — an identifier.
+    Identifier(u32),
+    /// `indx` — an index.
+    Index(u32),
+    /// `name` — class name, class id, the name.
+    Name {
+        name: String,
+        class: Key,
+        value: String,
+    },
 }
 
 impl DescriptorValue {
@@ -222,6 +268,10 @@ impl DescriptorValue {
             DescriptorValue::Class { .. } => *b"type",
             DescriptorValue::Alias(_) => *b"alis",
             DescriptorValue::RawData(_) => *b"tdta",
+            DescriptorValue::Reference(_) => *b"obj ",
+            DescriptorValue::ObjectArray(_) => *b"ObAr",
+            DescriptorValue::UnitFloats { .. } => *b"UnFl",
+            DescriptorValue::Path(_) => *b"Pth ",
         }
     }
 
@@ -307,6 +357,22 @@ impl DescriptorValue {
     pub fn as_enum(&self) -> Option<(&Key, &Key)> {
         match self {
             DescriptorValue::Enum { type_key, value } => Some((type_key, value)),
+            _ => None,
+        }
+    }
+
+    /// An `ObAr`'s descriptor.
+    pub fn as_object_array(&self) -> Option<&Descriptor> {
+        match self {
+            DescriptorValue::ObjectArray(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// A `UnFl` array, with its unit code.
+    pub fn as_unit_floats(&self) -> Option<([u8; 4], &[f64])> {
+        match self {
+            DescriptorValue::UnitFloats { unit, values } => Some((*unit, values)),
             _ => None,
         }
     }
@@ -567,12 +633,51 @@ pub fn read_value(r: &mut ByteReader, depth: u32) -> Result<DescriptorValue> {
             let n = r.u32()? as usize;
             Ok(DescriptorValue::RawData(r.take(n)?.to_vec()))
         }
-        // `obj ` (reference), `ObAr` and `UnFl`: their payload layouts
-        // are not established by any source available to this crate, and
-        // a descriptor item is not length-delimited — so an undecodable
-        // value cannot be skipped to reach the next one. Refuse, by name,
-        // rather than guess a layout or desynchronise silently. None of
-        // the three occurred in ~89,000 observed `.abr` values (§4.1).
+        b"obj " => {
+            let count = r.u32()? as usize;
+            // Smallest item: an OSType and a 4-byte payload.
+            if count.saturating_mul(8) > r.remaining() {
+                return Err(malformed(format!(
+                    "reference claims {count} items, more than the {} byte(s) available",
+                    r.remaining()
+                )));
+            }
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(read_ref_item(r)?);
+            }
+            Ok(DescriptorValue::Reference(items))
+        }
+        // [OBS] A version word (16 observed), then a descriptor.
+        b"ObAr" => {
+            let _version = r.u32()?;
+            Ok(DescriptorValue::ObjectArray(read_descriptor(r, depth)?))
+        }
+        // [OBS] A unit code, a count, then the doubles.
+        b"UnFl" => {
+            let unit = r.fourcc()?;
+            let count = r.u32()? as usize;
+            if count.saturating_mul(8) > r.remaining() {
+                return Err(malformed(format!(
+                    "unit-float array claims {count} values, more than the {} byte(s) available",
+                    r.remaining()
+                )));
+            }
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                values.push(f64::from_bits(r.u64()?));
+            }
+            Ok(DescriptorValue::UnitFloats { unit, values })
+        }
+        // [OBS] Length-prefixed, like `alis`.
+        b"Pth " => {
+            let n = r.u32()? as usize;
+            Ok(DescriptorValue::Path(r.take(n)?.to_vec()))
+        }
+        // Anything else: the layout is not established, and a descriptor
+        // item is not length-delimited — so an undecodable value cannot
+        // be skipped to reach the next one. Refuse, by name, rather than
+        // guess a layout or desynchronise silently.
         _ => Err(PsdError::Unsupported(format!(
             "descriptor OSType {:?} at offset {} — layout not established; \
              a descriptor item is not length-delimited, so it cannot be skipped",
@@ -580,6 +685,47 @@ pub fn read_value(r: &mut ByteReader, depth: u32) -> Result<DescriptorValue> {
             r.pos()
         ))),
     }
+}
+
+/// One reference item (Adobe specification, "Reference structure").
+fn read_ref_item(r: &mut ByteReader) -> Result<RefItem> {
+    let form = r.fourcc()?;
+    Ok(match &form {
+        b"prop" => RefItem::Property {
+            name: read_unicode_string(r)?,
+            class: read_key(r)?,
+            key: read_key(r)?,
+        },
+        b"Clss" => RefItem::Class {
+            name: read_unicode_string(r)?,
+            class: read_key(r)?,
+        },
+        b"Enmr" => RefItem::Enumerated {
+            name: read_unicode_string(r)?,
+            class: read_key(r)?,
+            type_key: read_key(r)?,
+            value: read_key(r)?,
+        },
+        b"rele" => RefItem::Offset {
+            name: read_unicode_string(r)?,
+            class: read_key(r)?,
+            offset: r.u32()?,
+        },
+        b"Idnt" => RefItem::Identifier(r.u32()?),
+        b"indx" => RefItem::Index(r.u32()?),
+        b"name" => RefItem::Name {
+            name: read_unicode_string(r)?,
+            class: read_key(r)?,
+            value: read_unicode_string(r)?,
+        },
+        _ => {
+            return Err(PsdError::Unsupported(format!(
+                "reference item form {:?} at offset {} — not in the specification",
+                String::from_utf8_lossy(&form),
+                r.pos()
+            )))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -644,13 +790,68 @@ mod tests {
         assert_eq!(localized_display("$$$/no/equals"), "$$$/no/equals");
     }
 
+    /// The layout observed in corpus smart objects: a warp mesh's
+    /// `meshPoints` (`ObAr` → `rationalPoint` descriptor → `Hrzn`/`Vrtc`
+    /// as `UnFl` arrays in pixels).
+    #[test]
+    fn image_psd_descriptor_object_array_of_unit_floats() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"ObAr");
+        b.extend_from_slice(&16u32.to_be_bytes());
+        b.extend_from_slice(&1u32.to_be_bytes()); // class name: one unit
+        b.extend_from_slice(&0u16.to_be_bytes());
+        b.extend_from_slice(&13u32.to_be_bytes());
+        b.extend_from_slice(b"rationalPoint");
+        b.extend_from_slice(&2u32.to_be_bytes());
+        for key in [b"Hrzn", b"Vrtc"] {
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(key);
+            b.extend_from_slice(b"UnFl#Pxl");
+            b.extend_from_slice(&2u32.to_be_bytes());
+            b.extend_from_slice(&1.5f64.to_bits().to_be_bytes());
+            b.extend_from_slice(&(-2.0f64).to_bits().to_be_bytes());
+        }
+        b.extend_from_slice(b"tail");
+        let mut r = ByteReader::new(&b);
+        let v = read_value(&mut r, 0).unwrap();
+        let d = v.as_object_array().unwrap();
+        assert_eq!(d.class_id.as_bytes(), b"rationalPoint");
+        let (unit, xs) = d.get(b"Vrtc").unwrap().as_unit_floats().unwrap();
+        assert_eq!(&unit, b"#Pxl");
+        assert_eq!(xs, &[1.5, -2.0]);
+        assert_eq!(r.take(4).unwrap(), b"tail", "framed exactly");
+    }
+
+    #[test]
+    fn image_psd_descriptor_reference_items() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"obj ");
+        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(b"Idnt");
+        b.extend_from_slice(&7u32.to_be_bytes());
+        b.extend_from_slice(b"Enmr");
+        b.extend_from_slice(&0u32.to_be_bytes());
+        for k in [b"Lyr ", b"Ordn", b"Trgt"] {
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(k);
+        }
+        let v = read_value(&mut ByteReader::new(&b), 0).unwrap();
+        let DescriptorValue::Reference(items) = v else {
+            panic!()
+        };
+        assert_eq!(items[0], RefItem::Identifier(7));
+        assert!(
+            matches!(&items[1], RefItem::Enumerated { value, .. } if value.as_bytes() == b"Trgt")
+        );
+    }
+
     #[test]
     fn image_psd_descriptor_unsupported_ostype_is_named_not_skipped() {
-        let bytes = *b"obj \x00\x00\x00\x00";
+        let bytes = *b"zzzz\x00\x00\x00\x00";
         let mut r = ByteReader::new(&bytes);
         let err = read_value(&mut r, 0).unwrap_err();
         match err {
-            PsdError::Unsupported(msg) => assert!(msg.contains("obj "), "{msg}"),
+            PsdError::Unsupported(msg) => assert!(msg.contains("zzzz"), "{msg}"),
             other => panic!("expected Unsupported, got {other:?}"),
         }
     }

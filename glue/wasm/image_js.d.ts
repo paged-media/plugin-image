@@ -839,18 +839,21 @@ export function layers_open(handle: number): void;
  * ours would be worse than flattening. On a refusal the caller keeps
  * `layers_open` (the flatten) and shows the reason.
  *
- * The refusal list SHRANK on 2026-08-06: CLIPPING is imported now
- * that the model has it. Still refused: groups (this stack has
- * them, but PSD groups nest and default to pass-through and this
- * one does neither), layer masks, non-8-bit-RGB and an over-budget
- * canvas. A refusal for a capability we since gained is a lie about
- * ourselves, so the list is worth re-reading whenever the model
- * grows.
+ * What is refused is listed in `image_psd::layer_pixels`; a refusal
+ * for a capability we since gained is a lie about ourselves, so the
+ * list is worth re-reading whenever the model grows.
+ *
+ * SMART OBJECTS arrive as their stored render, which can be stale.
+ * Before the stack is bound, a file with smart objects is composited
+ * once and every smart object's footprint is compared with the
+ * image this door is given — the file's merged composite
+ * (`layers::smart_renders_agree`); a disagreement declines the
+ * import and leaves the flatten in place. Async for that reason.
  *
  * `image_handle` must be the composite already ingested from the
  * same file (same extent); `psd_handle` is a `psd_open` handle.
  */
-export function layers_open_from_psd(image_handle: number, psd_handle: number): number;
+export function layers_open_from_psd(image_handle: number, psd_handle: number): Promise<number>;
 
 /**
  * REDO the newest undone pixel edit.
@@ -1326,7 +1329,7 @@ export interface InitOutput {
     readonly layers_make_smart: (a: number) => [number, number];
     readonly layers_mask_from_selection: (a: number) => [number, number];
     readonly layers_open: (a: number) => [number, number];
-    readonly layers_open_from_psd: (a: number, b: number) => [number, number, number];
+    readonly layers_open_from_psd: (a: number, b: number) => any;
     readonly layers_redo: () => any;
     readonly layers_remove: (a: number) => [number, number];
     readonly layers_render_smart: (a: number, b: number) => any;

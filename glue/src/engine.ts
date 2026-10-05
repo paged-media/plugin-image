@@ -1241,11 +1241,14 @@ export interface ImageEngine {
    *  against one handle and never learn what a layer is. */
   layersOpen(handle: number): void;
   /** Open the stack from a retained PSD parse — the file's own layer
-   *  tree instead of its flattened composite. Returns the layer count;
-   *  THROWS with the engine's stated reason for every PSD the layer
-   *  model does not reproduce (groups, clipping, masks, non-8-bit-RGB,
-   *  over budget), and the caller then keeps the flatten. */
-  layersOpenFromPsd(imageHandle: number, psdHandle: number): number;
+   *  tree instead of its flattened composite. Resolves to the layer
+   *  count; REJECTS with the engine's stated reason for every PSD the
+   *  layer model does not reproduce (vector masks, effects, adjustment
+   *  layers, CMYK, over budget, a smart object whose stored render the
+   *  file's own composite does not vouch for), and the caller then keeps
+   *  the flatten. Async: a file with smart objects is composited once to
+   *  check them. */
+  layersOpenFromPsd(imageHandle: number, psdHandle: number): Promise<number>;
   layersClose(): void;
   /** The bound handle, or -1. */
   layersBound(): number;
@@ -1786,7 +1789,7 @@ export interface ImageWasmModule {
   psd_close(handle: number): void;
   abr_presets(bytes: Uint8Array): string;
   layers_open(handle: number): void;
-  layers_open_from_psd(image_handle: number, psd_handle: number): number;
+  layers_open_from_psd(image_handle: number, psd_handle: number): Promise<number>;
   layers_close(): void;
   layers_bound(): number;
   layers_list(): string;

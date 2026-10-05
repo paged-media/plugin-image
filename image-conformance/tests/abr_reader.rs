@@ -204,10 +204,10 @@ fn image_psd_descriptor_unknown_ostype_is_refused_by_name_not_skipped() {
     // A descriptor item is not length-delimited, so a value the reader
     // cannot decode is a value it cannot step over either. Refusing by
     // name beats desynchronising.
-    let d = BDesc::new(k4("null")).item(klong("ref"), BValue::Unknown(*b"obj ", vec![0; 8]));
+    let d = BDesc::new(k4("null")).item(klong("ref"), BValue::Unknown(*b"zzzz", vec![0; 8]));
     let bytes = descriptor_bytes(&d);
     match read_descriptor(&mut ByteReader::new(&bytes), 0).unwrap_err() {
-        PsdError::Unsupported(m) => assert!(m.contains("obj "), "{m}"),
+        PsdError::Unsupported(m) => assert!(m.contains("zzzz"), "{m}"),
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }

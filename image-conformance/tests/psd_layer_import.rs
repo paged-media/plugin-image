@@ -220,3 +220,118 @@ fn image_psd_layer_pixel_import_declines_over_the_memory_budget() {
         "the refusal says what happens instead: {msg}"
     );
 }
+
+// ── smart objects: the stored render, vouched for by the composite ──────
+
+use image_conformance::psd_builder::fixtures::{raster_layer, rgb_planes};
+use image_conformance::psd_builder::PsdBuilder;
+use image_psd::composite::RESOURCE_VERSION_INFO;
+use image_psd::container::Container;
+use image_psd::model::Compression;
+
+/// Resource 0x0421 with `hasRealMergedData` set as given.
+fn version_info(real: bool) -> Vec<u8> {
+    let mut b = 1u32.to_be_bytes().to_vec();
+    b.push(u8::from(real));
+    b.extend_from_slice(&[0, 0, 0, 0]);
+    b
+}
+
+/// A background and, above it, a full-canvas smart object whose stored
+/// render is solid `rgb`. The composite says `composite`.
+fn smart_psd(rgb: [u8; 3], composite: [u8; 3], real: bool) -> Vec<u8> {
+    let (w, h) = (4, 4);
+    PsdBuilder::new(Container::Psd, w, h, 3)
+        .resource_opaque(RESOURCE_VERSION_INFO, version_info(real))
+        .layer(raster_layer(
+            "Background",
+            w,
+            h,
+            [9, 9, 9],
+            Compression::Raw,
+        ))
+        .layer(raster_layer("Placed", w, h, rgb, Compression::Raw))
+        // The payload is never read: the KEY makes it a smart object.
+        .layer_addl_opaque(*b"8BIM", *b"SoLd", b"soLD\0\0\0\x04".to_vec())
+        .composite(Compression::Raw, rgb_planes(w, h, composite))
+        .build()
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn smart_object_imports_as_its_marked_stored_render__feat__image_psd_layer_import() {
+    let import = parse(&smart_psd([200, 10, 10], [200, 10, 10], true))
+        .layer_plates_rgba8()
+        .expect("a smart object no longer refuses the file");
+    let smart: Vec<bool> = import.layers.iter().map(|p| p.smart).collect();
+    assert_eq!(smart, vec![false, true], "only the placed layer is marked");
+    assert_eq!(&import.layers[1].rgba[..4], &[200, 10, 10, 255]);
+}
+
+/// The stored render is accepted only where the file's own composite
+/// agrees with it; a render the composite contradicts is the stale
+/// cache measured on corpus mock-ups, and the import declines.
+#[test]
+#[allow(non_snake_case)]
+fn smart_object_render_must_agree_with_the_composite__feat__image_psd_layer_import() {
+    for (composite, agrees) in [([200, 10, 10], true), ([10, 10, 200], false)] {
+        let file = parse(&smart_psd([200, 10, 10], composite, true));
+        let import = file.layer_plates_rgba8().expect("imports");
+        // The opaque smart object covers the canvas, so it IS the flatten.
+        let ours = import.layers[1].rgba.clone();
+        let theirs = file.composite_rgba8().expect("composite").rgba;
+        let verdict = image_js::layers::smart_renders_agree(&import, &ours, &theirs);
+        match (agrees, verdict) {
+            (true, Ok(n)) => assert_eq!(n, 1),
+            (false, Err(e)) => {
+                let msg = e.to_string();
+                assert!(msg.contains("stale"), "{msg}");
+                assert!(msg.contains("merged composite is kept"), "{msg}");
+            }
+            (want, got) => panic!("agrees={want}: {got:?}"),
+        }
+    }
+}
+
+/// Without real merged data nothing can vouch for a stored render.
+#[test]
+#[allow(non_snake_case)]
+fn smart_object_without_real_merged_data_declines__feat__image_psd_layer_import() {
+    let file = parse(&smart_psd([1, 2, 3], [1, 2, 3], false));
+    let err = file.layer_plates_rgba8().expect_err("nothing vouches");
+    assert!(err.to_string().contains("real merged data"), "{err}");
+    let cats: Vec<&str> = file
+        .layer_import_blockers()
+        .iter()
+        .map(|b| b.category)
+        .collect();
+    assert_eq!(cats, vec!["smart-objects"]);
+}
+
+/// The refusal names the first blocker; the blocker list names them all,
+/// once per layer and category (lfx2 and lrFX describe the same effects).
+#[test]
+#[allow(non_snake_case)]
+fn layer_import_blockers_lists_every_reason__feat__image_psd_layer_import() {
+    let (w, h) = (4, 4);
+    let bytes = PsdBuilder::new(Container::Psd, w, h, 3)
+        .layer(raster_layer("Masked", w, h, [1, 1, 1], Compression::Raw))
+        .layer_addl_opaque(*b"8BIM", *b"vmsk", vec![0; 8])
+        .layer(raster_layer("Shadowed", w, h, [2, 2, 2], Compression::Raw))
+        .layer_addl_opaque(*b"8BIM", *b"lrFX", vec![0; 4])
+        .layer_addl_opaque(*b"8BIM", *b"lfx2", vec![0; 8])
+        .composite(Compression::Raw, rgb_planes(w, h, [0, 0, 0]))
+        .build();
+    let file = parse(&bytes);
+    let cats: Vec<&str> = file
+        .layer_import_blockers()
+        .iter()
+        .map(|b| b.category)
+        .collect();
+    assert_eq!(cats, vec!["vector-mask", "effects"]);
+    let err = file.layer_plates_rgba8().expect_err("blocked");
+    assert!(
+        err.to_string().contains("VECTOR MASK"),
+        "the first one: {err}"
+    );
+}

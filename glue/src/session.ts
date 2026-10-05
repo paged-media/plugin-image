@@ -1444,8 +1444,8 @@ export function createImageSession(host: BundleHost): ImageSession {
    *  layer tree instead of its merged composite.
    *
    *  The engine DECLINES for every PSD whose structure the layer model
-   *  does not reproduce (groups, clipping, masks, non-8-bit-RGB, over
-   *  budget). That refusal is not a failure: it is the correct answer,
+   *  does not reproduce, and for smart objects whose stored render the
+   *  file's composite does not vouch for. That refusal is not a failure: it is the correct answer,
    *  because a layered open replaces Photoshop's OWN composite with
    *  ours. Either way `state.layersNote` says what happened, so the
    *  flatten is never silent. */
@@ -1453,7 +1453,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     state.layersNote = null;
     if (!engine || !state.source || psdHandle === null) return;
     try {
-      const n = engine.layersOpenFromPsd(state.source.handle, psdHandle);
+      const n = await engine.layersOpenFromPsd(state.source.handle, psdHandle);
       // Our composite of the layer tree, not the file's merged one.
       await engine.layersComposite();
       state.layersNote = `Opened the PSD's own ${n} layer${n === 1 ? "" : "s"}.`;

@@ -104,6 +104,12 @@ struct Row {
     outcome: &'static str,
     reason: Option<(String, String)>,
     diff: Option<CompositeDiff>,
+    /// EVERY blocker's category, deduplicated, in file order — the
+    /// refusal names only the first; this says how far the file is.
+    blockers: Vec<&'static str>,
+    /// Smart objects checked against the composite: (count, worst % of a
+    /// footprint off, worst mean levels).
+    smart: Option<(usize, f64, f64)>,
 }
 
 /// Reduce an engine refusal to a stable category, and drop anything
@@ -171,6 +177,16 @@ fn evaluate(bytes: &[u8], ctx: &image_gpu::GpuContext) -> Result<Row, String> {
         outcome: "no-merged-data",
         reason: None,
         diff: None,
+        blockers: {
+            let mut b: Vec<&'static str> = Vec::new();
+            for x in psd.layer_import_blockers() {
+                if !b.contains(&x.category) {
+                    b.push(x.category);
+                }
+            }
+            b
+        },
+        smart: None,
     };
     if merged != MergedData::Real {
         return Ok(row);
@@ -197,7 +213,6 @@ fn evaluate(bytes: &[u8], ctx: &image_gpu::GpuContext) -> Result<Row, String> {
             return Ok(row);
         }
     };
-    drop(import);
     let ours = match pollster::block_on(stack.composite(Some(ctx), None)) {
         Ok(px) => px,
         Err(e) => {
@@ -205,6 +220,27 @@ fn evaluate(bytes: &[u8], ctx: &image_gpu::GpuContext) -> Result<Row, String> {
             return Ok(row);
         }
     };
+    // The shipping gate: every smart object's stored render must agree
+    // with the composite inside its own footprint.
+    let checked = image_js::layers::smart_render_agreement(&import, &ours, &theirs.rgba);
+    if !checked.is_empty() {
+        for a in &checked {
+            println!(
+                "    smart footprint {:>9} px  off {:>6.2}%  mean {:>6.2}",
+                a.footprint, a.pct_off, a.mean
+            );
+        }
+        row.smart = Some((
+            checked.len(),
+            checked.iter().map(|a| a.pct_off).fold(0.0, f64::max),
+            checked.iter().map(|a| a.mean).fold(0.0, f64::max),
+        ));
+    }
+    if let Err(e) = image_js::layers::smart_renders_agree(&import, &ours, &theirs.rgba) {
+        row.reason = Some(categorize(&e.to_string()));
+        return Ok(row);
+    }
+    drop(import);
     // The decoder un-mattes a transparent document's merged composite,
     // so both sides are straight colour.
     let reference = Reference::Straight;
@@ -267,7 +303,11 @@ fn ledger_json(rows: &BTreeMap<String, Row>) -> String {
     let mut by_outcome: BTreeMap<&str, u64> = BTreeMap::new();
     let mut by_reason: BTreeMap<String, u64> = BTreeMap::new();
     let mut by_merged: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut by_blocker: BTreeMap<String, u64> = BTreeMap::new();
     for r in rows.values() {
+        for b in &r.blockers {
+            *by_blocker.entry(b.to_string()).or_default() += 1;
+        }
         *by_outcome.entry(r.outcome).or_default() += 1;
         *by_merged.entry(r.merged.as_str()).or_default() += 1;
         if let Some((cat, _)) = &r.reason {
@@ -305,6 +345,11 @@ fn ledger_json(rows: &BTreeMap<String, Row>) -> String {
         "  \"refusals\": {{{}}},",
         obj(by_reason.into_iter().collect())
     );
+    let _ = writeln!(
+        s,
+        "  \"blockers\": {{{}}},",
+        obj(by_blocker.into_iter().collect())
+    );
     s.push_str("  \"rows\": {\n");
     let n = rows.len();
     for (i, (sha, r)) in rows.iter().enumerate() {
@@ -319,9 +364,25 @@ fn ledger_json(rows: &BTreeMap<String, Row>) -> String {
             Some(d) => format!(", \"diff\": {}", diff_json(d)),
             None => String::new(),
         };
+        let blockers = format!(
+            ", \"blockers\": [{}]",
+            r.blockers
+                .iter()
+                .map(|b| format!("\"{b}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let smart = match r.smart {
+            Some((n, pct, mean)) => format!(
+                ", \"smart\": {{\"checked\": {n}, \"worst_pct_off\": {}, \"worst_mean\": {}}}",
+                num(pct),
+                num(mean)
+            ),
+            None => String::new(),
+        };
         let _ = write!(
             s,
-            "    \"{sha}\": {{\"outcome\": \"{}\", \"merged_data\": \"{}\", \"width\": {}, \"height\": {}, \"features\": {}{reason}{diff}}}",
+            "    \"{sha}\": {{\"outcome\": \"{}\", \"merged_data\": \"{}\", \"width\": {}, \"height\": {}, \"features\": {}{blockers}{smart}{reason}{diff}}}",
             r.outcome,
             r.merged.as_str(),
             r.width,

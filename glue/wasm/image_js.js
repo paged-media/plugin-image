@@ -1832,26 +1832,26 @@ export function layers_open(handle) {
  * ours would be worse than flattening. On a refusal the caller keeps
  * `layers_open` (the flatten) and shows the reason.
  *
- * The refusal list SHRANK on 2026-08-06: CLIPPING is imported now
- * that the model has it. Still refused: groups (this stack has
- * them, but PSD groups nest and default to pass-through and this
- * one does neither), layer masks, non-8-bit-RGB and an over-budget
- * canvas. A refusal for a capability we since gained is a lie about
- * ourselves, so the list is worth re-reading whenever the model
- * grows.
+ * What is refused is listed in `image_psd::layer_pixels`; a refusal
+ * for a capability we since gained is a lie about ourselves, so the
+ * list is worth re-reading whenever the model grows.
+ *
+ * SMART OBJECTS arrive as their stored render, which can be stale.
+ * Before the stack is bound, a file with smart objects is composited
+ * once and every smart object's footprint is compared with the
+ * image this door is given — the file's merged composite
+ * (`layers::smart_renders_agree`); a disagreement declines the
+ * import and leaves the flatten in place. Async for that reason.
  *
  * `image_handle` must be the composite already ingested from the
  * same file (same extent); `psd_handle` is a `psd_open` handle.
  * @param {number} image_handle
  * @param {number} psd_handle
- * @returns {number}
+ * @returns {Promise<number>}
  */
 export function layers_open_from_psd(image_handle, psd_handle) {
     const ret = wasm.layers_open_from_psd(image_handle, psd_handle);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return ret[0] >>> 0;
+    return ret;
 }
 
 /**
@@ -3416,12 +3416,12 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, getArrayU8FromWasm0(arg2, arg3), arg4, arg5);
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 795, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 804, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h29982c8643b1dde7);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 811, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 820, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h04599f72514a41ad);
             return ret;
         },

@@ -56,10 +56,8 @@
 //!   **density/feather parameters**, or a layer with both a user and a
 //!   "real" mask (channel −3) — none of these is modelled;
 //! * **layer effects** (`lfx2` / `lrFX`), **adjustment layers** (their
-//!   pixels are not stored; the adjustment is), **smart objects** (their
-//!   stored pixels are a cache of the embedded source and can be stale)
-//!   and **artboards** — importing them as plain pixel layers would draw
-//!   something else;
+//!   pixels are not stored; the adjustment is) and **artboards** —
+//!   importing them as plain pixel layers would draw something else;
 //! * **fill opacity** below 100 % on one of Photoshop's eight special
 //!   blend modes (where fill and layer opacity differ), or on a group;
 //! * **a budget overrun** — plates are CANVAS-EXTENT (the layer model's
@@ -73,12 +71,29 @@
 //! CLIPPING (the record's clipping byte); GROUPS — the bounding divider
 //! below a group's members and the folder record above them, with the
 //! folder's name, blend (`pass` = pass-through), opacity and visibility,
-//! nested; and LAYER MASKS (channel −2: the mask rectangle, the default
-//! colour outside it, the disabled and invert flags).
+//! nested; LAYER MASKS (channel −2: the mask rectangle, the default
+//! colour outside it, the disabled and invert flags); and SMART OBJECTS
+//! as their stored render ([`LayerPlate::smart`]).
+//!
+//! # Smart objects: the stored render, vouched for by the composite
+//!
+//! A smart object's layer pixels are Photoshop's render of its embedded
+//! source, and a render can be stale: on corpus mock-ups the cache held
+//! a replaced design while Photoshop, opening the file, showed the new
+//! one. This module cannot tell a current cache from a stale one — it
+//! does not render sources — so it imports the stored render and MARKS
+//! it, and the consumer must check each marked plate against the file's
+//! own merged composite before accepting the import (`image-js`'s
+//! `smart_renders_agree`). A cache the composite agrees with is what
+//! Photoshop drew when it saved the file; one it disagrees with declines
+//! the whole import. Without real merged data (resource 0x0421) nothing
+//! can vouch for a cache, so such a file declines here.
 //!
 //! Every refusal is a typed [`PsdError::Unsupported`] carrying the
 //! reason, which the panel shows verbatim. "It flattened and did not say
-//! why" is the failure mode this exists to avoid.
+//! why" is the failure mode this exists to avoid. The refusal names the
+//! FIRST blocker; [`PsdFile::layer_import_blockers`] lists all of them,
+//! which is what tells you how far a file is from importing.
 //!
 //! Provenance: Adobe Photoshop File Format specification — Layer
 //! Records (bounds, blend-mode key, opacity, flags), Channel Image Data
@@ -87,6 +102,7 @@
 //! flags), Additional Layer Information (`lsct` section dividers, `luni`
 //! names, `vmsk`/`vsms` vector masks).
 
+use crate::composite::MergedData;
 use crate::model::ColorMode;
 use crate::model::{LayerRecord, PsdFile, SectionKind};
 use crate::{PsdError, Result};
@@ -122,6 +138,21 @@ pub struct LayerPlate {
     pub group: Option<usize>,
     /// The layer's user mask, canvas-extent.
     pub mask: Option<MaskPlate>,
+    /// The plate is a SMART OBJECT's stored render (`SoLd`/`PlLd`/`SoLE`),
+    /// not pixels of its own. The import is only sound once the consumer
+    /// has checked these plates against the merged composite (module
+    /// docs).
+    pub smart: bool,
+}
+
+/// One reason a file cannot be imported as layers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportBlocker {
+    /// A stable category (`colour-mode`, `vector-mask`, `effects`, …) —
+    /// the ledger key.
+    pub category: &'static str,
+    /// The sentence the panel shows.
+    pub message: String,
 }
 
 /// A layer mask as the stack takes it: one coverage byte per canvas
@@ -167,13 +198,6 @@ pub struct LayerImport {
 /// Additional-layer-info keys whose content the import does not model,
 /// each with what it is. A record carrying one is refused.
 const UNMODELLED: &[(&[u8; 4], &str)] = &[
-    // A smart object renders from its embedded source, and the layer's
-    // stored pixels are only a cache of it — measured stale on corpus
-    // mock-ups (a replaced design still in the cache, Photoshop showing
-    // the new one).
-    (b"PlLd", "a smart object"),
-    (b"SoLd", "a smart object"),
-    (b"SoLE", "a smart object"),
     (b"lfx2", "layer effects"),
     (b"lrFX", "layer effects"),
     (b"artb", "an artboard"),
@@ -200,6 +224,29 @@ const UNMODELLED: &[(&[u8; 4], &str)] = &[
 
 /// Photoshop's eight special blend modes, where fill opacity is applied
 /// inside the blend rather than as a fade (so it is not layer opacity).
+/// The keys that make a layer a smart object.
+const SMART_KEYS: &[&[u8; 4]] = &[b"SoLd", b"PlLd", b"SoLE"];
+
+/// The ledger category of an [`UNMODELLED`] entry.
+fn unmodelled_category(what: &str) -> &'static str {
+    if what.contains("effects") {
+        "effects"
+    } else if what.contains("artboard") {
+        "artboards"
+    } else {
+        "adjustment-layers"
+    }
+}
+
+/// The structural walk: the group tree, the pixel layers, and every
+/// blocker found on the way.
+struct Walk<'a> {
+    pixel_layers: Vec<(&'a LayerRecord, Option<usize>)>,
+    groups: Vec<GroupPlate>,
+    masked: usize,
+    blockers: Vec<ImportBlocker>,
+}
+
 const SPECIAL_FILL_MODES: &[&[u8; 4]] = &[
     b"idiv", b"lbrn", b"div ", b"lddg", b"vLit", b"lLit", b"hMix", b"diff",
 ];
@@ -210,6 +257,14 @@ fn addl_payload(a: &crate::model::AdditionalLayerInfo) -> &[u8] {
         .as_deref()
         .and_then(|b| b.get(12..))
         .unwrap_or(&[])
+}
+
+/// Is the record a smart object (its pixels a stored render)?
+fn is_smart(layer: &LayerRecord) -> bool {
+    layer
+        .addl
+        .iter()
+        .any(|a| SMART_KEYS.contains(&&a.key))
 }
 
 /// The record's fill opacity (`iOpa`), 255 when absent.
@@ -233,24 +288,14 @@ impl PsdFile {
     /// of files this declines (and why declining is the right answer).
     pub fn layer_plates_rgba8(&self) -> Result<LayerImport> {
         let h = &self.header;
-        // 16-bit is ACCEPTED and reduced, as the merged composite already
-        // is. The per-channel decode refuses 16-bit RLE on its own, with
-        // its own evidence, so a 16-bit RLE file still declines — but a
-        // 16-bit RAW one now imports its LAYERS instead of the whole file
-        // falling back to a flattened composite. The refusal that used to
-        // live here was broader than the actual limitation.
-        if h.depth != 8 && h.depth != 16 {
-            return Err(PsdError::Unsupported(format!(
-                "layer import at depth {} (8- and 16-bit only; 1-bit and 32-bit \
-                 float are separate lanes)",
-                h.depth
-            )));
-        }
-        if h.color_mode != ColorMode::Rgb {
-            return Err(PsdError::Unsupported(format!(
-                "layer import for color mode {:?} (RGB only; CMYK/Lab are the M2 CMS lane)",
-                h.color_mode
-            )));
+        let Walk {
+            pixel_layers,
+            groups,
+            masked,
+            blockers,
+        } = self.import_walk()?;
+        if let Some(first) = blockers.into_iter().next() {
+            return Err(PsdError::Unsupported(first.message));
         }
         let (cw, ch) = (h.width, h.height);
         let canvas_texels = (cw as usize)
@@ -259,131 +304,6 @@ impl PsdFile {
         let plate_bytes = canvas_texels
             .checked_mul(4)
             .ok_or_else(|| PsdError::Unsupported("canvas extent overflows usize".into()))?;
-
-        // Structural gate FIRST: refuse before decoding a single byte.
-        // Groups: records run bottom-first, so a group's BOUNDING DIVIDER
-        // comes before its members and its FOLDER record after them.
-        let mut pixel_layers = Vec::new();
-        let mut groups: Vec<GroupPlate> = Vec::new();
-        let mut open: Vec<usize> = Vec::new();
-        let mut masked = 0usize;
-        for layer in &self.layer_mask.layers {
-            let kind = layer.addl.iter().find_map(|a| a.lsct()).map(|d| d.kind);
-            if layer
-                .addl
-                .iter()
-                .any(|a| &a.key == b"vmsk" || &a.key == b"vsms")
-            {
-                return Err(PsdError::Unsupported(format!(
-                    "layer import of a PSD with a VECTOR MASK (\"{}\"): vector masks \
-                     are not modelled, so the merged composite is kept instead",
-                    layer.name()
-                )));
-            }
-            if let Some((_, what)) = UNMODELLED
-                .iter()
-                .find(|(key, _)| layer.addl.iter().any(|a| &a.key == *key))
-            {
-                return Err(PsdError::Unsupported(format!(
-                    "layer import of a PSD with {what} (\"{}\"): not modelled, so the \
-                     merged composite is kept instead",
-                    layer.name()
-                )));
-            }
-            let fill = fill_opacity(layer);
-            if fill < 255 && SPECIAL_FILL_MODES.contains(&&layer.blend_key) {
-                return Err(PsdError::Unsupported(format!(
-                    "layer import of FILL OPACITY on a special blend mode (\"{}\"): there \
-                     fill is not layer opacity, so the merged composite is kept instead",
-                    layer.name()
-                )));
-            }
-            let has_mask = layer.channels.iter().any(|c| c.id == USER_MASK);
-            match kind {
-                Some(SectionKind::BoundingDivider) => {
-                    groups.push(GroupPlate {
-                        name: String::new(),
-                        blend_key: *b"pass",
-                        opacity: 255,
-                        hidden: false,
-                        parent: open.last().copied(),
-                    });
-                    open.push(groups.len() - 1);
-                    continue;
-                }
-                Some(SectionKind::OpenFolder) | Some(SectionKind::ClosedFolder) => {
-                    let Some(g) = open.pop() else {
-                        return Err(PsdError::Malformed {
-                            section: "layer records",
-                            detail: format!(
-                                "group \"{}\" has no bounding divider below it",
-                                layer.name()
-                            ),
-                        });
-                    };
-                    if fill < 255 {
-                        return Err(PsdError::Unsupported(format!(
-                            "layer import of FILL OPACITY on a group (\"{}\"): not \
-                             modelled, so the merged composite is kept instead",
-                            layer.name()
-                        )));
-                    }
-                    if has_mask {
-                        return Err(PsdError::Unsupported(format!(
-                            "layer import of a GROUP with a mask (\"{}\"): group masks \
-                             are not modelled, so the merged composite is kept instead",
-                            layer.name()
-                        )));
-                    }
-                    let lsct_blend = layer
-                        .addl
-                        .iter()
-                        .find_map(|a| a.lsct())
-                        .and_then(|d| d.blend_key);
-                    groups[g] = GroupPlate {
-                        name: layer.name(),
-                        blend_key: lsct_blend.unwrap_or(layer.blend_key),
-                        opacity: layer.opacity,
-                        hidden: (layer.flags & 0x02) != 0,
-                        parent: groups[g].parent,
-                    };
-                    continue;
-                }
-                _ => {}
-            }
-            if layer.channels.iter().any(|c| c.id == REAL_USER_MASK) {
-                return Err(PsdError::Unsupported(format!(
-                    "layer import of a layer with both a user and a vector-derived \
-                     mask (\"{}\"): not modelled, so the merged composite is kept \
-                     instead",
-                    layer.name()
-                )));
-            }
-            if has_mask {
-                if layer.mask.as_ref().is_some_and(|m| m.flags & 0x10 != 0) {
-                    return Err(PsdError::Unsupported(format!(
-                        "layer import of a mask with density/feather parameters \
-                         (\"{}\"): not modelled, so the merged composite is kept instead",
-                        layer.name()
-                    )));
-                }
-                masked += 1;
-            }
-            pixel_layers.push((layer, open.last().copied()));
-        }
-        if !open.is_empty() {
-            return Err(PsdError::Malformed {
-                section: "layer records",
-                detail: format!("{} group(s) never closed by a folder record", open.len()),
-            });
-        }
-        if pixel_layers.is_empty() {
-            return Err(PsdError::Unsupported(
-                "layer import of a PSD with no layer records (the merged composite is \
-                 all there is)"
-                    .into(),
-            ));
-        }
         let total = plate_bytes
             .saturating_mul(pixel_layers.len())
             .saturating_add(canvas_texels.saturating_mul(masked));
@@ -413,6 +333,7 @@ impl PsdFile {
                 rgba: self.layer_canvas_rgba8(layer, cw, ch)?,
                 group,
                 mask: self.layer_mask_plate(layer, cw, ch)?,
+                smart: is_smart(layer),
             });
         }
         Ok(LayerImport {
@@ -421,6 +342,220 @@ impl PsdFile {
             depth_reduced: h.depth == 16,
             layers,
             groups,
+        })
+    }
+
+    /// EVERY reason this file cannot be imported as layers, in file
+    /// order (file-level ones first). Empty means the structure is
+    /// importable; the budget is not checked here. A malformed layer
+    /// tree is one blocker, `malformed`.
+    pub fn layer_import_blockers(&self) -> Vec<ImportBlocker> {
+        match self.import_walk() {
+            Ok(w) => w.blockers,
+            Err(e) => vec![ImportBlocker {
+                category: "malformed",
+                message: e.to_string(),
+            }],
+        }
+    }
+
+    /// Structural gate: refuse before decoding a single byte. Records
+    /// run bottom-first, so a group's BOUNDING DIVIDER comes before its
+    /// members and its FOLDER record after them.
+    fn import_walk(&self) -> Result<Walk<'_>> {
+        let h = &self.header;
+        let mut blockers = Vec::new();
+        let mut block = |category: &'static str, message: String| {
+            blockers.push(ImportBlocker { category, message });
+        };
+        // 16-bit is ACCEPTED and reduced, as the merged composite already
+        // is. The per-channel decode refuses 16-bit RLE on its own, with
+        // its own evidence, so a 16-bit RLE file still declines — but a
+        // 16-bit RAW one imports its LAYERS instead of the whole file
+        // falling back to a flattened composite.
+        if h.depth != 8 && h.depth != 16 {
+            block(
+                "depth",
+                format!(
+                    "layer import at depth {} (8- and 16-bit only; 1-bit and 32-bit \
+                     float are separate lanes)",
+                    h.depth
+                ),
+            );
+        }
+        if h.color_mode != ColorMode::Rgb {
+            block(
+                "colour-mode",
+                format!(
+                    "layer import for color mode {:?} (RGB only; CMYK/Lab are the M2 CMS lane)",
+                    h.color_mode
+                ),
+            );
+        }
+        let mut pixel_layers = Vec::new();
+        let mut groups: Vec<GroupPlate> = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        let mut masked = 0usize;
+        let mut smart = false;
+        for layer in &self.layer_mask.layers {
+            let kind = layer.addl.iter().find_map(|a| a.lsct()).map(|d| d.kind);
+            if layer
+                .addl
+                .iter()
+                .any(|a| &a.key == b"vmsk" || &a.key == b"vsms")
+            {
+                block(
+                    "vector-mask",
+                    format!(
+                        "layer import of a PSD with a VECTOR MASK (\"{}\"): vector masks \
+                         are not modelled, so the merged composite is kept instead",
+                        layer.name()
+                    ),
+                );
+            }
+            for (_, what) in UNMODELLED
+                .iter()
+                .filter(|(key, _)| layer.addl.iter().any(|a| &a.key == *key))
+            {
+                block(
+                    unmodelled_category(what),
+                    format!(
+                        "layer import of a PSD with {what} (\"{}\"): not modelled, so the \
+                         merged composite is kept instead",
+                        layer.name()
+                    ),
+                );
+            }
+            let fill = fill_opacity(layer);
+            if fill < 255 && SPECIAL_FILL_MODES.contains(&&layer.blend_key) {
+                block(
+                    "fill-opacity",
+                    format!(
+                        "layer import of FILL OPACITY on a special blend mode (\"{}\"): there \
+                         fill is not layer opacity, so the merged composite is kept instead",
+                        layer.name()
+                    ),
+                );
+            }
+            let has_mask = layer.channels.iter().any(|c| c.id == USER_MASK);
+            match kind {
+                Some(SectionKind::BoundingDivider) => {
+                    groups.push(GroupPlate {
+                        name: String::new(),
+                        blend_key: *b"pass",
+                        opacity: 255,
+                        hidden: false,
+                        parent: open.last().copied(),
+                    });
+                    open.push(groups.len() - 1);
+                    continue;
+                }
+                Some(SectionKind::OpenFolder) | Some(SectionKind::ClosedFolder) => {
+                    let Some(g) = open.pop() else {
+                        return Err(PsdError::Malformed {
+                            section: "layer records",
+                            detail: format!(
+                                "group \"{}\" has no bounding divider below it",
+                                layer.name()
+                            ),
+                        });
+                    };
+                    if fill < 255 {
+                        block(
+                            "fill-opacity",
+                            format!(
+                                "layer import of FILL OPACITY on a group (\"{}\"): not \
+                                 modelled, so the merged composite is kept instead",
+                                layer.name()
+                            ),
+                        );
+                    }
+                    if has_mask {
+                        block(
+                            "group-mask",
+                            format!(
+                                "layer import of a GROUP with a mask (\"{}\"): group masks \
+                                 are not modelled, so the merged composite is kept instead",
+                                layer.name()
+                            ),
+                        );
+                    }
+                    let lsct_blend = layer
+                        .addl
+                        .iter()
+                        .find_map(|a| a.lsct())
+                        .and_then(|d| d.blend_key);
+                    groups[g] = GroupPlate {
+                        name: layer.name(),
+                        blend_key: lsct_blend.unwrap_or(layer.blend_key),
+                        opacity: layer.opacity,
+                        hidden: (layer.flags & 0x02) != 0,
+                        parent: groups[g].parent,
+                    };
+                    continue;
+                }
+                _ => {}
+            }
+            if layer.channels.iter().any(|c| c.id == REAL_USER_MASK) {
+                block(
+                    "vector-mask",
+                    format!(
+                        "layer import of a layer with both a user and a vector-derived \
+                         mask (\"{}\"): not modelled, so the merged composite is kept \
+                         instead",
+                        layer.name()
+                    ),
+                );
+            }
+            if has_mask {
+                if layer.mask.as_ref().is_some_and(|m| m.flags & 0x10 != 0) {
+                    block(
+                        "mask-parameters",
+                        format!(
+                            "layer import of a mask with density/feather parameters \
+                             (\"{}\"): not modelled, so the merged composite is kept instead",
+                            layer.name()
+                        ),
+                    );
+                }
+                masked += 1;
+            }
+            smart |= is_smart(layer);
+            pixel_layers.push((layer, open.last().copied()));
+        }
+        if !open.is_empty() {
+            return Err(PsdError::Malformed {
+                section: "layer records",
+                detail: format!("{} group(s) never closed by a folder record", open.len()),
+            });
+        }
+        if pixel_layers.is_empty() {
+            block(
+                "no-layers",
+                "layer import of a PSD with no layer records (the merged composite is \
+                 all there is)"
+                    .into(),
+            );
+        }
+        if smart && self.merged_data() != MergedData::Real {
+            block(
+                "smart-objects",
+                format!(
+                    "layer import of a PSD with smart objects but without real merged data \
+                     ({}): a smart object's stored render can be stale, and only the \
+                     file's own composite can vouch for it",
+                    self.merged_data().as_str()
+                ),
+            );
+        }
+        // lfx2 and lrFX usually describe the SAME effects: one blocker
+        // per layer and category is the honest count.
+        blockers.dedup();
+        Ok(Walk {
+            pixel_layers,
+            groups,
+            masked,
+            blockers,
         })
     }
 

@@ -124,7 +124,7 @@ pub struct FixtureManifest {
 }
 
 /// Three solid RGB planes (composite channels) of the given dims.
-fn rgb_planes(w: u32, h: u32, rgb: [u8; 3]) -> Vec<Plane> {
+pub fn rgb_planes(w: u32, h: u32, rgb: [u8; 3]) -> Vec<Plane> {
     rgb.iter().map(|&v| Plane::solid(w, h, v)).collect()
 }
 
@@ -142,7 +142,7 @@ fn rgb_channels(w: u32, h: u32, rgb: [u8; 3], comp: Compression) -> Vec<ChannelS
 }
 
 /// A plain raster [`LayerSpec`] (no mask, no extra addl) covering 0,0..w,h.
-fn raster_layer(name: &str, w: u32, h: u32, rgb: [u8; 3], comp: Compression) -> LayerSpec {
+pub fn raster_layer(name: &str, w: u32, h: u32, rgb: [u8; 3], comp: Compression) -> LayerSpec {
     LayerSpec {
         top: 0,
         left: 0,

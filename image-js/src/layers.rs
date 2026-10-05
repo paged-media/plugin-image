@@ -753,6 +753,8 @@ impl LayerStack {
                 rgba: crate::pixels::Pixels::from_rgba8(Arc::from(
                     plate.rgba.clone().into_boxed_slice(),
                 )),
+                // A smart object's stored render arrives as pixels: the
+                // source is not rendered here (`smart_renders_agree`).
                 kind: LayerKind::Pixels,
                 mask: plate.mask.as_ref().map(|m| {
                     Arc::new(
@@ -2512,6 +2514,105 @@ async fn unpremultiply(
     .await
 }
 
+/// Levels (over white) beyond which a pixel of a smart object's
+/// footprint counts as DISAGREEING with the merged composite.
+pub const SMART_RENDER_LEVELS: u8 = 8;
+
+/// The share of a smart object's visible footprint, in percent, that may
+/// disagree before its stored render is judged stale.
+pub const SMART_RENDER_MAX_PCT: f64 = 1.0;
+
+/// How one smart object's stored render compares with the composite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SmartRenderAgreement {
+    pub name: String,
+    /// Pixels where the plate has coverage.
+    pub footprint: usize,
+    /// Percent of the footprint more than [`SMART_RENDER_LEVELS`] off.
+    pub pct_off: f64,
+    /// Mean absolute difference over the footprint, in levels.
+    pub mean: f64,
+}
+
+/// Measure every smart-object plate of `import` against the file's
+/// merged composite: `ours` is the stack's flatten of the same import,
+/// `theirs` Photoshop's composite (both straight RGBA8, compared over
+/// white). Only the plate's own footprint is read — where its pixels and
+/// its enabled mask have coverage — so a disagreement elsewhere in the
+/// file is not blamed on it.
+///
+/// What it can and cannot see: a stale render that SHOWS differs from
+/// the composite and is caught; a smart object that is hidden or wholly
+/// covered by the layers above it agrees vacuously, which is also what
+/// Photoshop shows until the user reveals it.
+pub fn smart_render_agreement(
+    import: &image_psd::LayerImport,
+    ours: &[u8],
+    theirs: &[u8],
+) -> Vec<SmartRenderAgreement> {
+    let over_white = |p: &[u8], c: usize| -> i32 {
+        let a = u32::from(p[3]);
+        ((u32::from(p[c]) * a + 255 * (255 - a) + 127) / 255) as i32
+    };
+    let mut out = Vec::new();
+    for plate in import.layers.iter().filter(|p| p.smart) {
+        let mut footprint = 0usize;
+        let mut off = 0usize;
+        let mut sum = 0u64;
+        for (i, px) in plate.rgba.chunks_exact(4).enumerate() {
+            if px[3] == 0 {
+                continue;
+            }
+            if let Some(m) = plate.mask.as_ref().filter(|m| m.enabled) {
+                if m.coverage[i] == 0 {
+                    continue;
+                }
+            }
+            let (Some(a), Some(b)) = (ours.get(i * 4..i * 4 + 4), theirs.get(i * 4..i * 4 + 4))
+            else {
+                continue;
+            };
+            footprint += 1;
+            let d = (0..3)
+                .map(|c| (over_white(a, c) - over_white(b, c)).unsigned_abs())
+                .max()
+                .unwrap_or(0);
+            sum += u64::from(d);
+            if d > u32::from(SMART_RENDER_LEVELS) {
+                off += 1;
+            }
+        }
+        let n = footprint.max(1) as f64;
+        out.push(SmartRenderAgreement {
+            name: plate.name.clone(),
+            footprint,
+            pct_off: 100.0 * off as f64 / n,
+            mean: sum as f64 / n,
+        });
+    }
+    out
+}
+
+/// The verdict: `Err` names the first smart object whose stored render
+/// the composite does not vouch for.
+pub fn smart_renders_agree(
+    import: &image_psd::LayerImport,
+    ours: &[u8],
+    theirs: &[u8],
+) -> Result<usize, IngestError> {
+    let checked = smart_render_agreement(import, ours, theirs);
+    if let Some(bad) = checked.iter().find(|a| a.pct_off > SMART_RENDER_MAX_PCT) {
+        return Err(IngestError::Unsupported(format!(
+            "layer import of a PSD whose smart object \"{}\" disagrees with the file's own \
+             composite ({:.1}% of its pixels more than {SMART_RENDER_LEVELS} levels off): its \
+             stored render is stale, and rendering the embedded source is not modelled, so \
+             the merged composite is kept instead",
+            bad.name, bad.pct_off
+        )));
+    }
+    Ok(checked.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3200,6 +3301,7 @@ mod tests {
             clipped: false,
             group: None,
             mask: None,
+            smart: false,
             name: name.to_string(),
             blend_key: *key,
             opacity,
@@ -3237,6 +3339,7 @@ mod tests {
                 clipped: false,
                 group: None,
                 mask: None,
+                smart: false,
                 name: "short".into(),
                 blend_key: *b"norm",
                 opacity: 255,

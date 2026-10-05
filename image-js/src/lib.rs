@@ -2911,18 +2911,24 @@ mod wasm {
     /// ours would be worse than flattening. On a refusal the caller keeps
     /// `layers_open` (the flatten) and shows the reason.
     ///
-    /// The refusal list SHRANK on 2026-08-06: CLIPPING is imported now
-    /// that the model has it. Still refused: groups (this stack has
-    /// them, but PSD groups nest and default to pass-through and this
-    /// one does neither), layer masks, non-8-bit-RGB and an over-budget
-    /// canvas. A refusal for a capability we since gained is a lie about
-    /// ourselves, so the list is worth re-reading whenever the model
-    /// grows.
+    /// What is refused is listed in `image_psd::layer_pixels`; a refusal
+    /// for a capability we since gained is a lie about ourselves, so the
+    /// list is worth re-reading whenever the model grows.
+    ///
+    /// SMART OBJECTS arrive as their stored render, which can be stale.
+    /// Before the stack is bound, a file with smart objects is composited
+    /// once and every smart object's footprint is compared with the
+    /// image this door is given — the file's merged composite
+    /// (`layers::smart_renders_agree`); a disagreement declines the
+    /// import and leaves the flatten in place. Async for that reason.
     ///
     /// `image_handle` must be the composite already ingested from the
     /// same file (same extent); `psd_handle` is a `psd_open` handle.
     #[wasm_bindgen]
-    pub fn layers_open_from_psd(image_handle: u32, psd_handle: u32) -> Result<usize, JsValue> {
+    pub async fn layers_open_from_psd(
+        image_handle: u32,
+        psd_handle: u32,
+    ) -> Result<usize, JsValue> {
         let img = IMAGES
             .with(|m| m.borrow().get(&image_handle).cloned())
             .ok_or_else(|| JsValue::from_str(&format!("unknown image handle {image_handle}")))?;
@@ -2941,6 +2947,15 @@ mod wasm {
             )));
         }
         let stack = LayerStack::from_psd_plates(&import).map_err(ingest_err)?;
+        if import.layers.iter().any(|p| p.smart) {
+            let ctx = GPU.with(|g| g.borrow().clone());
+            let ours = stack
+                .composite(ctx.as_deref(), None)
+                .await
+                .map_err(ingest_err)?;
+            let theirs = img.rgba.to_rgba8();
+            crate::layers::smart_renders_agree(&import, &ours, &theirs).map_err(ingest_err)?;
+        }
         // A 16-bit layered import reduced every plate, and the image the
         // stack composites into inherits that fact — the panel's Depth
         // row reads it from the image, so a layered open must not lose

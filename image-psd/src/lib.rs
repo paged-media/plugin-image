@@ -86,8 +86,10 @@ mod parse;
 pub use abr::AbrFile;
 pub use composite::CompositeRgba8;
 pub use container::Container;
-pub use descriptor::{Descriptor, DescriptorValue};
-pub use layer_pixels::{GroupPlate, LayerImport, LayerPlate, MaskPlate, MAX_IMPORT_BYTES};
+pub use descriptor::{Descriptor, DescriptorValue, RefItem};
+pub use layer_pixels::{
+    GroupPlate, ImportBlocker, LayerImport, LayerPlate, MaskPlate, MAX_IMPORT_BYTES,
+};
 pub use model::PsdFile;
 
 #[derive(Debug, thiserror::Error)]
