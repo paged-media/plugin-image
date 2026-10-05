@@ -107,7 +107,7 @@ const EXPECT: &[(&str, Result<u8, &str>, Option<u8>)] = &[
     ("vector-disabled-with-user", Ok(1), None),
     // The cache holds the paths WITHOUT the feather (raster 0): Photoshop
     // applies feather and density live, which is not modelled.
-    ("vector-feather", Err("mask-parameters"), Some(0)),
+    ("vector-feather", Ok(3), Some(0)),
 ];
 
 fn psd(id: &str) -> PsdFile {

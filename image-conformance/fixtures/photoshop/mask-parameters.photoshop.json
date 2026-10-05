@@ -1,0 +1,91 @@
+{
+  "fixture": "mask-parameters",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/mask-parameters.jsx",
+    "script_sha256": "cd488d8678764566fc6d95dd6c0c168dc58a813504373f094614f7121de403f9",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-05T11:57:43.399Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "cases": [
+    {
+      "id": "vector-feather-3",
+      "params": {
+        "vector_feather": 3
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "mask-parameters/vector-feather-3.psd",
+        "mask-parameters/vector-feather-3.png"
+      ]
+    },
+    {
+      "id": "vector-feather-7",
+      "params": {
+        "vector_feather": 7.5
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "mask-parameters/vector-feather-7.psd",
+        "mask-parameters/vector-feather-7.png"
+      ]
+    },
+    {
+      "id": "vector-density-60",
+      "params": {
+        "vector_density": 60
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "mask-parameters/vector-density-60.psd",
+        "mask-parameters/vector-density-60.png"
+      ]
+    },
+    {
+      "id": "user-density-60",
+      "params": {
+        "user_density": 60
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "mask-parameters/user-density-60.psd",
+        "mask-parameters/user-density-60.png"
+      ]
+    },
+    {
+      "id": "user-feather-4",
+      "params": {
+        "user_feather": 4
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "mask-parameters/user-feather-4.psd",
+        "mask-parameters/user-feather-4.png"
+      ]
+    },
+    {
+      "id": "user-density-and-feather",
+      "params": {
+        "user_density": 80,
+        "user_feather": 2.5
+      },
+      "profile": "sRGB IEC61966-2.1",
+      "bits": 8,
+      "files": [
+        "mask-parameters/user-density-and-feather.psd",
+        "mask-parameters/user-density-and-feather.png"
+      ]
+    }
+  ]
+}

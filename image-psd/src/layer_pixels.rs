@@ -182,6 +182,12 @@ pub struct LayerPlate {
     /// The layer is an ADJUSTMENT: no pixels of its own (`rgba` is
     /// empty), the adjustment transforms what is below it.
     pub adjustment: Option<Adjustment>,
+    /// The mask record's density/feather PARAMETERS, when they are not
+    /// the defaults. Photoshop applies them live, to the user mask and the
+    /// vector mask alike; the consumer does too (`image-js`'s
+    /// `plate_mask`). A user mask with parameters stays canvas-wide here
+    /// (a feather reaches past the layer's rectangle).
+    pub mask_params: Option<crate::model::MaskParameters>,
     /// The layer's VECTOR MASK as paths in canvas pixels, when it clips
     /// the plate's pixels. The consumer rasterizes it and multiplies it
     /// with [`LayerPlate::mask`] (what Photoshop does: its own cached
@@ -473,15 +479,16 @@ fn adjustment_of(layer: &LayerRecord) -> Result<Option<Adjustment>> {
     Ok(None)
 }
 
-/// Does the record's mask carry parameters that change what it draws?
-/// Parameters at their defaults (density 100 %, no feather) — 48 corpus
-/// records carry exactly those — draw as if absent; a non-default density
-/// or feather, or parameters that do not read, are not modelled.
+/// Does the record's mask carry parameters this import cannot apply?
+/// Density and feather are applied (the consumer's `plate_mask`; measured
+/// on Photoshop-written masks: feather = a Gaussian of that sigma,
+/// density d = `1 − d·(1 − m)`); what is left is parameters that do not
+/// read.
 fn mask_parameters_matter(layer: &LayerRecord) -> bool {
     layer
         .mask
         .as_ref()
-        .is_some_and(|m| m.flags & 0x10 != 0 && !m.parameters().is_some_and(|p| p.is_default()))
+        .is_some_and(|m| m.flags & 0x10 != 0 && m.parameters().is_none())
 }
 
 /// Is the record a smart object (its pixels a stored render)?
@@ -718,6 +725,11 @@ impl PsdFile {
             let opacity =
                 ((u32::from(layer.opacity) * u32::from(fill_opacity(layer)) + 127) / 255) as u8;
             let masks = self.layer_masks(layer, cw, ch)?;
+            let mask_params = layer
+                .mask
+                .as_ref()
+                .and_then(|m| m.parameters())
+                .filter(|p| !p.is_default());
             layers.push(LayerPlate {
                 name: layer.name(),
                 blend_key: layer.blend_key,
@@ -732,12 +744,13 @@ impl PsdFile {
                 // A pixel layer's mask at its rectangle; an adjustment's
                 // stays canvas-wide (it is where the adjustment applies).
                 mask: masks.user.map(|m| {
-                    if adjustment.is_some() {
+                    if adjustment.is_some() || mask_params.is_some() {
                         m
                     } else {
                         m.crop(cw, rect)
                     }
                 }),
+                mask_params,
                 // A shape layer's pixels already ARE its path's render.
                 vector_mask: masks.vector.filter(|_| !is_shape_content(layer)),
                 smart: is_smart(layer),

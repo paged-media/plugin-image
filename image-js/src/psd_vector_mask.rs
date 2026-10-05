@@ -384,9 +384,39 @@ pub fn plate_mask(plate: &LayerPlate, width: u32, height: u32) -> Option<MaskPla
     // A pixel layer's masks live at its plate's rectangle (ADR 464; the
     // import cut the user mask there); an adjustment's span the canvas.
     let rect = plate.rect.filter(|_| plate.adjustment.is_none());
+    let params = plate.mask_params;
+    // The record's density/feather, applied as Photoshop applies them —
+    // live, on the canvas, before the cut (a feather reaches past the
+    // layer's rectangle): measured, feather = a Gaussian of that sigma,
+    // density d = 1 − d·(1 − m).
+    let user = plate.mask.clone().map(|m| match params {
+        Some(p) if p.user_density != 255 || p.user_feather > 0.0 => {
+            let mut c = m.canvas_coverage(width, height, 0);
+            feather_mask(&mut c, width, height, p.user_feather);
+            apply_density(&mut c, p.user_density);
+            let canvas = MaskPlate {
+                coverage: c,
+                enabled: m.enabled,
+                rect: None,
+            };
+            match rect {
+                Some(r) => canvas.crop(width, r),
+                None => canvas,
+            }
+        }
+        _ => match (rect, m.rect) {
+            (Some(r), None) => m.crop(width, r),
+            _ => m,
+        },
+    });
     let vector = plate.vector_mask.as_ref().map(|v| {
+        let mut coverage = rasterize(v, width, height).data().to_vec();
+        if let Some(p) = params {
+            feather_mask(&mut coverage, width, height, p.vector_feather);
+            apply_density(&mut coverage, p.vector_density);
+        }
         let canvas = MaskPlate {
-            coverage: rasterize(v, width, height).data().to_vec(),
+            coverage,
             enabled: !v.disabled,
             rect: None,
         };
@@ -395,7 +425,7 @@ pub fn plate_mask(plate: &LayerPlate, width: u32, height: u32) -> Option<MaskPla
             None => canvas,
         }
     });
-    match (plate.mask.clone(), vector) {
+    match (user, vector) {
         (None, None) => None,
         (Some(m), None) | (None, Some(m)) => Some(m),
         (Some(u), Some(v)) => Some(match (u.enabled, v.enabled) {
@@ -432,6 +462,88 @@ pub fn plate_mask(plate: &LayerPlate, width: u32, height: u32) -> Option<MaskPla
             (false, true) => v,
             _ => u,
         }),
+    }
+}
+
+/// A mask's DENSITY (0–255; 255 = the mask applies fully): what it
+/// hides is hidden only by that much, `1 − d·(1 − m)`.
+fn apply_density(c: &mut [u8], density: u8) {
+    if density == 255 {
+        return;
+    }
+    let d = u32::from(density);
+    for v in c {
+        *v = (255 - (d * u32::from(255 - *v) + 127) / 255) as u8;
+    }
+}
+
+/// A mask's FEATHER: a Gaussian blur of that sigma, zero beyond the
+/// canvas (what Photoshop's measured edges fit: 3 px within 2.4 levels,
+/// 7.5 px within 4.6). Small sigmas take the exact kernel; large ones —
+/// the corpus has feathers past 160 px — three box passes of matched
+/// variance, which stays linear in the canvas whatever the radius.
+fn feather_mask(c: &mut Vec<u8>, w: u32, h: u32, sigma: f64) {
+    if sigma <= 0.0 {
+        return;
+    }
+    if sigma <= 4.0 {
+        if let Some(mut cov) = image_gpu::SelectionCoverage::from_data(w, h, std::mem::take(c)) {
+            cov.feather(sigma as f32);
+            *c = cov.data().to_vec();
+        }
+        return;
+    }
+    // Box widths for three passes approximating a Gaussian of `sigma`
+    // (the standard ideal-width split, e.g. Kovesi 2010).
+    let n = 3.0;
+    let ideal = (12.0 * sigma * sigma / n + 1.0).sqrt();
+    let mut wl = ideal.floor() as i64;
+    if wl % 2 == 0 {
+        wl -= 1;
+    }
+    let wu = wl + 2;
+    let m = ((12.0 * sigma * sigma - n * (wl * wl) as f64 - 4.0 * n * wl as f64 - 3.0 * n)
+        / (-4.0 * wl as f64 - 4.0))
+        .round() as i64;
+    let mut f: Vec<f32> = c.iter().map(|&v| f32::from(v)).collect();
+    let (w, h) = (w as usize, h as usize);
+    for pass in 0..3 {
+        let r = ((if pass < m { wl } else { wu }) - 1) / 2;
+        box_pass(&mut f, w, h, r as usize, true);
+        box_pass(&mut f, w, h, r as usize, false);
+    }
+    for (o, v) in c.iter_mut().zip(f) {
+        *o = v.round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// One box blur of radius `r` along rows (`horizontal`) or columns, zero
+/// beyond the edge, by a running sum.
+fn box_pass(f: &mut [f32], w: usize, h: usize, r: usize, horizontal: bool) {
+    let (n, lines) = if horizontal { (w, h) } else { (h, w) };
+    let at = |line: usize, i: usize| {
+        if horizontal {
+            line * w + i
+        } else {
+            i * w + line
+        }
+    };
+    let norm = 1.0 / (2 * r + 1) as f32;
+    let mut buf = vec![0.0f32; n];
+    for line in 0..lines {
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = f[at(line, i)];
+        }
+        let mut sum: f32 = buf.iter().take(r.min(n)).sum();
+        for i in 0..n {
+            if i + r < n {
+                sum += buf[i + r];
+            }
+            if i > r {
+                sum -= buf[i - r - 1];
+            }
+            f[at(line, i)] = sum * norm;
+        }
     }
 }
 
@@ -642,6 +754,7 @@ mod tests {
                 group: None,
                 mask: user,
                 vector_mask: Some(v),
+                mask_params: None,
                 smart: false,
                 text: false,
                 adjustment: None,
