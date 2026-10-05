@@ -35,6 +35,10 @@ import { makeFakeEditor, mapBacking, shellStub, silentConsole } from "./helpers"
 
 const calls = { resize: [] as Array<[number, number]>, adjust: [] as number[] };
 let realEncode: ((rgba: Uint8Array, w: number, h: number, f: "png") => Uint8Array) | null = null;
+// The fake `adjust` answers pixels of the image's real size: the host's
+// scene-image door rejects a buffer that is not `width*height*4` bytes.
+const dims = new Map<number, [number, number]>();
+let sourceDims: [number, number] = [0, 0];
 
 vi.mock("../src/engine", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/engine")>();
@@ -53,12 +57,14 @@ vi.mock("../src/engine", async (importOriginal) => {
               calls.resize.push([w, h]);
               const handle = next++;
               fake.add(handle);
+              dims.set(handle, [w, h]);
               return { handle, width: w, height: h, display: "assumedSrgb", depthReduced: false };
             };
           if (prop === "adjust")
             return async (h: number) => {
               calls.adjust.push(h);
-              return new Uint8Array(0);
+              const [w, ht] = dims.get(h) ?? sourceDims;
+              return new Uint8Array(w * ht * 4);
             };
           if (prop === "freeImage")
             return (h: number) => (fake.has(h) ? fake.delete(h) : t.freeImage(h));
@@ -74,6 +80,7 @@ const geom = (bounds: [number, number, number, number]): ElementGeometryItem =>
   ({ id: { kind: "rectangle", id: "u1" }, pageId: "pg1", bounds }) as never;
 
 async function open(sourceW: number, sourceH: number, frame: [number, number, number, number]) {
+  sourceDims = [sourceW, sourceH];
   const fake = makeFakeEditor();
   const handle = createBundleHost(() => fake.editor, manifestJson as PluginManifest, {
     console: silentConsole,

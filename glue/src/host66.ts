@@ -1,58 +1,39 @@
 /**
- * The protocol-66 host doors, typed here so the bundle compiles against
- * the published contract it pins (0.2.37, protocol 64/65) and uses each
- * door where the running host offers it. Every accessor answers `null`
- * when the door is absent, and every caller keeps its older path for
- * that case — nothing here is assumed.
- *
- * The shapes are plugin-api 0.2.38's (`SceneLayerSurface.submitImage`,
- * `PartsSurface.delete`, `DocumentSurface.onWillSave`,
- * `ShellSurface.enterEditContext`, `ToolsSurface`,
- * `WidgetSurface.ColorPicker`, `DocumentSurface.mutateWithBytes`). When
- * the pin moves to 0.2.38 these become the contract's own types and this
- * module shrinks to the capability probes.
+ * The protocol-66 host doors, probed. The contract (plugin-api 0.2.38)
+ * now declares every door below, so the types are its own; what stays
+ * here is the capability probe in front of each one. The bundle can
+ * still be activated by a host that predates a door (an editor on an
+ * older SDK, or a test double), so every accessor answers `null` /
+ * `false` when the host does not announce the door or does not carry
+ * the member, and every caller keeps its older path for that case —
+ * nothing here is assumed.
  */
 import type { ComponentType } from "react";
 import type {
   BundleHost,
+  ColorPickerProps,
   Disposable,
   ElementId,
   MutationOutcome,
+  SceneImage,
+  SceneImageTile,
   SceneLayerSurface,
+  ToolSettingValue,
+  ToolsSurface,
+  WillSaveEvent,
 } from "@paged-media/plugin-api";
+
+export type { ColorPickerProps, SceneImage, SceneImageTile, ToolSettingValue };
 
 type Mutation = Parameters<BundleHost["document"]["mutate"]>[0];
 
-export interface SceneImage {
-  rgba: Uint8Array;
-  width: number;
-  height: number;
-  /** `[x, y, w, h]` in frame-content points. */
-  dest: [number, number, number, number];
-}
-
-export interface SceneImageTile {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rgba: Uint8Array;
-}
-
-interface ImageSceneSurface {
-  submitImage(elementId: string, image: SceneImage, options?: { transfer?: boolean }): Promise<void>;
-  submitImageTiles(
-    elementId: string,
-    tiles: readonly SceneImageTile[],
-    options?: { transfer?: boolean },
-  ): Promise<void>;
-}
+type ImageSceneSurface = Pick<SceneLayerSurface, "submitImage" | "submitImageTiles">;
 
 /** The scene surface's image doors, or null on an older host. */
 export function imageScene(surface: SceneLayerSurface): ImageSceneSurface | null {
-  const s = surface as SceneLayerSurface & Partial<ImageSceneSurface>;
+  const s = surface as Partial<ImageSceneSurface>;
   return typeof s.submitImage === "function" && typeof s.submitImageTiles === "function"
-    ? (s as ImageSceneSurface)
+    ? surface
     : null;
 }
 
@@ -61,21 +42,20 @@ export const binaryScene = (host: BundleHost) => host.supports("rendering.sceneL
 
 /** `host.parts.delete`, or null when the host cannot delete parts. */
 export function partsDelete(host: BundleHost): ((path: string) => Promise<boolean>) | null {
-  const parts = host.parts as BundleHost["parts"] & { delete?: (path: string) => Promise<boolean> };
+  const parts = host.parts as Partial<BundleHost["parts"]>;
   if (!host.supports("storage.parts@2") || typeof parts.delete !== "function") return null;
-  return (path) => parts.delete!(path);
+  const del = parts as BundleHost["parts"];
+  return (path) => del.delete(path);
 }
 
 /** Subscribe to the host's save of the document, when it announces one. */
 export function onWillSave(
   host: BundleHost,
-  listener: (e: { format: "paged" }) => void | Promise<void>,
+  listener: (e: WillSaveEvent) => void | Promise<void>,
 ): Disposable | null {
-  const doc = host.document as BundleHost["document"] & {
-    onWillSave?: (l: (e: { format: "paged" }) => void | Promise<void>) => Disposable;
-  };
+  const doc = host.document as Partial<BundleHost["document"]>;
   if (!host.supports("document.onWillSave@1") || typeof doc.onWillSave !== "function") return null;
-  return doc.onWillSave(listener);
+  return (doc as BundleHost["document"]).onWillSave(listener);
 }
 
 /** Enter one of this bundle's edit contexts on `elementId`. Resolves
@@ -85,32 +65,20 @@ export async function enterEditContext(
   type: string,
   elementId: ElementId,
 ): Promise<boolean> {
-  const shell = host.shell as BundleHost["shell"] & {
-    enterEditContext?: (type: string, id: ElementId) => Promise<boolean>;
-  };
+  const shell = host.shell as Partial<BundleHost["shell"]>;
   if (!host.supports("shell.enterEditContext@1") || typeof shell.enterEditContext !== "function") {
     return false;
   }
   try {
-    return await shell.enterEditContext(type, elementId);
+    return await (shell as BundleHost["shell"]).enterEditContext(type, elementId);
   } catch {
     return false;
   }
 }
 
-export type ToolSettingValue = number | boolean | string;
-
-interface ToolsSurface {
-  settings(toolId: string): Readonly<Record<string, ToolSettingValue>>;
-  onDidChangeSettings(
-    toolId: string,
-    listener: (settings: Readonly<Record<string, ToolSettingValue>>) => void,
-  ): Disposable;
-}
-
 /** The host's tool-options values for this bundle's tools, or null. */
 export function toolSettings(host: BundleHost): ToolsSurface | null {
-  const tools = (host as BundleHost & { tools?: Partial<ToolsSurface> }).tools;
+  const tools = (host as Partial<Pick<BundleHost, "tools">>).tools as Partial<ToolsSurface> | undefined;
   if (
     !host.supports("tools.settings@1") ||
     !tools ||
@@ -122,20 +90,9 @@ export function toolSettings(host: BundleHost): ToolsSurface | null {
   return tools as ToolsSurface;
 }
 
-export interface ColorPickerProps {
-  /** `#rrggbb`. */
-  value: string;
-  onChange(next: string): void;
-  onCommit?(next: string): void;
-  disabled?: boolean;
-  ariaLabel?: string;
-}
-
 /** The host's colour picker widget, or null (the panel's own then). */
 export function hostColorPicker(host: BundleHost): ComponentType<ColorPickerProps> | null {
-  const widgets = host.widgets as BundleHost["widgets"] & {
-    ColorPicker?: ComponentType<ColorPickerProps>;
-  };
+  const widgets = host.widgets as Partial<BundleHost["widgets"]>;
   return host.supports("widgets.colorPicker@1") && widgets.ColorPicker ? widgets.ColorPicker : null;
 }
 
@@ -153,11 +110,9 @@ export async function mutateWithBytes(
   mutation: Mutation,
   bytes: Uint8Array,
 ): Promise<MutationOutcome> {
-  const doc = host.document as BundleHost["document"] & {
-    mutateWithBytes?: (m: Mutation, b: Uint8Array) => Promise<MutationOutcome>;
-  };
+  const doc = host.document as Partial<BundleHost["document"]>;
   if (binaryMutations(host) && typeof doc.mutateWithBytes === "function") {
-    return doc.mutateWithBytes(mutation, bytes);
+    return (doc as BundleHost["document"]).mutateWithBytes(mutation, bytes);
   }
   return host.document.mutate(spliceBytes(mutation, bytes));
 }
