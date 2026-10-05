@@ -287,9 +287,11 @@ fn cmyk_layer_channels_decode_to_the_filled_ink__feat__image_psd_layer_import() 
 /// * the 23-level outlier in `blend-modes` is a saturated cyan-green
 ///   outside sRGB that ACE clips differently from the ICC CMMs (lcms2
 ///   gives the same 23).
+// Means carry a small margin: the CMS rounds differently on x86 Linux than on
+// Apple silicon (patches vs relcol: 5.302 there, under 5.3 here).
 const CONVERSION: &[(&str, &str, u8, f64)] = &[
-    ("patches", "relcol-bpc", 4, 0.45),
-    ("patches", "relcol", 28, 5.3),
+    ("patches", "relcol-bpc", 4, 0.47),
+    ("patches", "relcol", 28, 5.35),
     ("transparent-soft", "relcol-bpc", 6, 0.9),
     ("normal-stack", "relcol-bpc", 8, 0.55),
     ("normal-stack-16", "relcol-bpc", 9, 0.6),
