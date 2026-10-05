@@ -90,10 +90,20 @@ landed. How the parts fit is in
   The scene-layer item, tiles and PSD save-back are 8-bit. A curve is a 256-entry table.
 - **PSD.** The composite decode takes 8- and 16-bit RGB or greyscale, raw or RLE (not 16-bit
   RLE); other modes and depths are refused, and a transparent document's white-matted merged
-  colour is un-matted. Layers are imported from RGB files, with groups, clipping, user masks
-  and fill opacity, within 384 MiB; a file with smart objects, layer effects, adjustment
-  layers, artboards, vector masks, group masks or mask density/feather opens flattened, and
-  says which (`image-psd/src/layer_pixels.rs`). Save-back is 8-bit RGB. "Apply to file" and
+  colour is un-matted. Layers are imported from RGB files, with groups, clipping, user masks,
+  vector masks and fill opacity, within 384 MiB. A vector mask is drawn from its paths the
+  way Photoshop draws it (a 17×15 sample grid per pixel, per-component combine / subtract /
+  intersect / exclude, even-odd or non-zero, invert, disabled kept but not applied) and
+  multiplied with the user mask; on a fill/shape layer the stored pixels already are the
+  shape, so the mask is not applied again (`image-psd/src/vector_mask.rs`,
+  `image-js/src/psd_vector_mask.rs`). Measured against the renders Photoshop caches in the
+  file: straight edges agree to two levels on the probes, and over 314 corpus masks 0.0004 %
+  of pixels differ by more than two levels. The outliers, up to 18 levels on isolated pixels,
+  are curved edges (Photoshop's Bezier flattening is reproduced on average, not chord for
+  chord) and a few long, nearly vertical ones. A file with a smart object whose stored render
+  its own composite does not vouch for, layer effects, adjustment layers, artboards, group
+  masks (user or vector) or mask density/feather (user or vector) opens flattened, and says
+  which (`image-psd/src/layer_pixels.rs`). Save-back is 8-bit RGB. "Apply to file" and
   the PNG and JPEG exporters encode the composite. The PSD exporter returns the retained file
   byte for byte only when the parameters are the identity and the pixels have not been edited since ingest; otherwise it
   runs the save-back, and when the save-back declines (a size change, a non-RGB or non-8-bit file) it exports nothing
