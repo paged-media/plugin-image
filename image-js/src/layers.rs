@@ -763,12 +763,20 @@ impl LayerStack {
         }
         // A Color Overlay becomes a layer of its own (below), so the stack
         // holds one layer per plate plus one per overlay.
+        // …and an ARTBOARD's background is a layer at the bottom of its
+        // group.
         let n_layers = import.layers.len()
             + import
                 .layers
                 .iter()
                 .filter(|p| p.color_overlay.is_some())
+                .count()
+            + import
+                .groups
+                .iter()
+                .filter(|g| g.artboard.is_some_and(|a| a.background.is_some()))
                 .count();
+        let mut backgrounds_drawn = vec![false; import.groups.len()];
         // Ids: layers 1..=N, then the groups (one id space, as `fresh_id`).
         let group_id = |g: usize| (n_layers + g) as u32 + 1;
         let groups: Vec<LayerGroup> = import
@@ -805,6 +813,43 @@ impl LayerStack {
                     o.id = layers.len() as u32 + 1;
                     layers.push(o);
                 }
+            }
+            // ARTBOARD backgrounds of the groups this plate enters, the
+            // outermost first: each a solid layer at the artboard's
+            // rectangle, at the bottom of its group.
+            let mut chain = Vec::new();
+            let mut cur = plate.group;
+            while let Some(g) = cur {
+                chain.push(g);
+                cur = import.groups[g].parent;
+            }
+            for &g in chain.iter().rev() {
+                let Some(a) = import.groups[g].artboard else {
+                    continue;
+                };
+                let Some(bg) = a.background else { continue };
+                if backgrounds_drawn[g] || a.rect.w == 0 || a.rect.h == 0 {
+                    continue;
+                }
+                backgrounds_drawn[g] = true;
+                let solid: Vec<u8> = (0..a.rect.w as usize * a.rect.h as usize)
+                    .flat_map(|_| [bg[0], bg[1], bg[2], 255])
+                    .collect();
+                layers.push(Layer {
+                    id: layers.len() as u32 + 1,
+                    name: format!("{} · Artboard", import.groups[g].name),
+                    visible: true,
+                    locked: false,
+                    opacity: 1.0,
+                    blend: &COMPOSE_NORMAL,
+                    rgba: bounded_pixels(a.rect, solid, width, height)?,
+                    kind: LayerKind::Pixels,
+                    mask: None,
+                    mask_enabled: true,
+                    group: Some(group_id(g)),
+                    clipped: false,
+                    blend_gamma: None,
+                });
             }
             let adjustment = plate.adjustment.as_ref().map(psd_adjust_params);
             // The user and vector masks fold into the layer's one mask
@@ -3151,12 +3196,22 @@ pub const CMYK_FLATTEN_LEVELS: u8 = SMART_RENDER_LEVELS;
 /// The share of the canvas, in percent, that may disagree.
 pub const CMYK_FLATTEN_MAX_PCT: f64 = SMART_RENDER_MAX_PCT;
 
+/// The share of the canvas, in percent, that may be more than 2 levels
+/// off. The first bar catches a different-looking image; this one a
+/// broad TINT: Multiply blended in RGB over a CMYK document's pale stock
+/// stayed under 8 levels everywhere yet shifted 19–42 % of four corpus
+/// pages by 3–8, while the CMYK files whose layers mix only at their
+/// edges stay at or below 1.5 %.
+pub const CMYK_FLATTEN_MAX_PCT_SHIFT: f64 = 5.0;
+
 /// How a CMYK document's RGB flatten compares with its converted merged
 /// composite, over the whole canvas (over white).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CmykFlattenAgreement {
     /// Percent of pixels more than [`CMYK_FLATTEN_LEVELS`] off.
     pub pct_off: f64,
+    /// Percent of pixels more than 2 levels off.
+    pub pct_shift: f64,
     /// Mean absolute difference (worst channel per pixel), in levels.
     pub mean: f64,
     /// Worst difference, in levels.
@@ -3171,7 +3226,7 @@ pub fn cmyk_flatten_agreement(ours: &[u8], theirs: &[u8]) -> CmykFlattenAgreemen
         let a = u32::from(p[3]);
         ((u32::from(p[c]) * a + 255 * (255 - a) + 127) / 255) as i32
     };
-    let (mut n, mut off, mut sum, mut max) = (0usize, 0usize, 0u64, 0u32);
+    let (mut n, mut off, mut shift, mut sum, mut max) = (0usize, 0usize, 0usize, 0u64, 0u32);
     for (a, b) in ours.chunks_exact(4).zip(theirs.chunks_exact(4)) {
         n += 1;
         let d = (0..3)
@@ -3184,10 +3239,14 @@ pub fn cmyk_flatten_agreement(ours: &[u8], theirs: &[u8]) -> CmykFlattenAgreemen
         if d > u32::from(CMYK_FLATTEN_LEVELS) {
             off += 1;
         }
+        if d > 2 {
+            shift += 1;
+        }
     }
     let n = n.max(1) as f64;
     CmykFlattenAgreement {
         pct_off: 100.0 * off as f64 / n,
+        pct_shift: 100.0 * shift as f64 / n,
         mean: sum as f64 / n,
         max: max.min(255) as u8,
     }
@@ -3204,6 +3263,15 @@ pub fn cmyk_flatten_agrees(
     theirs: &[u8],
 ) -> Result<CmykFlattenAgreement, IngestError> {
     let a = cmyk_flatten_agreement(ours, theirs);
+    if a.pct_shift > CMYK_FLATTEN_MAX_PCT_SHIFT {
+        return Err(IngestError::Unsupported(format!(
+            "layer import of a CMYK document whose layers, converted to RGB and blended \
+             there, shift {:.1}% of the pixels by more than 2 levels from Photoshop's CMYK \
+             composite (a tint, not an edge): Photoshop mixes the inks, the RGB stack mixes \
+             the converted colours, so the merged composite is kept instead",
+            a.pct_shift
+        )));
+    }
     if a.pct_off > CMYK_FLATTEN_MAX_PCT {
         return Err(IngestError::Unsupported(format!(
             "layer import of a CMYK document whose layers, converted to RGB and blended \

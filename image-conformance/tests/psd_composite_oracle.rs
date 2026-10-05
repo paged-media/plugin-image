@@ -157,7 +157,7 @@ fn categorize(reason: &str) -> (String, String) {
         "group-mask"
     } else if reason.contains("VECTOR MASK") || reason.contains("vector-derived") {
         "vector-mask"
-    } else if reason.contains("density/feather") {
+    } else if reason.contains("density/feather") || reason.contains("density or feather") {
         "mask-parameters"
     } else if reason.contains("layer effects") {
         "effects"

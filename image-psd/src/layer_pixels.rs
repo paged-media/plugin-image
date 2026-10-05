@@ -311,6 +311,104 @@ pub struct GroupPlate {
     pub parent: Option<usize>,
     /// The folder's user mask, canvas-extent.
     pub mask: Option<MaskPlate>,
+    /// The group is an ARTBOARD (`artb`): its members are cut to its
+    /// rectangle and it draws its background beneath them.
+    pub artboard: Option<Artboard>,
+}
+
+/// An artboard: a rectangle of the canvas and its background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Artboard {
+    pub rect: image_core::Region,
+    /// `None` = transparent; else the RGB colour (white, black or the
+    /// artboard's own).
+    pub background: Option<[u8; 3]>,
+}
+
+/// The `artb` block of a group's folder record, when it has one: the
+/// rectangle (`artboardRect`: Top/Left/Btom/Rght, clipped to the canvas)
+/// and the background (`artboardBackgroundType`: 1 white, 2 black, 3
+/// transparent, 4 the `Clr ` colour) [OBS, corpus files].
+fn artboard_of(layer: &LayerRecord, cw: u32, ch: u32) -> Result<Option<Artboard>> {
+    let Some(a) = layer.addl.iter().find(|a| &a.key == b"artb") else {
+        return Ok(None);
+    };
+    let mut r = crate::reader::ByteReader::new(addl_payload(a));
+    let (_, d) = crate::descriptor::read_versioned_descriptor(&mut r)?;
+    let rect = d
+        .descriptor(b"artboardRect")
+        .ok_or_else(|| PsdError::Malformed {
+            section: "artboard",
+            detail: "no artboardRect".into(),
+        })?;
+    let n = |k: &[u8]| rect.number(k).unwrap_or(0.0).round() as i64;
+    let (x0, y0) = (
+        n(b"Left").clamp(0, i64::from(cw)),
+        n(b"Top ").clamp(0, i64::from(ch)),
+    );
+    let (x1, y1) = (
+        n(b"Rght").clamp(0, i64::from(cw)),
+        n(b"Btom").clamp(0, i64::from(ch)),
+    );
+    let region = image_core::Region::new(
+        x0 as i32,
+        y0 as i32,
+        (x1 - x0).max(0) as u32,
+        (y1 - y0).max(0) as u32,
+    );
+    let kind = d
+        .get(b"artboardBackgroundType")
+        .and_then(|v| v.as_number())
+        .unwrap_or(1.0) as i64;
+    let background = match kind {
+        1 => Some([255, 255, 255]),
+        2 => Some([0, 0, 0]),
+        3 => None,
+        _ => {
+            let c = d.descriptor(b"Clr ");
+            let ch = |k: &[u8]| {
+                c.and_then(|c| c.number(k))
+                    .unwrap_or(255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            Some([ch(b"Rd  "), ch(b"Grn "), ch(b"Bl  ")])
+        }
+    };
+    Ok(Some(Artboard {
+        rect: region,
+        background,
+    }))
+}
+
+/// `px` (covering `r`) cut to `to`, which lies inside `r`.
+fn crop_rgba(
+    r: image_core::Region,
+    px: &[u8],
+    to: image_core::Region,
+) -> (image_core::Region, Vec<u8>) {
+    if to.w == 0 || to.h == 0 {
+        return (image_core::Region::new(0, 0, 0, 0), Vec::new());
+    }
+    let mut out = Vec::with_capacity(to.w as usize * to.h as usize * 4);
+    for y in to.y..to.y + to.h as i32 {
+        let s = (((y - r.y) as usize) * r.w as usize + (to.x - r.x) as usize) * 4;
+        out.extend_from_slice(&px[s..s + to.w as usize * 4]);
+    }
+    (to, out)
+}
+
+/// `a ∩ b` (an empty region when they do not meet).
+fn intersect(a: image_core::Region, b: image_core::Region) -> image_core::Region {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w as i32).min(b.x + b.w as i32);
+    let y1 = (a.y + a.h as i32).min(b.y + b.h as i32);
+    if x1 <= x0 || y1 <= y0 {
+        image_core::Region::new(0, 0, 0, 0)
+    } else {
+        image_core::Region::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
+    }
 }
 
 /// The whole importable layer tree.
@@ -341,7 +439,7 @@ pub struct LayerImport {
 const UNMODELLED: &[(&[u8; 4], &str)] = &[
     // Effects (`lfx2`, legacy `lrFX`) are judged by `effects_of`: only an
     // effect that is actually drawn blocks the import.
-    (b"artb", "an artboard"),
+    // `artb` is READ (an artboard group: `artboard_of`).
     (b"artd", "an artboard"),
     (b"abdd", "an artboard"),
     // `levl`, `curv`, `hue2`, `expA` and `nvrt` are READ
@@ -701,10 +799,23 @@ impl PsdFile {
             let adjustment = adjustment_of(layer)?;
             // An adjustment has no pixels of its own (its channels hold
             // an empty rect or a mask): an empty rectangle.
+            // The enclosing ARTBOARDS' rectangle: what the layer is cut to.
+            let mut clip: Option<image_core::Region> = None;
+            let mut cur = group;
+            while let Some(gi) = cur {
+                if let Some(a) = groups[gi].artboard {
+                    clip = Some(clip.map_or(a.rect, |c| intersect(c, a.rect)));
+                }
+                cur = groups[gi].parent;
+            }
             let (rect, rgba) = if adjustment.is_some() {
                 (image_core::Region::new(0, 0, 0, 0), Vec::new())
             } else {
-                self.layer_bounded_rgba8(layer, cw, ch, ink_to_rgba8)?
+                let (r, px) = self.layer_bounded_rgba8(layer, cw, ch, ink_to_rgba8)?;
+                match clip {
+                    Some(c) => crop_rgba(r, &px, intersect(r, c)),
+                    None => (r, px),
+                }
             };
             // The walk refused every overlay it does not model.
             let color_overlay = effects_of(layer)
@@ -743,13 +854,21 @@ impl PsdFile {
                 group,
                 // A pixel layer's mask at its rectangle; an adjustment's
                 // stays canvas-wide (it is where the adjustment applies).
-                mask: masks.user.map(|m| {
-                    if adjustment.is_some() || mask_params.is_some() {
-                        m
-                    } else {
-                        m.crop(cw, rect)
-                    }
-                }),
+                mask: match (adjustment.is_some(), clip, masks.user) {
+                    // An adjustment inside an artboard acts only there:
+                    // its mask is cut to the artboard (zero outside), or
+                    // is the artboard when it had none.
+                    (true, Some(c), Some(m)) => Some(m.crop(cw, c)),
+                    (true, Some(c), None) => Some(MaskPlate {
+                        coverage: vec![255; c.w as usize * c.h as usize],
+                        enabled: true,
+                        rect: Some(c),
+                    }),
+                    (true, None, m) => m,
+                    (false, _, Some(m)) if mask_params.is_some() => Some(m),
+                    (false, _, Some(m)) => Some(m.crop(cw, rect)),
+                    (false, _, None) => None,
+                },
                 mask_params,
                 // A shape layer's pixels already ARE its path's render.
                 vector_mask: masks.vector.filter(|_| !is_shape_content(layer)),
@@ -983,6 +1102,7 @@ impl PsdFile {
                         hidden: false,
                         parent: open.last().copied(),
                         mask: None,
+                        artboard: None,
                     });
                     group_records.push(None);
                     open.push(groups.len() - 1);
@@ -1056,6 +1176,20 @@ impl PsdFile {
                             ),
                         );
                     }
+                    let artboard = match artboard_of(layer, h.width, h.height) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            block(
+                                "artboards",
+                                format!(
+                                    "layer import of an artboard that could not be read \
+                                     (\"{}\": {e}), so the merged composite is kept instead",
+                                    layer.name()
+                                ),
+                            );
+                            None
+                        }
+                    };
                     groups[g] = GroupPlate {
                         name: layer.name(),
                         blend_key: lsct_blend.unwrap_or(layer.blend_key),
@@ -1063,6 +1197,7 @@ impl PsdFile {
                         hidden: (layer.flags & 0x02) != 0,
                         parent: groups[g].parent,
                         mask: None,
+                        artboard,
                     };
                     continue;
                 }
@@ -1080,6 +1215,29 @@ impl PsdFile {
                     );
                 }
                 masked += 1;
+            }
+            // A SHAPE layer's stored pixels are its path's render without
+            // the vector mask's density and feather, which Photoshop adds
+            // live — a feather that bleeds past the stored edge, which the
+            // stored pixels cannot reproduce (a corpus banner: a feathered
+            // ring drawn hard).
+            if vmsk.is_some()
+                && is_shape_content(layer)
+                && layer
+                    .mask
+                    .as_ref()
+                    .and_then(|m| m.parameters())
+                    .is_some_and(|p| p.vector_density != 255 || p.vector_feather > 0.0)
+            {
+                block(
+                    "mask-parameters",
+                    format!(
+                        "layer import of a shape layer whose vector mask has a density or \
+                         feather (\"{}\"): Photoshop applies it live, past the stored \
+                         pixels, so the merged composite is kept instead",
+                        layer.name()
+                    ),
+                );
             }
             let has_real = layer.channels.iter().any(|c| c.id == REAL_USER_MASK);
             if has_real && vmsk.is_none() {
