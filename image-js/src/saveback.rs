@@ -850,8 +850,13 @@ pub fn psd_write_stack(
         }
         let mask = match &layer.mask {
             Some(cov) => {
-                let (info, cd, record) =
-                    mask_channel(cov, layer.mask_enabled, width, height, container)?;
+                let (info, cd, record) = mask_channel(
+                    &cov.to_canvas(),
+                    layer.mask_enabled,
+                    width,
+                    height,
+                    container,
+                )?;
                 channels.push(info);
                 channel_data.push(cd);
                 Some(record)
@@ -1139,8 +1144,8 @@ mod tests {
             assert!((a.opacity - b.opacity).abs() <= 0.5 / 255.0 + 1e-6);
             assert_eq!(a.group.is_some(), b.group.is_some(), "{}", a.name);
             assert_eq!(
-                a.mask.as_ref().map(|m| m.data().to_vec()),
-                b.mask.as_ref().map(|m| m.data().to_vec()),
+                a.mask.as_ref().map(|m| m.canvas().data().to_vec()),
+                b.mask.as_ref().map(|m| m.canvas().data().to_vec()),
                 "{}",
                 a.name
             );

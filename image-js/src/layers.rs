@@ -157,6 +157,8 @@ const MAX_GROUP_DEPTH: usize = 8;
 
 // The GPU-resident fold (the composite's implementation).
 mod fold;
+pub mod mask;
+pub use mask::{BoundedMask, LayerMask};
 
 /// The default name of the layer an ingested image becomes.
 pub const BACKGROUND_LAYER_NAME: &str = "Background";
@@ -316,7 +318,7 @@ pub struct Layer {
     /// authoring surface — "make selection into mask" is a move, not a
     /// conversion. It lowers to the ABI's `@group(2)` r16float mask that
     /// every dispatch already takes.
-    pub mask: Option<Arc<SelectionCoverage>>,
+    pub mask: Option<LayerMask>,
     /// The GROUP this layer belongs to, if any. Membership is stored on
     /// the layer rather than as a member list on the group, because the
     /// fold walks layers and this is the lookup it actually needs.
@@ -401,7 +403,7 @@ impl Layer {
     /// The mask that actually applies: `None` when there is none or it is
     /// disabled, and `None` too when it is all-one (which is the identity
     /// — materializing it would cost an upload to change nothing).
-    pub fn live_mask(&self) -> Option<&Arc<SelectionCoverage>> {
+    pub fn live_mask(&self) -> Option<&LayerMask> {
         if !self.mask_enabled {
             return None;
         }
@@ -462,40 +464,39 @@ pub fn mask_from_grey(width: u32, height: u32, rgba: &[u8]) -> Option<SelectionC
 /// ordinary layer still pays nothing for a feature it does not use.
 /// Two coverages multiplied (`None` is full coverage). One side alone is
 /// returned as is, so its `Arc` — and the fold's cache of it — survives.
-pub(crate) fn multiply_coverage(
-    a: Option<Arc<SelectionCoverage>>,
-    b: Option<Arc<SelectionCoverage>>,
-) -> Option<Arc<SelectionCoverage>> {
+pub(crate) fn multiply_coverage(a: Option<LayerMask>, b: Option<LayerMask>) -> Option<LayerMask> {
     match (a, b) {
         (None, x) | (x, None) => x,
         (Some(a), Some(b)) => {
-            let data = a
+            let (ca, cb) = (a.to_canvas(), b.to_canvas());
+            let data = ca
                 .data()
                 .iter()
-                .zip(b.data())
+                .zip(cb.data())
                 .map(|(&x, &y)| ((u32::from(x) * u32::from(y) + 127) / 255) as u8)
                 .collect();
-            SelectionCoverage::from_data(a.width(), a.height(), data).map(Arc::new)
+            SelectionCoverage::from_data(ca.width(), ca.height(), data)
+                .map(|c| LayerMask::Canvas(Arc::new(c)))
         }
     }
 }
 
 fn effective_coverage(
-    own: Option<&Arc<SelectionCoverage>>,
+    own: Option<&LayerMask>,
     clip: Option<&[u8]>,
     w: u32,
     h: u32,
 ) -> Option<Arc<SelectionCoverage>> {
     match (own, clip) {
         (None, None) => None,
-        (Some(cov), None) => Some(Arc::clone(cov)),
+        (Some(cov), None) => Some(cov.to_canvas()),
         (None, Some(base)) => SelectionCoverage::from_data(w, h, base.to_vec()).map(Arc::new),
         (Some(cov), Some(base)) => {
             let data: Vec<u8> = (0..(w as usize) * (h as usize))
                 .map(|i| {
                     let x = (i % w as usize) as u32;
                     let y = (i / w as usize) as u32;
-                    let a = u32::from(cov.coverage_at(x, y));
+                    let a = u32::from(cov.at(x, y));
                     let b = u32::from(base[i]);
                     // Round-half-up on the /255, so full × full stays
                     // full — a clipped, fully-masked layer must not lose
@@ -855,12 +856,13 @@ impl LayerStack {
                     None => LayerKind::Pixels,
                 },
                 mask_enabled: mask.as_ref().is_none_or(|m| m.enabled),
-                mask: mask.map(|m| {
-                    Arc::new(
-                        SelectionCoverage::from_data(width, height, m.coverage)
-                            .expect("a canvas-extent mask"),
-                    )
-                }),
+                // At the plate's rectangle when the import cut it there
+                // (ADR 464); outside it the layer is transparent, so the
+                // value there is immaterial.
+                mask: match mask {
+                    Some(m) => Some(psd_layer_mask(m, width, height)?),
+                    None => None,
+                },
                 group: plate.group.map(group_id),
                 clipped: plate.clipped,
                 // Text blends in a gamma space — in an RGB document. A
@@ -1072,8 +1074,8 @@ impl LayerStack {
                 crate::pixels::Pixels::from_raw(Arc::from(px.into_boxed_slice()), depth).into();
             if let Some(mask) = &layer.mask {
                 // Added area is revealed, as a reveal-all mask extends.
-                let m = op.remap(mask.data(), w, h, 1, 255);
-                layer.mask = SelectionCoverage::from_data(ow, oh, m).map(Arc::new);
+                let m = op.remap(mask.canvas().data(), w, h, 1, 255);
+                layer.mask = SelectionCoverage::from_data(ow, oh, m).map(|c| Arc::new(c).into());
             }
             if let LayerKind::Smart(src) = &mut layer.kind {
                 let s = op.remap(&src.rgba, src.width, src.height, 4, 0);
@@ -1343,7 +1345,7 @@ impl LayerStack {
             )));
         }
         let layer = self.layer_mut(index)?;
-        layer.mask = Some(coverage);
+        layer.mask = Some(coverage.into());
         layer.mask_enabled = true;
         Ok(())
     }
@@ -1413,7 +1415,7 @@ impl LayerStack {
     /// the very same stroke compositor; [`mask_from_grey`] reads it back.
     pub fn active_mask_as_grey(&self) -> Option<Arc<[u8]>> {
         let m = self.layers[self.active].mask.as_ref()?;
-        Some(mask_to_grey(m))
+        Some(mask_to_grey(&m.to_canvas()))
     }
 
     /// Replace the ACTIVE layer's MASK, journaling the tiles `damage`
@@ -1455,12 +1457,14 @@ impl LayerStack {
             .intersect(Region::new(0, 0, w, h))
             .unwrap_or(Region::new(0, 0, 0, 0));
         let outcome = {
+            // A bounded mask is edited at canvas size (ADR 464).
+            let old = old.canvas();
             let view = FlatImage::new(w, h, 1, old.data())
                 .ok_or_else(|| IngestError::Decode("layer mask is mis-sized".into()))?;
             self.journal
                 .record(label, mask_scope(active.id), &view, clipped)
         };
-        self.layers[self.active].mask = Some(Arc::new(mask));
+        self.layers[self.active].mask = Some(Arc::new(mask).into());
         if matches!(outcome, RecordOutcome::Recorded { .. }) {
             self.steps.push(Step::Pixels);
             self.undone.clear();
@@ -1479,7 +1483,7 @@ impl LayerStack {
         mask: Arc<SelectionCoverage>,
     ) -> Result<Arc<[u8]>, IngestError> {
         let i = self.active;
-        let saved = self.layers[i].mask.replace(mask);
+        let saved = self.layers[i].mask.replace(mask.into());
         let out = self.composite(ctx, None).await;
         self.layers[i].mask = saved;
         out
@@ -1620,6 +1624,19 @@ impl LayerStack {
             out.extend_from_slice(&px[s..s + rect.w as usize * 4]);
         }
         layer.rgba = bounded_pixels(rect, out, w, h)?;
+        // Its mask matters only where it draws, so it shrinks with it.
+        if let Some(m) = layer.mask.take() {
+            let c = m.to_canvas();
+            let mut data = Vec::with_capacity(rect.w as usize * rect.h as usize);
+            for y in rect.y as u32..rect.y as u32 + rect.h {
+                let s = (y * w + rect.x as u32) as usize;
+                data.extend_from_slice(&c.data()[s..s + rect.w as usize]);
+            }
+            layer.mask = Some(match BoundedMask::new(rect, 0, data, w, h) {
+                Some(b) if rect != Region::new(0, 0, w, h) => LayerMask::Bounded(Arc::new(b)),
+                _ => m,
+            });
+        }
         Ok(Some(rect))
     }
 
@@ -1657,7 +1674,7 @@ impl LayerStack {
     /// first, up to the nearest isolated one, whose own mask applies when
     /// it closes), multiplied: what a member of `gid` composites through.
     /// A single mask comes back as its own `Arc`.
-    pub(crate) fn pass_through_mask(&self, gid: Option<u32>) -> Option<Arc<SelectionCoverage>> {
+    pub(crate) fn pass_through_mask(&self, gid: Option<u32>) -> Option<LayerMask> {
         let mut out = None;
         let mut cur = gid;
         let mut depth = 0;
@@ -1668,7 +1685,7 @@ impl LayerStack {
             if g.isolates() || depth > MAX_GROUP_DEPTH * 2 {
                 break;
             }
-            out = multiply_coverage(out, g.live_mask().cloned());
+            out = multiply_coverage(out, g.live_mask().cloned().map(LayerMask::Canvas));
             cur = g.parent;
             depth += 1;
         }
@@ -1786,10 +1803,12 @@ impl LayerStack {
         // One dispatch, the same one a layer takes — a group is a plate
         // like any other once its members have been folded, its mask
         // included.
-        let mask = multiply_coverage(g.live_mask().cloned(), self.pass_through_mask(g.parent));
+        let mask = multiply_coverage(
+            g.live_mask().cloned().map(LayerMask::Canvas),
+            self.pass_through_mask(g.parent),
+        );
         let mask = mask.map(|cov| {
-            SelectionMask::from_fn(w, h, |x, y| f32::from(cov.coverage_at(x, y)) / 255.0)
-                .into_bytes()
+            SelectionMask::from_fn(w, h, |x, y| f32::from(cov.at(x, y)) / 255.0).into_bytes()
         });
         image_gpu::execute_tile_once_async(
             ctx,
@@ -2114,7 +2133,7 @@ impl LayerStack {
     fn apply_mask_entry(&mut self, id: u64, undo: bool) -> Option<String> {
         let idx = self.layers.iter().position(|l| u64::from(l.id) == id)?;
         let (w, h) = (self.width, self.height);
-        let mut buf: Vec<u8> = self.layers[idx].mask.as_ref()?.data().to_vec();
+        let mut buf: Vec<u8> = self.layers[idx].mask.as_ref()?.canvas().data().to_vec();
         let label = {
             let mut view = FlatImage::new(w, h, 1, buf.as_mut_slice())?;
             if undo {
@@ -2123,7 +2142,7 @@ impl LayerStack {
                 self.journal.redo(&mut view)
             }
         }?;
-        self.layers[idx].mask = Some(Arc::new(SelectionCoverage::from_data(w, h, buf)?));
+        self.layers[idx].mask = Some(Arc::new(SelectionCoverage::from_data(w, h, buf)?).into());
         self.active = idx;
         self.edit_mask = true;
         Some(label)
@@ -2884,6 +2903,26 @@ fn exposure_lut(exposure: f32, offset: f32, gamma: f32) -> [u8; 256] {
     lut
 }
 
+/// A PSD mask plate as a layer mask: bounded at its rectangle, or
+/// canvas-sized.
+fn psd_layer_mask(
+    m: image_psd::MaskPlate,
+    width: u32,
+    height: u32,
+) -> Result<LayerMask, IngestError> {
+    let bad = || IngestError::Decode("a PSD layer mask does not fit the canvas".into());
+    match m.rect {
+        Some(r) if r != Region::new(0, 0, width, height) => {
+            BoundedMask::new(r, 0, m.coverage, width, height)
+                .map(|b| LayerMask::Bounded(Arc::new(b)))
+                .ok_or_else(bad)
+        }
+        _ => SelectionCoverage::from_data(width, height, m.coverage)
+            .map(|c| LayerMask::Canvas(Arc::new(c)))
+            .ok_or_else(bad),
+    }
+}
+
 /// A layer's pixels at `rect` (ADR 464); the whole canvas stays the
 /// plain canvas shape.
 fn bounded_pixels(
@@ -3047,7 +3086,12 @@ pub fn smart_render_agreement(
             );
             let i = y * import.width as usize + x;
             if let Some(m) = mask.as_ref().filter(|m| m.enabled) {
-                if m.coverage[i] == 0 {
+                // The mask covers the plate's rectangle, or the canvas.
+                let mi = match m.rect {
+                    Some(mr) => (y - mr.y as usize) * mr.w as usize + (x - mr.x as usize),
+                    None => i,
+                };
+                if m.coverage[mi] == 0 {
                     continue;
                 }
             }
@@ -3336,10 +3380,10 @@ mod tests {
         let mut s = numbered();
         s.add("top");
         let cov = SelectionCoverage::from_data(3, 2, vec![255, 0, 0, 0, 0, 0]).expect("cov");
-        s.layers[1].mask = Some(Arc::new(cov));
+        s.layers[1].mask = Some(Arc::new(cov).into());
         s.transform_canvas(CanvasOp::FlipHorizontal).expect("flip");
         assert_eq!(
-            s.layers[1].mask.as_ref().expect("mask").data(),
+            s.layers[1].mask.as_ref().expect("mask").canvas().data(),
             &[0, 0, 255, 0, 0, 0]
         );
         assert_eq!(
@@ -4365,7 +4409,8 @@ mod tests {
         let half = vec![255u8, 128, 0, 255];
         let base = vec![255u8, 255, 255, 0];
         let cov = Arc::new(SelectionCoverage::from_data(4, 1, half).expect("cov"));
-        let out = effective_coverage(Some(&cov), Some(&base), 4, 1).expect("combined");
+        let out =
+            effective_coverage(Some(&LayerMask::Canvas(cov)), Some(&base), 4, 1).expect("combined");
         assert_eq!(out.coverage_at(0, 0), 255, "full × full stays full");
         assert_eq!(out.coverage_at(1, 0), 128, "half × full is half");
         assert_eq!(out.coverage_at(2, 0), 0);
@@ -4926,7 +4971,7 @@ mod tests {
         assert!(err.to_string().contains("already has a mask"), "{err}");
         s.clear_mask(1).expect("clear");
         s.add_mask(1, false).expect("hide all");
-        assert!(s.layers[1].mask.as_ref().unwrap().is_all_zero());
+        assert!(s.layers[1].mask.as_ref().unwrap().canvas().is_all_zero());
     }
 
     #[test]
@@ -4988,7 +5033,10 @@ mod tests {
             .edit_active_mask("Paint mask", Region::new(4, 4, 4, 4), new)
             .expect("edit");
         assert!(matches!(out, RecordOutcome::Recorded { .. }));
-        assert_eq!(s.layers[1].mask.as_ref().unwrap().data(), &painted[..]);
+        assert_eq!(
+            s.layers[1].mask.as_ref().unwrap().canvas().data(),
+            &painted[..]
+        );
         assert_eq!(
             s.layers[1].rgba.raw_arc(),
             pixels_before,
@@ -4999,11 +5047,17 @@ mod tests {
         // Move away first: undo must find the MASK of layer 1 regardless.
         s.set_active(0).expect("elsewhere");
         assert_eq!(s.undo().as_deref(), Some("Paint mask"));
-        assert!(s.layers[1].mask.as_ref().unwrap().is_all_zero(), "undone");
+        assert!(
+            s.layers[1].mask.as_ref().unwrap().canvas().is_all_zero(),
+            "undone"
+        );
         assert_eq!(s.active_index(), 1, "undo lands where the edit was");
         assert!(s.edit_target_is_mask(), "… on the mask");
         assert_eq!(s.redo().as_deref(), Some("Paint mask"));
-        assert_eq!(s.layers[1].mask.as_ref().unwrap().data(), &painted[..]);
+        assert_eq!(
+            s.layers[1].mask.as_ref().unwrap().canvas().data(),
+            &painted[..]
+        );
         // Undo past it removes the mask itself (the structure step).
         s.undo();
         assert_eq!(s.undo().as_deref(), Some("Add mask"));
@@ -5067,7 +5121,7 @@ mod tests {
             pollster::block_on(s.composite_with_active_mask(Some(ctx), Arc::new(mask.clone())))
                 .expect("preview");
         assert!(
-            s.layers[1].mask.as_ref().unwrap().is_all_zero(),
+            s.layers[1].mask.as_ref().unwrap().canvas().is_all_zero(),
             "the preview restored the real mask"
         );
         s.edit_active_mask("Paint mask", bounds, mask)

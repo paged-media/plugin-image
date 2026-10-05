@@ -381,23 +381,54 @@ pub fn rasterize(mask: &VectorMask, width: u32, height: u32) -> SelectionCoverag
 /// that exists, kept but not applied (the user mask when both exist: the
 /// stack holds one mask per layer). `None` when the plate has no mask.
 pub fn plate_mask(plate: &LayerPlate, width: u32, height: u32) -> Option<MaskPlate> {
-    let vector = plate.vector_mask.as_ref().map(|v| MaskPlate {
-        coverage: rasterize(v, width, height).data().to_vec(),
-        enabled: !v.disabled,
+    // A pixel layer's masks live at its plate's rectangle (ADR 464; the
+    // import cut the user mask there); an adjustment's span the canvas.
+    let rect = plate.rect.filter(|_| plate.adjustment.is_none());
+    let vector = plate.vector_mask.as_ref().map(|v| {
+        let canvas = MaskPlate {
+            coverage: rasterize(v, width, height).data().to_vec(),
+            enabled: !v.disabled,
+            rect: None,
+        };
+        match rect {
+            Some(r) => canvas.crop(width, r),
+            None => canvas,
+        }
     });
     match (plate.mask.clone(), vector) {
         (None, None) => None,
         (Some(m), None) | (None, Some(m)) => Some(m),
         (Some(u), Some(v)) => Some(match (u.enabled, v.enabled) {
-            (true, true) => MaskPlate {
-                coverage: u
-                    .coverage
-                    .iter()
-                    .zip(&v.coverage)
-                    .map(|(&a, &b)| ((u32::from(a) * u32::from(b) + 127) / 255) as u8)
-                    .collect(),
-                enabled: true,
-            },
+            (true, true) => {
+                // Both on the same rectangle (or both canvas-wide).
+                let (u, v) = match (u.rect, v.rect) {
+                    (a, b) if a == b => (u, v),
+                    (Some(r), None) => (u, v.crop(width, r)),
+                    (None, Some(r)) => (u.crop(width, r), v),
+                    _ => (
+                        MaskPlate {
+                            coverage: u.canvas_coverage(width, height, 0),
+                            enabled: u.enabled,
+                            rect: None,
+                        },
+                        MaskPlate {
+                            coverage: v.canvas_coverage(width, height, 0),
+                            enabled: v.enabled,
+                            rect: None,
+                        },
+                    ),
+                };
+                MaskPlate {
+                    coverage: u
+                        .coverage
+                        .iter()
+                        .zip(&v.coverage)
+                        .map(|(&a, &b)| ((u32::from(a) * u32::from(b) + 127) / 255) as u8)
+                        .collect(),
+                    enabled: true,
+                    rect: u.rect,
+                }
+            }
             (false, true) => v,
             _ => u,
         }),
@@ -620,6 +651,7 @@ mod tests {
         let user = |enabled| MaskPlate {
             coverage: vec![128, 255, 255, 255],
             enabled,
+            rect: None,
         };
         let both = plate_mask(&plate(Some(user(true)), false), 2, 2).expect("mask");
         assert_eq!(

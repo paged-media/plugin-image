@@ -82,7 +82,7 @@ use image_kernels::families::compose::{
 };
 use image_kernels::KernelDef;
 
-use super::{alpha_of, effective_coverage, LayerStack, Plate};
+use super::{alpha_of, effective_coverage, LayerMask, LayerStack, Plate};
 use crate::fill::{f16_to_rgba8, rgba8_to_f16};
 use crate::ingest::{AdjustParams, IngestError};
 use image_core::Region;
@@ -97,6 +97,14 @@ fn gpu_err(e: image_gpu::GpuError) -> IngestError {
     IngestError::Pipeline(e.to_string())
 }
 
+fn same_mask(a: &Option<LayerMask>, b: &Option<LayerMask>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.same(b),
+        _ => false,
+    }
+}
+
 fn opt_ptr_eq<T: ?Sized>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
     match (a, b) {
         (None, None) => true,
@@ -109,13 +117,13 @@ fn opt_ptr_eq<T: ?Sized>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
 /// the clip base's pixels (whose alpha is the clip).
 #[derive(Clone, Default)]
 pub(super) struct CovKey {
-    pub own: Option<Arc<SelectionCoverage>>,
+    pub own: Option<LayerMask>,
     pub clip: Option<Arc<[u8]>>,
 }
 
 impl CovKey {
     fn same(&self, o: &CovKey) -> bool {
-        opt_ptr_eq(&self.own, &o.own) && opt_ptr_eq(&self.clip, &o.clip)
+        same_mask(&self.own, &o.own) && opt_ptr_eq(&self.clip, &o.clip)
     }
 
     fn is_none(&self) -> bool {
@@ -128,12 +136,29 @@ impl CovKey {
         effective_coverage(self.own.as_ref(), clip.as_deref(), w, h)
     }
 
-    /// The r16float mask bytes, exactly as the fold has always lowered them.
+    /// The r16float mask bytes, exactly as the fold has always lowered
+    /// them — read texel by texel, so a bounded mask is never expanded
+    /// on the CPU for its upload.
     fn mask_bytes(&self, w: u32, h: u32) -> Option<Vec<u8>> {
-        self.coverage(w, h).map(|cov| {
-            SelectionMask::from_fn(w, h, |x, y| f32::from(cov.coverage_at(x, y)) / 255.0)
-                .into_bytes()
-        })
+        if self.is_none() {
+            return None;
+        }
+        let clip = self.clip.as_ref();
+        Some(
+            SelectionMask::from_fn(w, h, |x, y| {
+                let own = self.own.as_ref().map(|m| u32::from(m.at(x, y)));
+                let c =
+                    clip.map(|px| u32::from(px[(y as usize * w as usize + x as usize) * 4 + 3]));
+                let v = match (own, c) {
+                    (Some(a), Some(b)) => (a * b + 127) / 255,
+                    (Some(a), None) => a,
+                    (None, Some(b)) => b,
+                    (None, None) => 255,
+                };
+                v as f32 / 255.0
+            })
+            .into_bytes(),
+        )
     }
 }
 
@@ -559,7 +584,7 @@ impl LayerStack {
             cov: CovKey {
                 own: g.and_then(|g| {
                     super::multiply_coverage(
-                        g.live_mask().cloned(),
+                        g.live_mask().cloned().map(LayerMask::Canvas),
                         self.pass_through_mask(g.parent),
                     )
                 }),
@@ -999,7 +1024,7 @@ fn mask_window(cov: &CovKey, w: u32, r: (u32, u32, u32, u32)) -> Vec<u8> {
     let (x0, y0, rw, rh) = r;
     SelectionMask::from_fn(rw, rh, |x, y| {
         let (cx, cy) = (x0 + x, y0 + y);
-        let own = cov.own.as_ref().map(|c| u32::from(c.coverage_at(cx, cy)));
+        let own = cov.own.as_ref().map(|c| u32::from(c.at(cx, cy)));
         let clip = cov
             .clip
             .as_ref()
@@ -1096,7 +1121,7 @@ impl LayerStack {
                         && g1 == g2
                         && std::ptr::eq(*b1, *b2)
                         && o1.to_bits() == o2.to_bits()
-                        && opt_ptr_eq(&c1.own, &c2.own)
+                        && same_mask(&c1.own, &c2.own)
                         && note(p1, p2)
                         && match (&c1.clip, &c2.clip) {
                             (None, None) => true,

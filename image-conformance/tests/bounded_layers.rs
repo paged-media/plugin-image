@@ -30,8 +30,8 @@
  *  @license    MPL-2.0 OR Paged Media Enterprise License (PMEL)
  */
 
-//! LAYERS AT THEIR BOUNDS (ADR 464) composite exactly like the same layers
-//! at canvas size. Every Photoshop-written layered fixture is imported
+//! LAYERS AT THEIR BOUNDS (ADR 464) — pixels and masks — composite exactly
+//! like the same layers at canvas size. Every Photoshop-written layered fixture is imported
 //! twice — with the plates the import produces (each at its record's
 //! rectangle) and with every plate expanded to the canvas — and the two
 //! stacks must fold to the SAME bytes: the windowed blend of a bounded
@@ -88,6 +88,10 @@ fn bounded_layers_fold_to_the_same_bytes_as_canvas_layers__feat__image_psd_layer
                 );
                 p.rgba = p.canvas_rgba8(import.width, import.height);
                 p.rect = None;
+                if let Some(m) = &mut p.mask {
+                    m.coverage = m.canvas_coverage(import.width, import.height, 0);
+                    m.rect = None;
+                }
             }
         }
         let a = LayerStack::from_psd_plates(&import).expect("bounded stack");

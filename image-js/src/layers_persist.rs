@@ -46,7 +46,8 @@
 //! depth (8 | 16), u32 pixel slot, then (version 3) i32 x, i32 y, u32 w,
 //! u32 h — the rectangle the pixels cover, all four −1/0 sentinels
 //! (x = −1) for the canvas (ADR 464) — and f32 blend gamma (0 = none),
-//! then i64 mask slot (-1 = none), then for an
+//! then i64 mask slot (-1 = none) and (version 3) the mask's i32 x, i32
+//! y, u32 w, u32 h, u8 outside value (x = −1: canvas-sized), then for an
 //! adjustment u32 n + n f32 (`AdjustParams::to_wire`), for a smart object
 //! u32 width, u32 height, f32 scale, u32 source slot}. A `str` is u32
 //! length + UTF-8. Versions 1 (no group masks) and 2 (no layer
@@ -144,6 +145,15 @@ fn blend(name: &str) -> Result<&'static image_kernels::KernelDef, IngestError> {
 impl LayerStack {
     /// The stack as a manifest plus the buffers it refers to by slot.
     pub fn export(&self) -> (Vec<u8>, Vec<Arc<[u8]>>) {
+        self.export_with(VERSION)
+    }
+
+    /// [`export`](Self::export) in an older manifest version — what a
+    /// reader of that version wrote, so the tests can prove it still
+    /// opens. Fields the version lacks are left out (and so is what they
+    /// carried: group masks before 2, bounds and the text gamma before 3,
+    /// bounded layers and masks then written at canvas size).
+    fn export_with(&self, version: u32) -> (Vec<u8>, Vec<Arc<[u8]>>) {
         let mut w = W(Vec::new());
         let mut buffers: Vec<Arc<[u8]>> = Vec::new();
         let mut slot = |b: Arc<[u8]>| -> u32 {
@@ -151,7 +161,7 @@ impl LayerStack {
             (buffers.len() - 1) as u32
         };
         w.0.extend_from_slice(MAGIC);
-        w.u32(VERSION);
+        w.u32(version);
         w.u32(self.width);
         w.u32(self.height);
         w.u32(self.active as u32);
@@ -165,12 +175,14 @@ impl LayerStack {
             w.str(g.blend.id);
             w.u8(g.pass_through as u8);
             w.i64(g.parent.map_or(-1, i64::from));
-            w.u8(g.mask_enabled as u8);
-            let mask = g
-                .mask
-                .as_ref()
-                .map(|m| slot(Arc::from(m.data().to_vec().into_boxed_slice())));
-            w.i64(mask.map_or(-1, i64::from));
+            if version >= 2 {
+                w.u8(g.mask_enabled as u8);
+                let mask = g
+                    .mask
+                    .as_ref()
+                    .map(|m| slot(Arc::from(m.data().to_vec().into_boxed_slice())));
+                w.i64(mask.map_or(-1, i64::from));
+            }
         }
         w.u32(self.layers.len() as u32);
         for l in &self.layers {
@@ -191,7 +203,7 @@ impl LayerStack {
             w.u8(if l.rgba.is_16bit() { 16 } else { 8 });
             // A bounded layer is stored as it lives — expanding it here
             // would cost every untouched layer its canvas on each save.
-            match l.rgba.bounded() {
+            match l.rgba.bounded().filter(|_| version >= 3) {
                 Some(b) => {
                     w.u32(slot(b.px.raw_arc()));
                     w.i32(b.rect.x);
@@ -201,18 +213,50 @@ impl LayerStack {
                 }
                 None => {
                     w.u32(slot(l.rgba.raw_arc()));
-                    w.i32(-1);
-                    w.i32(-1);
-                    w.u32(0);
-                    w.u32(0);
+                    if version >= 3 {
+                        w.i32(-1);
+                        w.i32(-1);
+                        w.u32(0);
+                        w.u32(0);
+                    }
                 }
             }
-            w.f32(l.blend_gamma.unwrap_or(0.0));
-            let mask = l
-                .mask
-                .as_ref()
-                .map(|m| slot(Arc::from(m.data().to_vec().into_boxed_slice())));
-            w.i64(mask.map_or(-1, i64::from));
+            if version >= 3 {
+                w.f32(l.blend_gamma.unwrap_or(0.0));
+            }
+            // A bounded mask is stored as it lives (ADR 464): its
+            // rectangle, the value outside it, its bytes.
+            let mask = l.mask.as_ref().map(|m| match m {
+                super::LayerMask::Bounded(_) if version < 3 => (
+                    slot(Arc::from(m.to_canvas().data().to_vec().into_boxed_slice())),
+                    None,
+                ),
+                super::LayerMask::Canvas(c) => {
+                    (slot(Arc::from(c.data().to_vec().into_boxed_slice())), None)
+                }
+                super::LayerMask::Bounded(b) => (
+                    slot(Arc::from(b.data.clone().into_boxed_slice())),
+                    Some((b.rect, b.outside)),
+                ),
+            });
+            w.i64(mask.map_or(-1, |(s, _)| i64::from(s)));
+            match mask.and_then(|(_, b)| b).filter(|_| version >= 3) {
+                Some((r, outside)) => {
+                    w.i32(r.x);
+                    w.i32(r.y);
+                    w.u32(r.w);
+                    w.u32(r.h);
+                    w.u8(outside);
+                }
+                None if version >= 3 => {
+                    w.i32(-1);
+                    w.i32(-1);
+                    w.u32(0);
+                    w.u32(0);
+                    w.u8(0);
+                }
+                None => {}
+            }
             match &l.kind {
                 LayerKind::Pixels => {}
                 LayerKind::Adjustment(p) => {
@@ -353,16 +397,24 @@ impl LayerStack {
                     crate::pixels::Pixels::from_raw(px, depth).into()
                 }
             };
-            let mask = match u32::try_from(r.i64()?) {
-                Ok(slot) => {
-                    let m = buffer(slot)?;
-                    Some(Arc::new(
-                        SelectionCoverage::from_data(width, height, m.to_vec()).ok_or_else(
-                            || IngestError::Decode(format!("layer \"{name}\": mask is mis-sized")),
-                        )?,
-                    ))
-                }
-                Err(_) => None,
+            let mask_slot = u32::try_from(r.i64()?).ok();
+            let mask_bounds = if version >= 3 {
+                let (x, y, rw, rh, outside) = (r.i32()?, r.i32()?, r.u32()?, r.u32()?, r.u8()?);
+                (x >= 0).then_some((image_core::Region::new(x, y, rw, rh), outside))
+            } else {
+                None
+            };
+            let mis = || IngestError::Decode(format!("layer \"{name}\": mask is mis-sized"));
+            let mask = match (mask_slot, mask_bounds) {
+                (Some(slot), Some((rect, outside))) => Some(super::LayerMask::Bounded(Arc::new(
+                    super::BoundedMask::new(rect, outside, buffer(slot)?.to_vec(), width, height)
+                        .ok_or_else(mis)?,
+                ))),
+                (Some(slot), None) => Some(super::LayerMask::Canvas(Arc::new(
+                    SelectionCoverage::from_data(width, height, buffer(slot)?.to_vec())
+                        .ok_or_else(mis)?,
+                ))),
+                (None, _) => None,
             };
             let kind = match kind_code {
                 0 => LayerKind::Pixels,
@@ -523,26 +575,15 @@ mod tests {
         );
         assert!(!g.mask_enabled, "the switch survives");
 
-        // Version 1: the same manifest without the group's two mask fields
-        // and without the layers' rectangles (all canvas-sized here).
+        // Versions 1 and 2, as their writers wrote them, still open.
         let plain = rich();
-        let (m2, bufs2) = plain.export();
-        let mut v1 = m2.clone();
-        v1[4..8].copy_from_slice(&1u32.to_le_bytes());
-        let canvas_rect = [
-            0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        while let Some(at) = v1.windows(20).position(|w| w == canvas_rect) {
-            v1.drain(at..at + 20);
+        for version in [1, 2] {
+            let (old_m, old_bufs) = plain.export_with(version);
+            let old = LayerStack::import(&old_m, &old_bufs).expect("an older manifest opens");
+            assert_eq!(old.groups.len(), 1);
+            assert_eq!(old.len(), plain.len());
         }
-        // The group record ends with u8 mask_enabled + i64 mask slot (-1):
-        // nine bytes, the first group's last ones before the layer count.
-        let tail = [1u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
-        let at = v1
-            .windows(9)
-            .position(|w| w == tail)
-            .expect("the group's mask fields");
-        v1.drain(at..at + 9);
+        let (v1, bufs2) = plain.export_with(1);
         let old = LayerStack::import(&v1, &bufs2).expect("a version-1 manifest opens");
         assert_eq!(old.groups.len(), 1);
         assert!(old.groups[0].mask.is_none() && old.groups[0].mask_enabled);

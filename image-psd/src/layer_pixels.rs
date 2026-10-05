@@ -239,6 +239,45 @@ pub struct MaskPlate {
     pub coverage: Vec<u8>,
     /// Mask flags bit 1 clear: a disabled mask is kept, not applied.
     pub enabled: bool,
+    /// The rectangle `coverage` covers; `None` = the whole canvas. A
+    /// pixel layer's mask is kept at its plate's rectangle (ADR 464):
+    /// outside it the layer is transparent, so its mask changes nothing
+    /// there.
+    pub rect: Option<image_core::Region>,
+}
+
+impl MaskPlate {
+    /// The canvas-extent mask cut to `rect` (inside the `cw`-wide canvas).
+    pub fn crop(self, cw: u32, rect: image_core::Region) -> MaskPlate {
+        if self.rect.is_some() {
+            return self;
+        }
+        let mut coverage = Vec::with_capacity(rect.w as usize * rect.h as usize);
+        for y in rect.y as usize..rect.y as usize + rect.h as usize {
+            let s = y * cw as usize + rect.x as usize;
+            coverage.extend_from_slice(&self.coverage[s..s + rect.w as usize]);
+        }
+        MaskPlate {
+            coverage,
+            enabled: self.enabled,
+            rect: Some(rect),
+        }
+    }
+
+    /// The mask as canvas-extent coverage (`outside` beyond its
+    /// rectangle) — for a reader that wants the canvas.
+    pub fn canvas_coverage(&self, cw: u32, ch: u32, outside: u8) -> Vec<u8> {
+        let Some(r) = self.rect else {
+            return self.coverage.clone();
+        };
+        let mut out = vec![outside; cw as usize * ch as usize];
+        for y in 0..r.h as usize {
+            let d = (r.y as usize + y) * cw as usize + r.x as usize;
+            out[d..d + r.w as usize]
+                .copy_from_slice(&self.coverage[y * r.w as usize..(y + 1) * r.w as usize]);
+        }
+        out
+    }
 }
 
 /// Every mask one layer record carries ([`PsdFile::layer_masks`]).
@@ -363,6 +402,8 @@ struct Walk<'a> {
     pixel_layers: Vec<(&'a LayerRecord, Option<usize>)>,
     groups: Vec<GroupPlate>,
     group_records: Vec<Option<&'a LayerRecord>>,
+    /// Groups carrying a mask (canvas-extent).
+    group_masked: usize,
     masked: usize,
     blockers: Vec<ImportBlocker>,
 }
@@ -576,6 +617,7 @@ impl PsdFile {
             mut groups,
             group_records,
             masked,
+            group_masked,
             mut blockers,
         } = self.import_walk()?;
         if measuring_cmyk_blends {
@@ -601,10 +643,24 @@ impl PsdFile {
             .max(0) as usize;
             w * h * 4
         };
-        let mut total = canvas_texels.saturating_mul(masked);
+        // Masks: a group's is canvas-extent, an adjustment's too (it says
+        // where the adjustment applies); a pixel layer's is cut to its
+        // rectangle — a quarter of its pixels' bytes.
+        let mut total = canvas_texels.saturating_mul(group_masked);
         for (l, _) in &pixel_layers {
+            let has_mask = l
+                .channels
+                .iter()
+                .any(|c| c.id == USER_MASK || c.id == REAL_USER_MASK)
+                || vector_mask_payload(l).is_some();
             if adjustment_of(l).ok().flatten().is_some() {
+                if has_mask {
+                    total = total.saturating_add(canvas_texels);
+                }
                 continue;
+            }
+            if has_mask {
+                total = total.saturating_add(rect_bytes(l) / 4);
             }
             let overlay = effects_of(l)
                 .ok()
@@ -656,7 +712,15 @@ impl PsdFile {
                 rgba,
                 rect: Some(rect),
                 group,
-                mask: masks.user,
+                // A pixel layer's mask at its rectangle; an adjustment's
+                // stays canvas-wide (it is where the adjustment applies).
+                mask: masks.user.map(|m| {
+                    if adjustment.is_some() {
+                        m
+                    } else {
+                        m.crop(cw, rect)
+                    }
+                }),
                 // A shape layer's pixels already ARE its path's render.
                 vector_mask: masks.vector.filter(|_| !is_shape_content(layer)),
                 smart: is_smart(layer),
@@ -738,6 +802,7 @@ impl PsdFile {
         let mut group_records: Vec<Option<&LayerRecord>> = Vec::new();
         let mut open: Vec<usize> = Vec::new();
         let mut masked = 0usize;
+        let mut group_masked = 0usize;
         let mut smart = false;
         for layer in &self.layer_mask.layers {
             let kind = layer.addl.iter().find_map(|a| a.lsct()).map(|d| d.kind);
@@ -926,6 +991,7 @@ impl PsdFile {
                     }
                     if has_mask {
                         masked += 1;
+                        group_masked += 1;
                         group_records[g] = Some(layer);
                     }
                     let lsct_blend = layer
@@ -1090,6 +1156,7 @@ impl PsdFile {
             groups,
             group_records,
             masked,
+            group_masked,
             blockers,
         })
     }
@@ -1207,6 +1274,7 @@ impl PsdFile {
         Ok(MaskPlate {
             coverage,
             enabled: flags & 0x02 == 0,
+            rect: None,
         })
     }
 

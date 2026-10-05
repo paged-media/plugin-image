@@ -32,8 +32,8 @@ the canvas.
 - Any EDIT of a layer's pixels (paint, fill, filter, transform) expands that layer to the canvas
   first, once, so every editing path keeps its canvas-sized contract. Memory grows by the layers
   a user actually edits.
-- Persistence stores the bounds with the pixels (layer manifest version 3), so saving does not
-  expand every layer.
+- Persistence stores the bounds with the pixels and masks (layer manifest version 3), so saving
+  does not expand every layer.
 - The type makes the two shapes explicit, so no code can read bounded bytes as a canvas by
   accident: the compiler lists every place that touched layer pixels.
 
@@ -46,8 +46,13 @@ the canvas.
   one level. One level, not zero: outside a bounded layer's rectangle the fold leaves the
   accumulator exactly as it is, while the reference blends a transparent texel, which the blend
   kernel reproduces only up to f16 rounding after a partly transparent group.
-- Corpus: the layered open went from 11 to 43 compared files; the budget refusals fell from 67
-  to 30 (masks are still canvas-sized).
+- Corpus: the layered open went from 11 to 43 compared files with bounded pixels, and to 67
+  once masks were bounded too; budget refusals fell from 67 to 30 to 5.
+- MASKS live at their bounds the same way (`LayerMask`: a rectangle, its coverage, one value
+  outside). A pixel layer's mask is cut to the layer's rectangle — outside it the layer is
+  transparent, so its mask changes nothing there; an adjustment layer's mask stays canvas-sized,
+  since it is where the adjustment applies. The fold reads masks texel by texel and keys its GPU
+  copies by identity, so a bounded mask is never expanded to be drawn.
 
 ## Consequences
 
