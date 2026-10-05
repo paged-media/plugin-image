@@ -99,39 +99,39 @@ landed. How the parts fit is in
 - **PSD.** The composite decode takes 8- and 16-bit RGB, greyscale or CMYK, raw or RLE (not
   16-bit RLE); other modes and depths are refused, and a transparent document's white-matted
   merged colour is un-matted (CMYK: matted against the paper). Layers are imported from RGB
-  and CMYK files within 384 MiB: pixel layers, groups and their user masks (an isolated group
-  blends through its mask, a pass-through group's members each go through it), clipping, user
-  masks, vector masks (drawn from their paths the way Photoshop draws them — a 17×15 sample grid
-  per pixel, per-component combine / subtract / intersect / exclude, even-odd or non-zero,
-  invert — and multiplied with the user mask; on a fill/shape layer the stored pixels already
-  are the shape; over 314 corpus masks 0.0004 % of pixels differ from Photoshop's cached render
-  by more than two levels, `image-psd/src/vector_mask.rs`), fill opacity; smart objects as their stored render, accepted only where the file's merged
-  composite agrees inside each one's footprint (a stale render, as on a corpus mock-up, opens
-  flattened); Curves, Levels, Exposure, Invert and Hue/Saturation adjustment layers (curves
-  exact, the others within 1–4 levels of Photoshop-written layers); effects blocks that draw
-  nothing; and Color Overlay, as a solid layer clipped to its base above the base's clipped
-  layers (within 1 level). A file with other drawn effects, other adjustment layers (Photo
-  Filter and Brightness/Contrast differ from Photoshop's), artboards, a group vector mask or a
-  non-default mask density/feather opens flattened, and says which
-  (`PsdFile::layer_import_blockers` lists every reason; `image-psd/src/layer_pixels.rs`). A
-  CMYK file's layers are converted to sRGB one by one and blended in RGB, which Photoshop
-  does not do (it blends the inks), so a CMYK file also opens flattened when a layer or group
-  uses a blend mode other than Normal (measured 9.9–50 ΔE00 p95 off), when it has no real
-  merged data, or when its RGB flatten is more than 8 levels off the converted composite on
-  over 1 % of the pixels (soft edges and partial opacity over different colours: a 60 % layer
-  measured 61 levels off). Layers Photoshop writes for a 16-bit document (the `Lr16` block) are
-  not read, so such a file opens flattened. Of the corpus's 77 CMYK files all now open (74
-  through their profile, 3 without one); none opened as layers before vector masks were read.
-  Across the 157-file corpus, 11 files open as layers (before vector masks); the next wall is
-  the 384 MiB budget, which canvas-sized layers reach on
-  mock-ups (35 files otherwise importable: 11–26 layers at 3500×2300 to 4500×3000 need
-  429–1338 MiB canvas-sized, 122–272 MiB at each layer's own bounds). Save-back is 8-bit RGB. "Apply to file" and
+  and CMYK files, each layer and its mask at its own bounds ([ADR 464](adr/464-layers-at-their-own-bounds.md);
+  the 384 MiB budget counts the rectangles): pixel layers, groups and their user masks (an
+  isolated group blends through its mask, a pass-through group's members each go through it),
+  clipping, user masks, vector masks (drawn from their paths the way Photoshop draws them — a
+  17×15 sample grid per pixel, per-component combine / subtract / intersect / exclude, even-odd
+  or non-zero, invert — and multiplied with the user mask; on a fill/shape layer the stored
+  pixels already are the shape; `image-psd/src/vector_mask.rs`), mask density and feather (a
+  Gaussian of that sigma), fill opacity; smart objects as their stored render, accepted only
+  where the file's merged composite agrees inside each one's footprint (a stale render, as on a
+  corpus mock-up, opens flattened); text layers blended in a gamma space as Photoshop's are
+  (`compose.normal_gamma`, 1.55: anti-aliased edges within 1–7 levels, where a plain blend was
+  19–40 off; RGB documents, Normal mode); Curves, Levels, Exposure, Invert and Hue/Saturation
+  adjustment layers (curves exact, the others within 1–4 levels of Photoshop-written layers);
+  effects blocks that draw nothing; and Color Overlay, as a solid layer clipped to its base
+  above the base's clipped layers (within 1 level). A file with other drawn effects, other
+  adjustment layers (Photo Filter and Brightness/Contrast differ from Photoshop's), artboards or
+  a group vector mask opens flattened, and says which (`PsdFile::layer_import_blockers` lists
+  every reason; `image-psd/src/layer_pixels.rs`). A CMYK file's layers are converted to sRGB
+  one by one and blended in RGB, which Photoshop does not do (it blends the inks), so a CMYK
+  file opens flattened when a layer, group or overlay uses a mode other than Normal or Multiply
+  (measured 9.9–50 ΔE00 p95 off on synthetic tiles), when it has no real merged data, or when
+  its RGB flatten is more than 8 levels off the converted composite on over 1 % of the pixels.
+  Layers Photoshop writes for a 16-bit document (the `Lr16` block) are not read, so such a file
+  opens flattened. Across the 157-file private corpus, 80 files open as layers and are measured
+  against Photoshop's composite (3 did on 2026-10-04); the rest open flattened, the commonest
+  reasons being smart objects the composite does not vouch for (25), effects (17) and fill
+  opacity on special blend modes (8). Save-back is 8-bit RGB. "Apply to file" and
   the PNG and JPEG exporters encode the composite. The PSD exporter returns the retained file
   byte for byte only when the parameters are the identity and the pixels have not been edited since ingest; otherwise it
   runs the save-back, and when the save-back declines (a size change, a non-RGB or non-8-bit file) it exports nothing
   and says why (`glue/src/session.ts`, `psdExportBytes`; [ADR 460](adr/460-document-is-not-the-store.md)).
-- **Layers and undo.** Every layer is canvas-sized; the layer fold keeps whole-canvas
-  textures, so the largest image is the device's texture limit (16384 px on Apple silicon,
+- **Layers and undo.** A layer is canvas-sized once edited (an imported layer keeps its bounds
+  until then); the layer fold keeps whole-canvas accumulator textures, so the largest image is the device's texture limit (16384 px on Apple silicon,
   8192 on many others). A crop, resize or straighten replaces the stack with one layer and
   drops the history. The undo list keeps 200 structure steps; its pixel steps live in a tile
   journal of at most 32 entries and 256 MiB.
