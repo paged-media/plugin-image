@@ -754,7 +754,6 @@ impl LayerStack {
                 "PSD layer import produced no layers".into(),
             ));
         }
-        let want = (width as usize) * (height as usize) * 4;
         // A Color Overlay becomes a layer of its own (below), so the stack
         // holds one layer per plate plus one per overlay.
         let n_layers = import.layers.len()
@@ -804,11 +803,15 @@ impl LayerStack {
             // The user and vector masks fold into the layer's one mask
             // (`psd_vector_mask::plate_mask`).
             let mask = crate::psd_vector_mask::plate_mask(plate, width, height);
-            if adjustment.is_none() && plate.rgba.len() != want {
+            let plate_rect = plate.rect.unwrap_or(Region::new(0, 0, width, height));
+            let plate_want = plate_rect.w as usize * plate_rect.h as usize * 4;
+            if adjustment.is_none() && plate.rgba.len() != plate_want {
                 return Err(IngestError::Decode(format!(
-                    "PSD layer \"{}\" is {} bytes for {width}×{height} (expected {want})",
+                    "PSD layer \"{}\" is {} bytes for its {}×{} rectangle (expected {plate_want})",
                     plate.name,
-                    plate.rgba.len()
+                    plate.rgba.len(),
+                    plate_rect.w,
+                    plate_rect.h
                 )));
             }
             let name = if plate.name.is_empty() {
@@ -823,12 +826,22 @@ impl LayerStack {
                 locked: false,
                 opacity: plate.opacity as f32 / 255.0,
                 blend: psd_blend_kernel(&plate.blend_key),
-                rgba: crate::pixels::Pixels::from_rgba8(if adjustment.is_some() {
-                    Arc::from(vec![0u8; want].into_boxed_slice())
-                } else {
-                    Arc::from(plate.rgba.clone().into_boxed_slice())
-                })
-                .into(),
+                // At its BOUNDS (ADR 464): an adjustment keeps an empty
+                // rectangle, a pixel layer its record's.
+                rgba: bounded_pixels(
+                    if adjustment.is_some() {
+                        Region::new(0, 0, 0, 0)
+                    } else {
+                        plate_rect
+                    },
+                    if adjustment.is_some() {
+                        Vec::new()
+                    } else {
+                        plate.rgba.clone()
+                    },
+                    width,
+                    height,
+                )?,
                 // A smart object's stored render arrives as pixels: the
                 // source is not rendered here (`smart_renders_agree`).
                 kind: match adjustment {
@@ -852,7 +865,9 @@ impl LayerStack {
             // group blends. That is a solid layer clipped to the base,
             // placed after the base's own clipped layers.
             if let Some(o) = &plate.color_overlay {
-                let solid: Vec<u8> = (0..want / 4)
+                // Drawn only inside its base, so it lives at the base's
+                // rectangle.
+                let solid: Vec<u8> = (0..plate_want / 4)
                     .flat_map(|_| [o.rgb[0], o.rgb[1], o.rgb[2], 255])
                     .collect();
                 pending_overlay = Some(Layer {
@@ -862,8 +877,7 @@ impl LayerStack {
                     locked: false,
                     opacity: f32::from(o.opacity) / 255.0,
                     blend: psd_blend_kernel(&o.blend_key),
-                    rgba: crate::pixels::Pixels::from_rgba8(Arc::from(solid.into_boxed_slice()))
-                        .into(),
+                    rgba: bounded_pixels(plate_rect, solid, width, height)?,
                     kind: LayerKind::Pixels,
                     mask: None,
                     mask_enabled: true,
@@ -1548,6 +1562,51 @@ impl LayerStack {
 
     /// The enclosing chain of `gid`, OUTERMOST first — what the fold
     /// compares against to decide which groups to open and close.
+    /// Store layer `index` at the bounding box of its visible pixels
+    /// (ADR 464): nothing it draws changes — outside the box every pixel
+    /// is transparent — but it then occupies the box, not the canvas.
+    /// Returns the box, or `None` when the layer is not an 8-bit pixel
+    /// layer or already as small as it gets. Not an undo step: it does
+    /// not change the image.
+    pub fn shrink_to_content(&mut self, index: usize) -> Result<Option<Region>, IngestError> {
+        let (w, h) = (self.width, self.height);
+        let layer = self.layer_mut(index)?;
+        if !layer.is_pixels() || layer.rgba.is_16bit() {
+            return Ok(None);
+        }
+        let px = layer.rgba.canvas().raw_arc();
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+        for y in 0..h {
+            for x in 0..w {
+                if px[((y * w + x) * 4 + 3) as usize] != 0 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        let rect = if x1 <= x0 {
+            Region::new(0, 0, 0, 0)
+        } else {
+            Region::new(x0 as i32, y0 as i32, x1 - x0, y1 - y0)
+        };
+        if let Some(b) = layer.rgba.bounded() {
+            if b.rect == rect {
+                return Ok(None);
+            }
+        } else if rect == Region::new(0, 0, w, h) {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(rect.w as usize * rect.h as usize * 4);
+        for y in rect.y as u32..rect.y as u32 + rect.h {
+            let s = ((y * w + rect.x as u32) * 4) as usize;
+            out.extend_from_slice(&px[s..s + rect.w as usize * 4]);
+        }
+        layer.rgba = bounded_pixels(rect, out, w, h)?;
+        Ok(Some(rect))
+    }
+
     /// Set (or clear) a GROUP's mask and its switch. Not an undo step:
     /// group masks arrive with a PSD import, the panel does not edit them
     /// yet.
@@ -2786,6 +2845,27 @@ fn exposure_lut(exposure: f32, offset: f32, gamma: f32) -> [u8; 256] {
     lut
 }
 
+/// A layer's pixels at `rect` (ADR 464); the whole canvas stays the
+/// plain canvas shape.
+fn bounded_pixels(
+    rect: Region,
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<crate::pixels::LayerPixels, IngestError> {
+    let px = crate::pixels::Pixels::from_rgba8(Arc::from(rgba.into_boxed_slice()));
+    if rect == Region::new(0, 0, width, height) {
+        return Ok(px.into());
+    }
+    crate::pixels::Bounded::new(rect, px, width, height)
+        .map(crate::pixels::LayerPixels::Bounded)
+        .ok_or_else(|| {
+            IngestError::Decode(format!(
+                "a layer rectangle {rect:?} does not fit the {width}×{height} canvas"
+            ))
+        })
+}
+
 /// A PSD adjustment layer as the adjust chain's parameters. Only what
 /// `image_psd::adjustment::Adjustment::unmodelled` lets through reaches
 /// here, so every field it reads has a counterpart.
@@ -2913,10 +2993,20 @@ pub fn smart_render_agreement(
         let mut footprint = 0usize;
         let mut off = 0usize;
         let mut sum = 0u64;
-        for (i, px) in plate.rgba.chunks_exact(4).enumerate() {
-            if px[3] == 0 {
+        // The plate covers its rectangle (or the canvas); `i` is the
+        // canvas index of each of its pixels.
+        let r = plate
+            .rect
+            .unwrap_or(Region::new(0, 0, import.width, import.height));
+        for (k, px) in plate.rgba.chunks_exact(4).enumerate() {
+            if px[3] == 0 || r.w == 0 {
                 continue;
             }
+            let (x, y) = (
+                r.x as usize + k % r.w as usize,
+                r.y as usize + k / r.w as usize,
+            );
+            let i = y * import.width as usize + x;
             if let Some(m) = mask.as_ref().filter(|m| m.enabled) {
                 if m.coverage[i] == 0 {
                     continue;
@@ -3741,6 +3831,7 @@ mod tests {
             opacity,
             hidden,
             rgba: vec![0u8; 4 * 4 * 4],
+            rect: None,
         };
         let import = image_psd::LayerImport {
             groups: Vec::new(),
@@ -3784,6 +3875,7 @@ mod tests {
                 opacity: 255,
                 hidden: false,
                 rgba: vec![0u8; 8],
+                rect: None,
             }],
         };
         assert!(LayerStack::from_psd_plates(&import).is_err());

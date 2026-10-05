@@ -1,6 +1,6 @@
 # ADR 464 — Layers live at their own bounds
 
-- **Status:** Proposed, 2026-10-05.
+- **Status:** Accepted, 2026-10-05.
 - **Scope:** `image-js/src/pixels.rs`, `image-js/src/layers.rs` and `layers/fold.rs` (the stack and
   its fold), `image-js/src/layers_persist.rs`, `image-psd/src/layer_pixels.rs` (the import plates)
 
@@ -36,6 +36,18 @@ the canvas.
   expand every layer.
 - The type makes the two shapes explicit, so no code can read bounded bytes as a canvas by
   accident: the compiler lists every place that touched layer pixels.
+
+## Evidence
+
+- Every Photoshop-written layered fixture (58 files, 31 bounded plates) folds to the same bytes
+  bounded and canvas-sized (`image-conformance/tests/bounded_layers.rs`).
+- The resident-fold property test generates bounded layers and stores layers at their content
+  (`LayerStack::shrink_to_content`) at random; it agrees with the uncached reference fold within
+  one level. One level, not zero: outside a bounded layer's rectangle the fold leaves the
+  accumulator exactly as it is, while the reference blends a transparent texel, which the blend
+  kernel reproduces only up to f16 rounding after a partly transparent group.
+- Corpus: the layered open went from 11 to 43 compared files; the budget refusals fell from 67
+  to 30 (masks are still canvas-sized).
 
 ## Consequences
 

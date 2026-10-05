@@ -87,8 +87,9 @@ fn image_psd_layer_pixel_import_folds_to_the_flatten_reference() {
     let n = (m.width * m.height) as usize;
     let mut canvas = vec![Px([0.0; 4]); n];
     for plate in &import.layers {
-        assert_eq!(plate.rgba.len(), n * 4, "plates are canvas-extent");
-        let src = premultiplied(&plate.rgba);
+        let px = plate.canvas_rgba8(m.width, m.height);
+        assert_eq!(px.len(), n * 4, "a plate on the canvas");
+        let src = premultiplied(&px);
         let blend = Blend::from_psd_key(std::str::from_utf8(&plate.blend_key).unwrap_or("norm"))
             .unwrap_or(Blend::Normal);
         let opacity = plate.opacity as f32 / 255.0;
@@ -204,13 +205,25 @@ fn image_psd_layer_pixel_import_declines_a_file_with_no_layer_records() {
 
 #[test]
 fn image_psd_layer_pixel_import_declines_over_the_memory_budget() {
-    // Plates are canvas-extent, so the budget is the honest guard on a
-    // many-layer big-canvas file. Fake the extent by editing the parsed
-    // header: the gate must fire BEFORE any channel is decoded.
+    // Plates live at their BOUNDS (ADR 464), so a big canvas with small
+    // layers imports; big LAYERS are what the budget guards. Fake the
+    // extents by editing the parsed header and records: the gate must
+    // fire BEFORE any channel is decoded.
     let (bytes, _m) = fixtures::rle_and_raw_mix();
     let mut file = parse(&bytes);
     file.header.width = 8000;
     file.header.height = 8000;
+    let small = file
+        .layer_plates_rgba8()
+        .expect("small layers on a big canvas import");
+    assert!(
+        small.layers.iter().all(|p| p.rgba.len() <= 6 * 6 * 4),
+        "each plate holds its own rectangle, not the canvas"
+    );
+    for l in &mut file.layer_mask.layers {
+        l.right = 8000;
+        l.bottom = 8000;
+    }
     let err = file.layer_plates_rgba8().expect_err("over budget");
     let msg = err.to_string();
     assert!(msg.contains("over the"), "{msg}");

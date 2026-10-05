@@ -439,7 +439,7 @@ fn image_psd_annual_layers_fixture_builds_parses_and_renders() {
     // The Plate layer's pixels land inside its rect: sample (100, 100).
     let idx = ((100 * W + 100) * 4) as usize;
     assert_eq!(
-        &plates.layers[1].rgba[idx..idx + 4],
+        &plates.layers[1].canvas_rgba8(W, H)[idx..idx + 4],
         &[0xD9, 0x4F, 0x2B, 0xFF]
     );
 

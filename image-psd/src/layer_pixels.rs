@@ -156,9 +156,13 @@ pub struct LayerPlate {
     pub opacity: u8,
     /// Layer-record flags bit 1 (0x02).
     pub hidden: bool,
-    /// Canvas-extent, tightly packed straight RGBA8. Pixels outside the
-    /// layer's own rect are transparent black.
+    /// Tightly packed straight RGBA8 over [`rect`](Self::rect) — the
+    /// layer record's rectangle clipped to the canvas (ADR 464); `None`
+    /// means canvas-extent. Everything outside is transparent.
     pub rgba: Vec<u8>,
+    /// The rectangle `rgba` covers, in canvas pixels; `None` = the whole
+    /// canvas.
+    pub rect: Option<image_core::Region>,
     /// The record's `clipping` byte: this layer is CLIPPED to the one
     /// below it. Carried across because the consumer models clipping —
     /// it did not when this importer was written, and the refusal that
@@ -190,6 +194,28 @@ pub struct LayerPlate {
     /// has checked these plates against the merged composite (module
     /// docs).
     pub smart: bool,
+}
+
+impl LayerPlate {
+    /// The plate as canvas-extent straight RGBA8 (transparent outside its
+    /// rectangle) — for a reader that wants the canvas, such as a test.
+    pub fn canvas_rgba8(&self, cw: u32, ch: u32) -> Vec<u8> {
+        let Some(r) = self.rect else {
+            return self.rgba.clone();
+        };
+        let mut out = vec![0u8; cw as usize * ch as usize * 4];
+        let row = r.w as usize * 4;
+        for y in 0..r.h as usize {
+            let d = ((r.y as usize + y) * cw as usize + r.x as usize) * 4;
+            out[d..d + row].copy_from_slice(&self.rgba[y * row..(y + 1) * row]);
+        }
+        out
+    }
+
+    /// Bytes the plate's pixels occupy.
+    pub fn stored_bytes(&self) -> usize {
+        self.rgba.len()
+    }
 }
 
 /// One reason a file cannot be imported as layers.
@@ -559,26 +585,35 @@ impl PsdFile {
         let canvas_texels = (cw as usize)
             .checked_mul(ch as usize)
             .ok_or_else(|| PsdError::Unsupported("canvas extent overflows usize".into()))?;
-        let plate_bytes = canvas_texels
-            .checked_mul(4)
-            .ok_or_else(|| PsdError::Unsupported("canvas extent overflows usize".into()))?;
-        // A Color Overlay is one more canvas-extent plate in the stack.
-        let overlays = pixel_layers
-            .iter()
-            .filter(|(l, _)| {
-                effects_of(l)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|fx| matches!(fx.color_overlay, Some(Ok(_))))
-            })
-            .count();
-        let total = plate_bytes
-            .saturating_mul(pixel_layers.len() + overlays)
-            .saturating_add(canvas_texels.saturating_mul(masked));
+        // Plates are BOUNDED (ADR 464): each costs its record's rectangle
+        // clipped to the canvas; a Color Overlay is drawn inside its base,
+        // so it costs the base's rectangle once more; an adjustment
+        // nothing. Masks are still canvas-extent.
+        let rect_bytes = |l: &LayerRecord| -> usize {
+            let w = (i64::from(l.right).clamp(0, i64::from(cw))
+                - i64::from(l.left).clamp(0, i64::from(cw)))
+            .max(0) as usize;
+            let h = (i64::from(l.bottom).clamp(0, i64::from(ch))
+                - i64::from(l.top).clamp(0, i64::from(ch)))
+            .max(0) as usize;
+            w * h * 4
+        };
+        let mut total = canvas_texels.saturating_mul(masked);
+        for (l, _) in &pixel_layers {
+            if adjustment_of(l).ok().flatten().is_some() {
+                continue;
+            }
+            let overlay = effects_of(l)
+                .ok()
+                .flatten()
+                .is_some_and(|fx| matches!(fx.color_overlay, Some(Ok(_))));
+            total = total.saturating_add(rect_bytes(l) * if overlay { 2 } else { 1 });
+        }
         if total > MAX_IMPORT_BYTES {
             return Err(PsdError::Unsupported(format!(
-                "layer import needs {} MiB ({} layers × {}×{} canvas-extent plates), \
-                 over the {} MiB budget — the merged composite is kept instead",
+                "layer import needs {} MiB ({} layers at their bounds on a {}×{} canvas, \
+                 {masked} canvas-extent masks), over the {} MiB budget — the merged composite \
+                 is kept instead",
                 total / (1024 * 1024),
                 pixel_layers.len(),
                 cw,
@@ -590,6 +625,13 @@ impl PsdFile {
         let mut layers = Vec::with_capacity(pixel_layers.len());
         for (layer, group) in pixel_layers {
             let adjustment = adjustment_of(layer)?;
+            // An adjustment has no pixels of its own (its channels hold
+            // an empty rect or a mask): an empty rectangle.
+            let (rect, rgba) = if adjustment.is_some() {
+                (image_core::Region::new(0, 0, 0, 0), Vec::new())
+            } else {
+                self.layer_bounded_rgba8(layer, cw, ch, ink_to_rgba8)?
+            };
             // The walk refused every overlay it does not model.
             let color_overlay = effects_of(layer)
                 .ok()
@@ -608,11 +650,8 @@ impl PsdFile {
                 clipped: layer.clipping != 0,
                 // An adjustment has no pixels of its own (its channels
                 // hold an empty rect or a mask).
-                rgba: if adjustment.is_some() {
-                    Vec::new()
-                } else {
-                    self.layer_canvas_rgba8(layer, cw, ch, ink_to_rgba8)?
-                },
+                rgba,
+                rect: Some(rect),
                 group,
                 mask: masks.user,
                 // A shape layer's pixels already ARE its path's render.
@@ -1169,28 +1208,41 @@ impl PsdFile {
     /// buffers and place them at the layer rect, clipped to the canvas.
     /// A layer with no transparency channel is OPAQUE inside its rect
     /// (the PSD convention); everything outside stays transparent black.
-    fn layer_canvas_rgba8(
+    fn layer_bounded_rgba8(
         &self,
         layer: &LayerRecord,
         cw: u32,
         ch: u32,
         ink_to_rgba8: Option<InkToRgba8<'_>>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(image_core::Region, Vec<u8>)> {
         let cmyk = self.header.color_mode == ColorMode::Cmyk;
         if cmyk && ink_to_rgba8.is_none() {
             return Err(PsdError::Unsupported(
                 "CMYK layer decode without an ink transform".into(),
             ));
         }
-        let mut canvas = vec![0u8; (cw as usize) * (ch as usize) * 4];
         let lw = (layer.right - layer.left).max(0) as u32;
         let lh = (layer.bottom - layer.top).max(0) as u32;
         let plane_len = (lw as usize) * (lh as usize);
-        if plane_len == 0 {
+        // The record's rectangle clipped to the canvas: what the plate
+        // keeps (ADR 464).
+        let x0 = i64::from(layer.left).clamp(0, i64::from(cw));
+        let y0 = i64::from(layer.top).clamp(0, i64::from(ch));
+        let x1 = i64::from(layer.right).clamp(0, i64::from(cw));
+        let y1 = i64::from(layer.bottom).clamp(0, i64::from(ch));
+        let rect = image_core::Region::new(
+            x0 as i32,
+            y0 as i32,
+            (x1 - x0).max(0) as u32,
+            (y1 - y0).max(0) as u32,
+        );
+        if plane_len == 0 || rect.w == 0 || rect.h == 0 {
             // A degenerate rect contributes nothing — an empty layer is
             // a legal, meaningful PSD layer.
-            return Ok(canvas);
+            return Ok((image_core::Region::new(0, 0, 0, 0), Vec::new()));
         }
+        let mut canvas = vec![0u8; rect.w as usize * rect.h as usize * 4];
+        let (cw, ch) = (rect.w, rect.h);
 
         // Colour planes as STORED: R/G/B, or C/M/Y/K inverted (255 = no
         // ink — the composite's convention, and an absent ink plane is
@@ -1266,13 +1318,14 @@ impl PsdFile {
             }
         };
 
+        // Into the clipped rectangle's own frame (`cw`/`ch` are its size).
         for ly in 0..lh as i64 {
-            let dy = layer.top as i64 + ly;
+            let dy = layer.top as i64 + ly - i64::from(rect.y);
             if dy < 0 || dy >= ch as i64 {
                 continue;
             }
             for lx in 0..lw as i64 {
-                let dx = layer.left as i64 + lx;
+                let dx = layer.left as i64 + lx - i64::from(rect.x);
                 if dx < 0 || dx >= cw as i64 {
                     continue;
                 }
@@ -1282,6 +1335,6 @@ impl PsdFile {
                 canvas[di + 3] = a[si];
             }
         }
-        Ok(canvas)
+        Ok((rect, canvas))
     }
 }

@@ -52,6 +52,7 @@ fn plate(name: &str, rgb: [u8; 3], opacity: u8, key: &[u8; 4], clipped: bool) ->
         rgba: (0..W * H)
             .flat_map(|_| [rgb[0], rgb[1], rgb[2], 255])
             .collect(),
+        rect: None,
         clipped,
         group: None,
         mask: None,

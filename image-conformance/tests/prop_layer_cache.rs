@@ -110,8 +110,22 @@ fn mask(w: u32, h: u32, kind: u8) -> Arc<SelectionCoverage> {
 
 #[derive(Debug, Clone)]
 enum LayerGen {
-    Pixel { seed: u32, alpha: u8, smart: bool },
-    Adjust { exposure: f32, saturation: f32 },
+    Pixel {
+        seed: u32,
+        alpha: u8,
+        smart: bool,
+    },
+    /// Content in a sub-rectangle only, stored at its bounds (ADR 464).
+    Bounded {
+        seed: u32,
+        alpha: u8,
+        x: u32,
+        y: u32,
+    },
+    Adjust {
+        exposure: f32,
+        saturation: f32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +144,9 @@ enum Edit {
     /// A brush stroke on layer k: `samples` previews, each changing a
     /// small rectangle of the in-flight pixels, then the commit.
     Stroke(usize, u32, u8),
+    /// Store layer k at the bounds of its content (ADR 464): nothing
+    /// drawn changes, so neither may the fold.
+    Shrink(usize),
 }
 
 fn layer_gen() -> impl Strategy<Value = LayerGen> {
@@ -138,6 +155,8 @@ fn layer_gen() -> impl Strategy<Value = LayerGen> {
             .prop_map(|(seed, alpha, smart)| LayerGen::Pixel { seed, alpha, smart }),
         1 => (-1.0f32..1.0, 0.0f32..2.0)
             .prop_map(|(exposure, saturation)| LayerGen::Adjust { exposure, saturation }),
+        2 => (any::<u32>(), 0u8..3, 0u32..12, 0u32..8)
+            .prop_map(|(seed, alpha, x, y)| LayerGen::Bounded { seed, alpha, x, y }),
     ]
 }
 
@@ -156,6 +175,7 @@ fn edit_gen() -> impl Strategy<Value = Edit> {
             .prop_map(|(a, b, p, o)| Edit::Group(a, b, p, o)),
         Just(Edit::Recomposite),
         (0usize..8, any::<u32>(), 1u8..6).prop_map(|(i, s, n)| Edit::Stroke(i, s, n)),
+        (0usize..8).prop_map(Edit::Shrink),
     ]
 }
 
@@ -181,6 +201,30 @@ fn build(w: u32, h: u32, sixteen: bool, gens: &[LayerGen]) -> LayerStack {
                 }
                 if *smart {
                     let _ = s.make_smart(s.active_index());
+                }
+            }
+            LayerGen::Bounded { seed, alpha, x, y } => {
+                s.add(&format!("B{i}"));
+                if !sixteen {
+                    // Content in [x, x+w/2) × [y, y+h/2), transparent
+                    // elsewhere, then stored at its bounds.
+                    let full = pixels(w, h, *seed, *alpha);
+                    let mut v = vec![0u8; (w * h * 4) as usize];
+                    for yy in *y..(*y + h / 2).min(h) {
+                        for xx in *x..(*x + w / 2).min(w) {
+                            let o = ((yy * w + xx) * 4) as usize;
+                            v[o..o + 4].copy_from_slice(&full[o..o + 4]);
+                            v[o + 3] = v[o + 3].max(1);
+                        }
+                    }
+                    s.edit_active(
+                        "fill",
+                        Region::new(0, 0, w, h),
+                        Pixels::from_rgba8(Arc::from(v)),
+                    )
+                    .expect("fill");
+                    let k = s.active_index();
+                    s.shrink_to_content(k).expect("shrink");
                 }
             }
             LayerGen::Adjust {
@@ -230,6 +274,7 @@ fn apply(s: &mut LayerStack, e: &Edit, w: u32, h: u32) {
             s.set_group_pass_through(id, *pass)?;
             s.set_group_opacity(id, *o)
         }),
+        Edit::Shrink(k) => s.shrink_to_content(i(*k)).map(|_| ()),
         Edit::Recomposite | Edit::Stroke(..) => Ok(()),
     };
 }
@@ -271,7 +316,7 @@ fn stroke(
         let got = pollster::block_on(s.composite(Some(ctx), Some(&painted)));
         let want = pollster::block_on(s.composite_reference(Some(ctx), Some(&painted)));
         match (got, want) {
-            (Ok(g), Ok(w)) => prop_assert!(g[..] == w[..], "stroke sample {n} differs"),
+            (Ok(g), Ok(w)) => prop_assert!(agree(s, &g, &w), "stroke sample {n} differs"),
             (Err(_), Err(_)) => {}
             (g, w) => prop_assert!(false, "stroke sample {n}: {g:?} vs {w:?}"),
         }
@@ -284,12 +329,26 @@ fn stroke(
     Ok(())
 }
 
+/// Byte-equal — unless a layer is BOUNDED (ADR 464). Outside its
+/// rectangle the resident fold leaves the accumulator exactly as it is,
+/// while the reference fold blends a transparent texel there; the blend
+/// kernel is the identity only up to f16 rounding, so after a partly
+/// transparent group the two may differ by one level (measured: 3 bytes
+/// of 1040, each by 1). Then one level is the bound.
+fn agree(s: &LayerStack, got: &[u8], want: &[u8]) -> bool {
+    if s.layers().iter().any(|l| l.rgba.bounded().is_some()) {
+        got.len() == want.len() && got.iter().zip(want).all(|(a, b)| a.abs_diff(*b) <= 1)
+    } else {
+        got == want
+    }
+}
+
 fn check(ctx: &GpuContext, s: &LayerStack, step: &str) -> Result<(), TestCaseError> {
     let got = pollster::block_on(s.composite(Some(ctx), None));
     let want = pollster::block_on(s.composite_reference(Some(ctx), None));
     match (got, want) {
         (Ok(g), Ok(w)) => prop_assert!(
-            g[..] == w[..],
+            agree(s, &g, &w),
             "{step}: resident fold differs from the reference fold"
         ),
         (Err(_), Err(_)) => {}

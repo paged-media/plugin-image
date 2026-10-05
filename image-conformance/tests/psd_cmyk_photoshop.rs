@@ -256,19 +256,19 @@ fn cmyk_layer_channels_decode_to_the_filled_ink__feat__image_psd_layer_import() 
     ];
     for &(li, (x, y), ink) in cases {
         let o = (y * 256 + x) * 4;
-        let got = [
-            a.layers[li].rgba[o],
-            a.layers[li].rgba[o + 1],
-            a.layers[li].rgba[o + 2],
-            b.layers[li].rgba[o],
-        ];
+        // Plates are bounded (ADR 464); read them on the canvas.
+        let (ca, cb) = (
+            a.layers[li].canvas_rgba8(a.width, a.height),
+            b.layers[li].canvas_rgba8(b.width, b.height),
+        );
+        let got = [ca[o], ca[o + 1], ca[o + 2], cb[o]];
         for c in 0..4 {
             assert!(
                 (i32::from(got[c]) - pct(ink[c])).abs() <= 1,
                 "layer {li} at ({x},{y}): ink {got:?}, filled {ink:?} %"
             );
         }
-        assert_eq!(a.layers[li].rgba[o + 3], 255, "opaque interior");
+        assert_eq!(ca[o + 3], 255, "opaque interior");
     }
 }
 

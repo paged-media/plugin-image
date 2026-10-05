@@ -37,17 +37,19 @@
 //! buffers are kept separate so a caller can store each once, by
 //! content hash, and share it across revisions that did not change it.
 //!
-//! Manifest layout, little-endian: `"PGIL"`, u32 version (2), u32 width,
+//! Manifest layout, little-endian: `"PGIL"`, u32 version (3), u32 width,
 //! u32 height, u32 active, u32 next_id; u32 group count and per group
 //! {u32 id, str name, u8 visible, f32 opacity, str blend, u8 pass_through,
 //! i64 parent (-1 = none), u8 mask_enabled, i64 mask slot (-1 = none)}; u32 layer count and per layer {u32 id, str
 //! name, u8 visible, u8 locked, f32 opacity, str blend, u8 clipped, i64
 //! group, u8 mask_enabled, u8 kind (0 pixels, 1 adjustment, 2 smart), u8
-//! depth (8 | 16), u32 pixel slot, i64 mask slot (-1 = none), then for an
+//! depth (8 | 16), u32 pixel slot, then (version 3) i32 x, i32 y, u32 w,
+//! u32 h — the rectangle the pixels cover, all four −1/0 sentinels
+//! (x = −1) for the canvas (ADR 464), then i64 mask slot (-1 = none), then for an
 //! adjustment u32 n + n f32 (`AdjustParams::to_wire`), for a smart object
 //! u32 width, u32 height, f32 scale, u32 source slot}. A `str` is u32
-//! length + UTF-8. Version 1 (no group masks: a group ends at its parent)
-//! is still read.
+//! length + UTF-8. Versions 1 (no group masks) and 2 (no layer
+//! rectangles: every layer canvas-sized) are still read.
 //!
 //! The history is not persisted: a reopened stack starts with none.
 
@@ -61,7 +63,7 @@ use super::{Layer, LayerGroup, LayerKind, LayerStack, SmartSource};
 use crate::ingest::{AdjustParams, IngestError};
 
 const MAGIC: &[u8; 4] = b"PGIL";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 struct W(Vec<u8>);
 
@@ -73,6 +75,9 @@ impl W {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn i64(&mut self, v: i64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i32(&mut self, v: i32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn f32(&mut self, v: f32) {
@@ -105,6 +110,11 @@ impl R<'_> {
     }
     fn u32(&mut self) -> Result<u32, IngestError> {
         Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+    fn i32(&mut self) -> Result<i32, IngestError> {
+        Ok(i32::from_le_bytes(
             self.take(4)?.try_into().expect("4 bytes"),
         ))
     }
@@ -178,8 +188,24 @@ impl LayerStack {
                 LayerKind::Smart(_) => 2,
             });
             w.u8(if l.rgba.is_16bit() { 16 } else { 8 });
-            let px = slot(l.rgba.raw_arc());
-            w.u32(px);
+            // A bounded layer is stored as it lives — expanding it here
+            // would cost every untouched layer its canvas on each save.
+            match l.rgba.bounded() {
+                Some(b) => {
+                    w.u32(slot(b.px.raw_arc()));
+                    w.i32(b.rect.x);
+                    w.i32(b.rect.y);
+                    w.u32(b.rect.w);
+                    w.u32(b.rect.h);
+                }
+                None => {
+                    w.u32(slot(l.rgba.raw_arc()));
+                    w.i32(-1);
+                    w.i32(-1);
+                    w.u32(0);
+                    w.u32(0);
+                }
+            }
             let mask = l
                 .mask
                 .as_ref()
@@ -214,7 +240,7 @@ impl LayerStack {
             return Err(IngestError::Decode("not a layer manifest".into()));
         }
         let version = r.u32()?;
-        if version != VERSION && version != 1 {
+        if !(1..=VERSION).contains(&version) {
             return Err(IngestError::Unsupported(format!(
                 "layer manifest version {version} (this engine reads {VERSION})"
             )));
@@ -291,12 +317,36 @@ impl LayerStack {
             };
             let px = buffer(r.u32()?)?;
             let bpp = if depth == SampleDepth::U16 { 8 } else { 4 };
-            if px.len() != n_px * bpp {
-                return Err(IngestError::Decode(format!(
-                    "layer \"{name}\": {} pixel bytes for {width}×{height}",
-                    px.len()
-                )));
-            }
+            let rect = if version >= 3 {
+                let (x, y, rw, rh) = (r.i32()?, r.i32()?, r.u32()?, r.u32()?);
+                (x >= 0).then_some(image_core::Region::new(x, y, rw, rh))
+            } else {
+                None
+            };
+            let rgba: crate::pixels::LayerPixels = match rect {
+                Some(rect) => crate::pixels::Bounded::new(
+                    rect,
+                    crate::pixels::Pixels::from_raw(px, depth),
+                    width,
+                    height,
+                )
+                .map(crate::pixels::LayerPixels::Bounded)
+                .ok_or_else(|| {
+                    IngestError::Decode(format!(
+                        "layer \"{name}\": its rectangle {rect:?} does not fit the canvas \
+                         or its pixels"
+                    ))
+                })?,
+                None => {
+                    if px.len() != n_px * bpp {
+                        return Err(IngestError::Decode(format!(
+                            "layer \"{name}\": {} pixel bytes for {width}×{height}",
+                            px.len()
+                        )));
+                    }
+                    crate::pixels::Pixels::from_raw(px, depth).into()
+                }
+            };
             let mask = match u32::try_from(r.i64()?) {
                 Ok(slot) => {
                     let m = buffer(slot)?;
@@ -347,7 +397,7 @@ impl LayerStack {
                 locked,
                 opacity,
                 blend,
-                rgba: crate::pixels::Pixels::from_raw(px, depth).into(),
+                rgba,
                 mask,
                 group,
                 mask_enabled,
@@ -466,11 +516,18 @@ mod tests {
         );
         assert!(!g.mask_enabled, "the switch survives");
 
-        // Version 1: the same manifest without the group's two mask fields.
+        // Version 1: the same manifest without the group's two mask fields
+        // and without the layers' rectangles (all canvas-sized here).
         let plain = rich();
         let (m2, bufs2) = plain.export();
         let mut v1 = m2.clone();
         v1[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let canvas_rect = [
+            0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        while let Some(at) = v1.windows(16).position(|w| w == canvas_rect) {
+            v1.drain(at..at + 16);
+        }
         // The group record ends with u8 mask_enabled + i64 mask slot (-1):
         // nine bytes, the first group's last ones before the layer count.
         let tail = [1u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
@@ -483,6 +540,33 @@ mod tests {
         assert_eq!(old.groups.len(), 1);
         assert!(old.groups[0].mask.is_none() && old.groups[0].mask_enabled);
         assert_eq!(old.len(), plain.len());
+    }
+
+    /// A layer at its BOUNDS (ADR 464) is stored as it lives — its own
+    /// rectangle and pixels, not an expansion — and comes back bounded.
+    #[test]
+    #[allow(non_snake_case)]
+    fn a_bounded_layer_round_trips_at_its_bounds__feat__image_editor_layers() {
+        let mut s = LayerStack::from_image(4, 3, px(4, 3, 10)).expect("stack");
+        s.add("Dot");
+        let mut dot = vec![0u8; 4 * 3 * 4];
+        dot[(4 + 1) * 4..(4 + 3) * 4].copy_from_slice(&[7, 8, 9, 255, 7, 8, 9, 255]);
+        s.edit_active(
+            "p",
+            Region::new(0, 0, 4, 3),
+            crate::pixels::Pixels::from_rgba8(Arc::from(dot.clone())),
+        )
+        .expect("paint");
+        assert_eq!(
+            s.shrink_to_content(1).expect("shrink"),
+            Some(Region::new(1, 1, 2, 1))
+        );
+        let (m, bufs) = s.export();
+        assert_eq!(bufs[1].len(), 2 * 4, "the bounded pixels, not the canvas");
+        let back = LayerStack::import(&m, &bufs).expect("import");
+        let b = back.layers[1].rgba.bounded().expect("bounded");
+        assert_eq!(b.rect, Region::new(1, 1, 2, 1));
+        assert_eq!(&back.layers[1].rgba.to_rgba8()[..], &dot[..]);
     }
 
     #[test]

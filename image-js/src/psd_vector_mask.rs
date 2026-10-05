@@ -606,6 +606,7 @@ mod tests {
                 opacity: 255,
                 hidden: false,
                 rgba: vec![255; 16],
+                rect: None,
                 clipped: false,
                 group: None,
                 mask: user,
