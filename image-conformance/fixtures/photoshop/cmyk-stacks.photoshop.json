@@ -1,0 +1,722 @@
+{
+  "fixture": "cmyk-stacks",
+  "produced_by": {
+    "app": "Adobe Photoshop",
+    "version": "27.10.0",
+    "build": "27.10.0 (20260824.r.26 9d9635d)",
+    "locale": "de_DE",
+    "color_settings": "Europe General Purpose 3",
+    "script": "scripts/photoshop/probes/cmyk-stacks.jsx",
+    "script_sha256": "70232100ebcf50d45957b109e4e87cfba924ac12ab42e70c1e5aa5b257bf9ccb",
+    "runner": "scripts/photoshop/run-probe.sh",
+    "recorded_at": "2026-10-05T09:59:59.825Z",
+    "host_os": "macOS 26.4"
+  },
+  "stimulus_size": 128,
+  "findings": {
+    "cmyk_profile": "Coated FOGRA39 (ISO 12647-2:2004)",
+    "conversion_settings": {
+      "engine": "Adobe (ACE)",
+      "intent": "colorimetric",
+      "mapBlack": true,
+      "dither": true,
+      "keys": "name,workingRGB,workingCMYK,workingGray,workingSpot,policyRGB,policyCMYK,policyGray,askMismatchOpening,askMismatchPasting,askMissing,engine,intent,mapBlack,dither,renderSceneReferred,monitorCompression,RGBBlendGamma,TextBlendGamma"
+    }
+  },
+  "cases": [
+    {
+      "id": "patches",
+      "params": {
+        "what": "8x8 known-ink patches (percent, row-major, 8 px each) + one saved alpha channel",
+        "inks": [
+          [
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            100,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            100,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            100,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            100
+          ],
+          [
+            100,
+            100,
+            100,
+            100
+          ],
+          [
+            50,
+            50,
+            50,
+            50
+          ],
+          [
+            0,
+            0,
+            0,
+            50
+          ],
+          [
+            100,
+            100,
+            0,
+            0
+          ],
+          [
+            0,
+            100,
+            100,
+            0
+          ],
+          [
+            100,
+            0,
+            100,
+            0
+          ],
+          [
+            60,
+            40,
+            40,
+            100
+          ],
+          [
+            25,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            25,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            25,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            25
+          ],
+          [
+            66,
+            30,
+            63,
+            40
+          ],
+          [
+            68,
+            67,
+            17,
+            29
+          ],
+          [
+            71,
+            83,
+            74,
+            34
+          ],
+          [
+            80,
+            19,
+            58,
+            23
+          ],
+          [
+            21,
+            79,
+            88,
+            25
+          ],
+          [
+            11,
+            47,
+            73,
+            36
+          ],
+          [
+            28,
+            37,
+            92,
+            27
+          ],
+          [
+            42,
+            43,
+            82,
+            17
+          ],
+          [
+            15,
+            32,
+            38,
+            50
+          ],
+          [
+            98,
+            47,
+            76,
+            22
+          ],
+          [
+            44,
+            88,
+            82,
+            31
+          ],
+          [
+            54,
+            85,
+            70,
+            11
+          ],
+          [
+            59,
+            9,
+            69,
+            40
+          ],
+          [
+            70,
+            25,
+            38,
+            40
+          ],
+          [
+            42,
+            95,
+            43,
+            2
+          ],
+          [
+            25,
+            13,
+            67,
+            0
+          ],
+          [
+            28,
+            28,
+            42,
+            22
+          ],
+          [
+            81,
+            48,
+            54,
+            25
+          ],
+          [
+            61,
+            70,
+            2,
+            55
+          ],
+          [
+            45,
+            51,
+            67,
+            29
+          ],
+          [
+            49,
+            96,
+            20,
+            52
+          ],
+          [
+            91,
+            61,
+            1,
+            4
+          ],
+          [
+            65,
+            40,
+            81,
+            9
+          ],
+          [
+            28,
+            80,
+            100,
+            49
+          ],
+          [
+            19,
+            57,
+            67,
+            27
+          ],
+          [
+            57,
+            69,
+            8,
+            34
+          ],
+          [
+            8,
+            24,
+            45,
+            21
+          ],
+          [
+            31,
+            86,
+            23,
+            21
+          ],
+          [
+            41,
+            43,
+            0,
+            32
+          ],
+          [
+            71,
+            83,
+            80,
+            40
+          ],
+          [
+            59,
+            86,
+            31,
+            0
+          ],
+          [
+            25,
+            53,
+            65,
+            9
+          ],
+          [
+            67,
+            49,
+            66,
+            32
+          ],
+          [
+            68,
+            13,
+            57,
+            21
+          ],
+          [
+            68,
+            44,
+            32,
+            9
+          ],
+          [
+            35,
+            38,
+            24,
+            33
+          ],
+          [
+            11,
+            54,
+            97,
+            10
+          ],
+          [
+            52,
+            83,
+            80,
+            32
+          ],
+          [
+            48,
+            48,
+            13,
+            29
+          ],
+          [
+            34,
+            0,
+            61,
+            39
+          ],
+          [
+            9,
+            13,
+            12,
+            12
+          ],
+          [
+            77,
+            71,
+            70,
+            35
+          ],
+          [
+            22,
+            47,
+            93,
+            31
+          ],
+          [
+            9,
+            89,
+            35,
+            39
+          ],
+          [
+            22,
+            25,
+            58,
+            38
+          ],
+          [
+            25,
+            73,
+            30,
+            22
+          ],
+          [
+            29,
+            52,
+            73,
+            53
+          ],
+          [
+            70,
+            69,
+            27,
+            13
+          ]
+        ]
+      },
+      "profile": "Coated FOGRA39 (ISO 12647-2:2004)",
+      "bits": 8,
+      "files": [
+        "cmyk-stacks/patches.psd",
+        "cmyk-stacks/patches.relcol-bpc.png",
+        "cmyk-stacks/patches.relcol.png",
+        "cmyk-stacks/patches.perceptual.png"
+      ],
+      "views": [
+        {
+          "view": "relcol-bpc",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "relcol",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "perceptual",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        }
+      ]
+    },
+    {
+      "id": "transparent-soft",
+      "params": {
+        "what": "one layer, feathered ellipse over transparency"
+      },
+      "profile": "Coated FOGRA39 (ISO 12647-2:2004)",
+      "bits": 8,
+      "files": [
+        "cmyk-stacks/transparent-soft.psd",
+        "cmyk-stacks/transparent-soft.relcol-bpc.png",
+        "cmyk-stacks/transparent-soft.relcol.png",
+        "cmyk-stacks/transparent-soft.perceptual.png"
+      ],
+      "views": [
+        {
+          "view": "relcol-bpc",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "relcol",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "perceptual",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        }
+      ]
+    },
+    {
+      "id": "normal-stack",
+      "params": {
+        "what": "normal blending only: background, a 60% layer, a feathered layer, a feather-masked layer, a 50% group of two"
+      },
+      "profile": "Coated FOGRA39 (ISO 12647-2:2004)",
+      "bits": 8,
+      "files": [
+        "cmyk-stacks/normal-stack.psd",
+        "cmyk-stacks/normal-stack.relcol-bpc.png",
+        "cmyk-stacks/normal-stack.relcol.png",
+        "cmyk-stacks/normal-stack.perceptual.png"
+      ],
+      "views": [
+        {
+          "view": "relcol-bpc",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "relcol",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "perceptual",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        }
+      ]
+    },
+    {
+      "id": "normal-stack-16",
+      "params": {
+        "what": "normal blending only: background, a 60% layer, a feathered layer, a feather-masked layer, a 50% group of two"
+      },
+      "profile": "Coated FOGRA39 (ISO 12647-2:2004)",
+      "bits": 16,
+      "files": [
+        "cmyk-stacks/normal-stack-16.psd",
+        "cmyk-stacks/normal-stack-16.relcol-bpc.png",
+        "cmyk-stacks/normal-stack-16.relcol.png",
+        "cmyk-stacks/normal-stack-16.perceptual.png"
+      ],
+      "views": [
+        {
+          "view": "relcol-bpc",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 16
+        },
+        {
+          "view": "relcol",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 16
+        },
+        {
+          "view": "perceptual",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 16
+        }
+      ]
+    },
+    {
+      "id": "opaque-stack",
+      "params": {
+        "what": "normal blending, every layer at 100%, hard-edged rectangles and one anti-aliased disc (256 px)"
+      },
+      "profile": "Coated FOGRA39 (ISO 12647-2:2004)",
+      "bits": 8,
+      "files": [
+        "cmyk-stacks/opaque-stack.psd",
+        "cmyk-stacks/opaque-stack.relcol-bpc.png",
+        "cmyk-stacks/opaque-stack.relcol.png",
+        "cmyk-stacks/opaque-stack.perceptual.png"
+      ],
+      "views": [
+        {
+          "view": "relcol-bpc",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "relcol",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "perceptual",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        }
+      ]
+    },
+    {
+      "id": "blend-modes",
+      "params": {
+        "tiles": [
+          {
+            "id": "normal-100",
+            "x": 0,
+            "y": 0,
+            "size": 32
+          },
+          {
+            "id": "normal-50",
+            "x": 32,
+            "y": 0,
+            "size": 32
+          },
+          {
+            "id": "multiply",
+            "x": 64,
+            "y": 0,
+            "size": 32
+          },
+          {
+            "id": "screen",
+            "x": 96,
+            "y": 0,
+            "size": 32
+          },
+          {
+            "id": "overlay",
+            "x": 128,
+            "y": 0,
+            "size": 32
+          },
+          {
+            "id": "darken",
+            "x": 0,
+            "y": 32,
+            "size": 32
+          },
+          {
+            "id": "lighten",
+            "x": 32,
+            "y": 32,
+            "size": 32
+          },
+          {
+            "id": "color-burn",
+            "x": 64,
+            "y": 32,
+            "size": 32
+          },
+          {
+            "id": "color-dodge",
+            "x": 96,
+            "y": 32,
+            "size": 32
+          },
+          {
+            "id": "soft-light",
+            "x": 128,
+            "y": 32,
+            "size": 32
+          },
+          {
+            "id": "hard-light",
+            "x": 0,
+            "y": 64,
+            "size": 32
+          },
+          {
+            "id": "difference",
+            "x": 32,
+            "y": 64,
+            "size": 32
+          },
+          {
+            "id": "exclusion",
+            "x": 64,
+            "y": 64,
+            "size": 32
+          },
+          {
+            "id": "linear-burn",
+            "x": 96,
+            "y": 64,
+            "size": 32
+          },
+          {
+            "id": "linear-dodge",
+            "x": 128,
+            "y": 64,
+            "size": 32
+          },
+          {
+            "id": "hue",
+            "x": 0,
+            "y": 96,
+            "size": 32
+          },
+          {
+            "id": "saturation",
+            "x": 32,
+            "y": 96,
+            "size": 32
+          },
+          {
+            "id": "color",
+            "x": 64,
+            "y": 96,
+            "size": 32
+          },
+          {
+            "id": "luminosity",
+            "x": 96,
+            "y": 96,
+            "size": 32
+          },
+          {
+            "id": "multiply-50",
+            "x": 128,
+            "y": 96,
+            "size": 32
+          }
+        ],
+        "what": "5x4 tiles of 32 px: a three-ink background under one feathered layer per blend mode"
+      },
+      "profile": "Coated FOGRA39 (ISO 12647-2:2004)",
+      "bits": 8,
+      "files": [
+        "cmyk-stacks/blend-modes.psd",
+        "cmyk-stacks/blend-modes.relcol-bpc.png",
+        "cmyk-stacks/blend-modes.relcol.png",
+        "cmyk-stacks/blend-modes.perceptual.png"
+      ],
+      "views": [
+        {
+          "view": "relcol-bpc",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "relcol",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        },
+        {
+          "view": "perceptual",
+          "profile": "sRGB IEC61966-2.1",
+          "bits": 8
+        }
+      ]
+    }
+  ]
+}
