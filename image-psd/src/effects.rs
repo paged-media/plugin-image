@@ -57,7 +57,12 @@ use crate::Result;
 /// the layer's own content, inside its shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorOverlay {
+    /// The colour in RGB. For a colour given in CMYK this is filled in by
+    /// the importer through the document's ink transform (`cmyk`).
     pub rgb: [u8; 3],
+    /// The colour as INK (0–255 = 0–100 %), when the descriptor gives it
+    /// in CMYK (`CMYC`), as in a CMYK document.
+    pub cmyk: Option<[u8; 4]>,
     /// The layer-record blend key (`norm`, `mul `, …) of the overlay's
     /// mode.
     pub blend_key: [u8; 4],
@@ -181,15 +186,29 @@ fn color_overlay(e: &Descriptor) -> std::result::Result<ColorOverlay, String> {
     let clr = e
         .descriptor(b"Clr ")
         .ok_or("a Color Overlay without a colour")?;
-    if !clr.class_id.matches(b"RGBC") {
+    let (rgb, cmyk) = if clr.class_id.matches(b"RGBC") {
+        let ch = |k: &[u8]| clr.number(k).unwrap_or(0.0).round().clamp(0.0, 255.0) as u8;
+        ([ch(b"Rd  "), ch(b"Grn "), ch(b"Bl  ")], None)
+    } else if clr.class_id.matches(b"CMYC") {
+        // [PUB] a CMYK colour: Cyn / Mgnt / Ylw / Blck in percent.
+        let ink = |k: &[u8]| {
+            (clr.number(k).unwrap_or(0.0) * 255.0 / 100.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        (
+            [0, 0, 0],
+            Some([ink(b"Cyn "), ink(b"Mgnt"), ink(b"Ylw "), ink(b"Blck")]),
+        )
+    } else {
         return Err(format!(
             "a Color Overlay whose colour is given as {:?}",
             clr.class_id.text_lossy()
         ));
-    }
-    let ch = |k: &[u8]| clr.number(k).unwrap_or(0.0).round().clamp(0.0, 255.0) as u8;
+    };
     Ok(ColorOverlay {
-        rgb: [ch(b"Rd  "), ch(b"Grn "), ch(b"Bl  ")],
+        rgb,
+        cmyk,
         blend_key,
         opacity: (opacity * 255.0 / 100.0).round() as u8,
     })

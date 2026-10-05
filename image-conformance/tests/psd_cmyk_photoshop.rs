@@ -596,10 +596,15 @@ fn blending_converted_cmyk_layers_in_rgb_is_measured_per_mode__feat__image_psd_l
         .iter()
         .map(|b| b.category)
         .collect();
+    // Normal and Multiply are admitted and judged per file against the
+    // composite (`CMYK_RGB_SAFE_BLENDS`); every other mode is a blocker.
     assert_eq!(
         blocked.len(),
-        TILES.iter().filter(|t| !t.3).count(),
-        "one cmyk-blend blocker per non-normal layer: {blocked:?}"
+        TILES
+            .iter()
+            .filter(|t| !t.3 && !t.0.starts_with("multiply"))
+            .count(),
+        "one cmyk-blend blocker per layer in a mode other than normal/multiply: {blocked:?}"
     );
     assert!(blocked.iter().all(|b| *b == "cmyk-blend"));
     println!("{}", report.join("\n"));

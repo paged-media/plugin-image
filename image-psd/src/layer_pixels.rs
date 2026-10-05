@@ -370,7 +370,15 @@ const UNMODELLED: &[(&[u8; 4], &str)] = &[
 /// judged per file by the consumer against the file's own composite
 /// (`image-js`'s `cmyk_flatten_agrees`), the way a smart object's stored
 /// render is.
-pub const CMYK_RGB_SAFE_BLENDS: &[&[u8; 4]] = &[b"norm"];
+///
+/// MULTIPLY is admitted the same way (2026-10-05). On the synthetic tiles
+/// it is far off, but on the corpus — Multiply overlays and shadow layers
+/// over pale stock — the per-file check accepts 12 CMYK files whose
+/// flatten is within its bar (≤ 1.1 % of pixels more than 2 levels off)
+/// and declines the rest. Admitting every mode the same way compared
+/// FEWER files (the others pushed differences into smart-object
+/// footprints), so the list stays this short.
+pub const CMYK_RGB_SAFE_BLENDS: &[&[u8; 4]] = &[b"norm", b"mul "];
 
 /// A CMYK document's ink transform as the import takes it: packed 4-ink
 /// CMYK8 (0 = no ink) in, the same number of RGBA8 pixels out.
@@ -696,7 +704,16 @@ impl PsdFile {
                 .ok()
                 .flatten()
                 .and_then(|fx| fx.color_overlay)
-                .and_then(|o| o.ok());
+                .and_then(|o| o.ok())
+                .and_then(|mut o| {
+                    // A colour given as ink goes through the document's
+                    // own ink transform, as its layers do.
+                    if let Some(ink) = o.cmyk {
+                        let rgba = ink_to_rgba8?(&ink);
+                        o.rgb = [*rgba.first()?, *rgba.get(1)?, *rgba.get(2)?];
+                    }
+                    Some(o)
+                });
             // Fill opacity folds into opacity (see the refusals above).
             let opacity =
                 ((u32::from(layer.opacity) * u32::from(fill_opacity(layer)) + 127) / 255) as u8;
@@ -861,6 +878,16 @@ impl PsdFile {
                                 "a Color Overlay with knockout or blend-interior-effects set"
                                     .into(),
                             ),
+                            Ok(o) if o.cmyk.is_some() && !cmyk => {
+                                Some("a Color Overlay given in CMYK in an RGB document".into())
+                            }
+                            Ok(o) if cmyk && !CMYK_RGB_SAFE_BLENDS.contains(&&o.blend_key) => {
+                                Some(format!(
+                                    "a Color Overlay in {} in a CMYK document (Photoshop blends \
+                                     it in CMYK)",
+                                    blend_name(&o.blend_key)
+                                ))
+                            }
                             Ok(_) => None,
                         };
                         if let Some(why) = why {
