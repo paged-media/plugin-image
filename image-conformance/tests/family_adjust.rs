@@ -360,20 +360,26 @@ fn hue_saturation_ref(a: Px, _b: Px, p: &AdjustHueSaturationParams) -> Px {
         s = p.colorize[2];
         dl += p.colorize[3];
     }
-    s = if ds >= 0.0 {
-        s + (1.0 - s) * ds
+    s = if ds >= 1.0 {
+        if s > 0.0 {
+            1.0
+        } else {
+            0.0
+        }
+    } else if ds >= 0.0 {
+        (s / (1.0 - ds)).min(1.0)
     } else {
         s * (1.0 + ds)
     };
     s = s.clamp(0.0, 1.0);
-    let mut l = hsl[2];
-    l = if dl >= 0.0 {
-        l + (1.0 - l) * dl
-    } else {
-        l * (1.0 + dl)
-    };
-    l = l.clamp(0.0, 1.0);
-    let o = to_rgb(h, s, l);
+    let o = to_rgb(h, s, hsl[2]).map(|c| {
+        let c = if dl >= 0.0 {
+            c + (1.0 - c) * dl
+        } else {
+            c * (1.0 + dl)
+        };
+        c.clamp(0.0, 1.0)
+    });
     Px([o[0] * al, o[1] * al, o[2] * al, al])
 }
 

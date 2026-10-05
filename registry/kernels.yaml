@@ -1085,6 +1085,7 @@
   status: implemented
   provenance:
     - "Hue/Saturation dialog: master + six hue ranges (±15° full, fading to 0 at ±45°) + colorize, in HSL; semantics from the published description of the dialog; HSL conversions are textbook (Smith 1978); no reference reading"
+    - "Saturation and lightness measured against Photoshop 27.10 on a 64×64 HSL grid (2026-10-05): raising saturation is s / (1 − ds) (a grey stays grey; +100 saturates every chromatic pixel), lowering it s·(1 + ds); lightness blends the RGB result toward white or black (HSL-lightness was 77 levels off). Photoshop ledger hue-saturation / hue-only: agreement, 0.21 levels"
   tests:
     rust: ["image-conformance/tests/family_adjust.rs", "image-conformance/tests/gpu_module_kernels.rs"]
 

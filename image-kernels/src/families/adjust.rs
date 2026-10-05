@@ -2128,10 +2128,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 //           belongs to no range
 //   dh,ds,dl = master + Σ w_k · range_k
 //   h'    = (h + dh) mod 360                 (colorize: h' = its hue)
-//   s'    = ds ≥ 0 ? s + (1 − s)·ds : s·(1 + ds)   (colorize: from its sat)
-//   l'    = dl ≥ 0 ? l + (1 − l)·dl : l·(1 + dl)   (dl includes colorize's)
-// then back to rgb, re-premultiplied, alpha preserved. Every parameter 0
-// and colorize off is the identity (up to the HSL round trip). The HSL
+//   s'    = ds ≥ 0 ? min(1, s / (1 − ds)) : s·(1 + ds)   (colorize: from its sat)
+//   rgb   = hsl→rgb(h', s', l)
+//   rgb'  = dl ≥ 0 ? rgb + (1 − rgb)·dl : rgb·(1 + dl)   (dl includes colorize's)
+// re-premultiplied, alpha preserved. Every parameter 0 and colorize off
+// is the identity (up to the HSL round trip).
+//
+// The saturation and lightness rules are PHOTOSHOP'S, measured
+// (2026-10-05, Photoshop 27.10, a 64×64 grid of HSL samples): raising
+// saturation DIVIDES by (1 − ds) — every sample at +30 scaled by 1/0.7,
+// a grey stays grey and +100 sends every chromatic pixel to full
+// saturation — and lightness is a blend of the RGB result toward white or
+// black, not a move of HSL lightness (that was 77 levels off; the blend
+// is within 2). The earlier `s + (1 − s)·ds` coloured greys: a grey at
+// 129 came out [167, 142, 91] under +40/+30. The HSL
 // conversions are the standard textbook ones (Foley & van Dam / Smith
 // 1978), mirrored line for line by the scalar reference. Semantics
 // from the published description of the dialog; no reference reading.
@@ -2274,12 +2284,18 @@ fn adjust(a: vec4<f32>) -> vec4<f32> {
         s = params.colorize.z;
         dl = dl + params.colorize.w;
     }
-    if (ds >= 0.0) { s = s + (1.0 - s) * ds; } else { s = s * (1.0 + ds); }
+    if (ds >= 1.0) {
+        s = select(0.0, 1.0, s > 0.0);
+    } else if (ds >= 0.0) {
+        s = min(s / (1.0 - ds), 1.0);
+    } else {
+        s = s * (1.0 + ds);
+    }
     s = clamp(s, 0.0, 1.0);
-    var l = hsl.z;
-    if (dl >= 0.0) { l = l + (1.0 - l) * dl; } else { l = l * (1.0 + dl); }
-    l = clamp(l, 0.0, 1.0);
-    return vec4<f32>(hs_to_rgb(h, s, l) * a.a, a.a);
+    var rgb = hs_to_rgb(h, s, hsl.z);
+    if (dl >= 0.0) { rgb = rgb + (vec3<f32>(1.0) - rgb) * dl; } else { rgb = rgb * (1.0 + dl); }
+    rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(rgb * a.a, a.a);
 }
 "
 );

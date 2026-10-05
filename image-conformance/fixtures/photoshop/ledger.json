@@ -1,7 +1,7 @@
 {
   "about": "Photoshop oracle ledger: every recorded case, classified, with our measured distance (8-bit levels, CIEDE2000). Regenerate the numbers with PAGED_PHOTOSHOP_LEDGER=write; classes and notes are kept.",
   "agree_levels": 2,
-  "summary": {"agreement": 64, "convention": 16},
+  "summary": {"agreement": 66, "convention": 14},
   "cases": {
     "blend-modes/identity-bottom": {"class": "agreement", "max_levels": 0.01, "mean_levels": 0.01, "p99_levels": 0.01, "de00_p95": 0, "de00_max": 0, "note": ""},
     "blend-modes/normal@100": {"class": "agreement", "max_levels": 0.01, "mean_levels": 0.01, "p99_levels": 0.01, "de00_p95": 0, "de00_max": 0, "note": ""},
@@ -66,8 +66,8 @@
     "adjustments/exposure-0.5": {"class": "agreement", "max_levels": 1.64, "mean_levels": 0.11, "p99_levels": 1.57, "de00_p95": 0.05, "de00_max": 1, "note": "As exposure+1."},
     "adjustments/brightness-contrast-legacy": {"class": "convention", "max_levels": 32.25, "mean_levels": 13.46, "p99_levels": 32.02, "de00_p95": 9.77, "de00_max": 17.44, "note": "Engine: c' = (c - 0.5) x contrast + 0.5 + brightness, mapped as brightness 30 -> 30/255, contrast 40 -> 1.4. Photoshop's legacy formula is not that line."},
     "adjustments/brightness-contrast": {"class": "convention", "max_levels": 24.8, "mean_levels": 9.15, "p99_levels": 23.82, "de00_p95": 8.13, "de00_max": 14.39, "note": "Photoshop's non-legacy Brightness/Contrast is a tone curve, not the engine's linear stretch (same mapping as the legacy case)."},
-    "adjustments/hue-saturation": {"class": "convention", "max_levels": 145.9, "mean_levels": 34.45, "p99_levels": 128.79, "de00_p95": 30.55, "de00_max": 46.81, "note": "Engine: luma-preserving hue ROTATION (adjust.hue_rotate) + luma-mix saturation; Photoshop shifts hue in HSL. Different models, large on saturated colours."},
-    "adjustments/hue-only": {"class": "convention", "max_levels": 133.81, "mean_levels": 30.22, "p99_levels": 122.01, "de00_p95": 28.53, "de00_max": 44.07, "note": "Hue rotation model vs Photoshop's HSL hue shift (see hue-saturation)."},
+    "adjustments/hue-saturation": {"class": "agreement", "max_levels": 0.21, "mean_levels": 0.04, "p99_levels": 0.16, "de00_p95": 0.04, "de00_max": 0.14, "note": "adjust.hue_saturation: hue shift and saturation in HSL; raising saturation divides by (1 - ds), as Photoshop does (measured 2026-10-05)."},
+    "adjustments/hue-only": {"class": "agreement", "max_levels": 0.21, "mean_levels": 0.04, "p99_levels": 0.16, "de00_p95": 0.04, "de00_max": 0.13, "note": "As hue-saturation."},
     "adjustments/vibrance": {"class": "convention", "max_levels": 28.02, "mean_levels": 8.01, "p99_levels": 25.04, "de00_p95": 4.29, "de00_max": 5.63, "note": "Engine vibrance = saturation weighted by (1 - existing saturation); Photoshop's vibrance also protects skin tones. Mapped 50 -> 0.5."},
     "adjustments/color-balance": {"class": "convention", "max_levels": 80.81, "mean_levels": 25.15, "p99_levels": 80.12, "de00_p95": 19.18, "de00_max": 31.22, "note": "Engine: tonal-range-weighted opponent offsets (+-100 -> +-1) with luminosity restore; Photoshop's tonal weighting and scale differ."},
     "adjustments/channel-mixer": {"class": "agreement", "max_levels": 0.3, "mean_levels": 0.11, "p99_levels": 0.27, "de00_p95": 0.09, "de00_max": 0.17, "note": "Percent rows map to fractions; linear, exact up to f16."},

@@ -287,11 +287,11 @@ fn adjust_case(id: &str) -> Ours {
             p.brightness = 30.0 / 255.0;
             p.contrast = 1.4;
         }
-        "hue-saturation" => {
-            p.hue_degrees = 40.0;
-            p.saturation = 1.3;
-        }
-        "hue-only" => p.hue_degrees = 40.0,
+        // Photoshop's Hue/Saturation dialog is `adjust.hue_saturation`
+        // (the full dialog: master, ranges, colorize), not the older
+        // hue-rotation and saturation sliders.
+        "hue-saturation" => p.hue_sat.master = [40.0, 0.3, 0.0, 0.0],
+        "hue-only" => p.hue_sat.master = [40.0, 0.0, 0.0, 0.0],
         "vibrance" => p.vibrance = 0.5,
         "color-balance" => {
             p.color_balance = ColorBalanceParams {
