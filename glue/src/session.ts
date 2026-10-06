@@ -99,6 +99,7 @@ import {
   resolveFrameFit,
 } from "./frame-fit";
 import { claimImageTiles } from "./tile-provider";
+import { readPgil } from "./object-model/pgil";
 import { collectGarbage } from "./session-store";
 import { createDecodePool, type DecodePool } from "./decode-pool";
 import { createCropMachine, type CropMachine } from "./crop-machine";
@@ -1057,12 +1058,35 @@ export function createImageSession(host: BundleHost): ImageSession {
     }
     state.committedRev = data.rev;
     state.uncommitted = false;
+    // A revision written through the OBJECT MODEL in a realm without a
+    // GPU (object-model/image-objects.ts): smart objects whose source was
+    // replaced still carry the old render, and the frame still shows the
+    // previous composite. This realm has the device — finish both, and
+    // leave the result to be committed like any other edit.
+    const record = stored.record as { pending?: boolean; pendingRender?: number[] };
+    let finished = false;
+    if (record.pendingRender?.length) {
+      const smart = readPgil(stored.manifest, stored.buffers).layers;
+      for (const id of record.pendingRender) {
+        const index = engine.layers().layers.findIndex((l) => l.id === id);
+        const scale = smart.find((l) => l.id === id)?.smart?.scale ?? 1;
+        if (index < 0) continue;
+        try {
+          await engine.layerRenderSmart(index, scale);
+          finished = true;
+        } catch (err) {
+          host.log.warn(`image: re-rendering smart object ${id} failed: ${err}`);
+        }
+      }
+      if (finished) await engine.layersComposite();
+    }
+    if (record.pending || (data as { pending?: boolean }).pending || finished) state.uncommitted = true;
     refreshLayers();
     refreshHistogram();
     bumpTiles();
     state.layersNote = `Reopened ${state.layers.layers.length} stored layer${
       state.layers.layers.length === 1 ? "" : "s"
-    } (revision ${data.rev}).`;
+    } (revision ${data.rev}${state.uncommitted ? "; its composite is new and will be committed" : ""}).`;
   };
 
   /** The engine handle of the defined pattern (`definePattern`). */

@@ -1,0 +1,45 @@
+[
+  {
+    "path": "width",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "access": "readOnly",
+    "summary": "Canvas width in image pixels."
+  },
+  {
+    "path": "height",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "access": "readOnly",
+    "summary": "Canvas height in image pixels."
+  },
+  {
+    "path": "layerCount",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "access": "readOnly"
+  },
+  {
+    "path": "revision",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "access": "readOnly",
+    "summary": "The stored revision the frame's marker points at; 0 = never committed."
+  },
+  {
+    "path": "pending",
+    "type": {
+      "kind": "bool"
+    },
+    "access": "readOnly",
+    "summary": "The frame still shows an older composite: this stack needs a GPU realm to bake."
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "path": "enabled",
+    "type": {
+      "kind": "bool"
+    },
+    "default": true,
+    "summary": "Whether the mask applies (disabling keeps the coverage)."
+  },
+  {
+    "path": "bounds",
+    "type": {
+      "kind": "bounds"
+    },
+    "access": "readOnly"
+  }
+]

@@ -17,6 +17,9 @@ importers:
 
   glue:
     devDependencies:
+      '@paged-media/canvas-wasm':
+        specifier: 0.69.0
+        version: 0.69.0
       '@paged-media/image-manifest':
         specifier: workspace:*
         version: link:../manifest
@@ -358,6 +361,9 @@ packages:
     engines: {node: ^22.20 || ^24.12 || >=25}
     cpu: [x64]
     os: [linux]
+
+  '@paged-media/canvas-wasm@0.69.0':
+    resolution: {integrity: sha512-YgUL52xynvKkAIghvqECL6Bl9FBXv9wy8GF4v9GEknElNRX8FB3u0SoXzur1ejfTLA1vaIA37xfziimFDBiVEg==}
 
   '@paged-media/plugin-api@0.2.38-canary.3':
     resolution: {integrity: sha512-2Pjm7H6rVr4O9oTazLzzxmHWFuJsT65gKR+UqR6eYgHz9qhBIAShcSFiHtvZikdqEXvQfJTHgIUcyePzfmDwYA==}
@@ -1062,6 +1068,8 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
+
+  '@paged-media/canvas-wasm@0.69.0': {}
 
   '@paged-media/plugin-api@0.2.38-canary.3':
     dependencies:

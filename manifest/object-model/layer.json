@@ -1,0 +1,134 @@
+[
+  {
+    "path": "name",
+    "type": {
+      "kind": "text"
+    },
+    "summary": "The layer's name (what a stored binding selects by)."
+  },
+  {
+    "path": "visible",
+    "type": {
+      "kind": "bool"
+    },
+    "default": true
+  },
+  {
+    "path": "opacity",
+    "type": {
+      "kind": "number",
+      "unit": "percent"
+    },
+    "range": {
+      "min": 0,
+      "max": 100
+    },
+    "default": 100
+  },
+  {
+    "path": "blendMode",
+    "type": {
+      "kind": "enum",
+      "members": [
+        "color",
+        "color_burn",
+        "color_dodge",
+        "darken",
+        "darker_color",
+        "difference",
+        "divide",
+        "exclusion",
+        "hard_light",
+        "hard_mix",
+        "hue",
+        "lighten",
+        "lighter_color",
+        "linear_burn",
+        "linear_dodge",
+        "linear_light",
+        "luminosity",
+        "multiply",
+        "normal",
+        "overlay",
+        "pin_light",
+        "saturation",
+        "screen",
+        "soft_light",
+        "subtract",
+        "vivid_light"
+      ]
+    },
+    "default": "normal",
+    "summary": "A registered compose.* kernel (generated from the kernel registry)."
+  },
+  {
+    "path": "order",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "range": {
+      "min": 0
+    },
+    "summary": "Stack position, 0 = bottom."
+  },
+  {
+    "path": "locked",
+    "type": {
+      "kind": "bool"
+    },
+    "default": false,
+    "summary": "Locks the layer's PIXELS; its properties stay editable."
+  },
+  {
+    "path": "clipped",
+    "type": {
+      "kind": "bool"
+    },
+    "default": false,
+    "summary": "Clipped to the layer beneath."
+  },
+  {
+    "path": "kind",
+    "type": {
+      "kind": "enum",
+      "members": [
+        "pixels",
+        "adjustment",
+        "smart"
+      ]
+    },
+    "access": "readOnly"
+  },
+  {
+    "path": "id",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "access": "readOnly",
+    "summary": "The engine's stable layer id (a session handle)."
+  },
+  {
+    "path": "hasMask",
+    "type": {
+      "kind": "bool"
+    },
+    "access": "readOnly"
+  },
+  {
+    "path": "bounds",
+    "type": {
+      "kind": "bounds"
+    },
+    "access": "readOnly",
+    "summary": "[top, left, bottom, right] in image pixels."
+  },
+  {
+    "path": "pixelSource",
+    "type": {
+      "kind": "asset"
+    },
+    "summary": "Pixel replacement (Photoshop's pixel-replacement variable): a data: URL, or the address of a page item whose placed image supplies the pixels. Placed as is, centred. Reads the last source applied."
+  }
+]

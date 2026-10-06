@@ -1,0 +1,41 @@
+[
+  {
+    "path": "source",
+    "type": {
+      "kind": "asset"
+    },
+    "summary": "Replace contents: a data: URL or a page item whose placed image becomes the preserved source."
+  },
+  {
+    "path": "sourceWidth",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "access": "readOnly"
+  },
+  {
+    "path": "sourceHeight",
+    "type": {
+      "kind": "number",
+      "integer": true
+    },
+    "access": "readOnly"
+  },
+  {
+    "path": "scale",
+    "type": {
+      "kind": "number"
+    },
+    "access": "readOnly",
+    "summary": "Re-rendering at a new scale is a GPU resample: the editor's panel."
+  },
+  {
+    "path": "renderPending",
+    "type": {
+      "kind": "bool"
+    },
+    "access": "readOnly",
+    "summary": "The cached render predates the source (re-rendered in a GPU realm)."
+  }
+]

@@ -136,7 +136,9 @@ export async function collectGarbage(
   const dir = recordPath(frameId, 0).replace(/r0\.json$/, "");
   let records = 0;
   for (const path of await parts.list(dir)) {
-    const m = /\/r(\d+)\.json$/.exec(path);
+    // `r<rev>.json` (the session's commits) or `r<rev>-<hash>.json` (the
+    // object model's, content-addressed).
+    const m = /\/r(\d+)(?:-[0-9a-f]+)?\.json$/.exec(path);
     if (m && Number(m[1]) <= rev - keep) {
       if (await del(path)) records++;
     }

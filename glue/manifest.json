@@ -134,6 +134,388 @@
         "format": "binary",
         "linkable": false
       }
-    ]
+    ],
+    "objectModel": {
+      "kinds": [
+        {
+          "kind": "image",
+          "title": "Image (layer stack)",
+          "schema": "object-model/image.json"
+        },
+        {
+          "kind": "layer",
+          "title": "Image layer",
+          "schema": "object-model/layer.json"
+        },
+        {
+          "kind": "mask",
+          "title": "Layer mask",
+          "schema": "object-model/mask.json"
+        },
+        {
+          "kind": "adjustment",
+          "title": "Adjustment layer",
+          "schema": "object-model/adjustment.json"
+        },
+        {
+          "kind": "smartObject",
+          "title": "Smart object",
+          "schema": "object-model/smartObject.json"
+        }
+      ],
+      "commands": [
+        {
+          "id": "media.paged.image.command.openImage",
+          "title": "Open image panel",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.adjustSelected",
+          "title": "Adjust image",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.autoEnhance",
+          "title": "Auto-enhance image",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.claimTiles",
+          "title": "Serve image tiles to the renderer",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.commitCrop",
+          "title": "Apply crop",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.fillSelection",
+          "title": "Fill selection with a gradient",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.fillNoise",
+          "title": "Fill selection with noise",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.addLayer",
+          "title": "Add image layer",
+          "args": {
+            "kind": "struct",
+            "fields": {
+              "image": {
+                "kind": "ref",
+                "to": "plugin:media.paged.image/image"
+              },
+              "name": {
+                "kind": "text"
+              }
+            }
+          }
+        },
+        {
+          "id": "media.paged.image.command.addLayerMask",
+          "title": "Add layer mask (reveal all)",
+          "args": {
+            "kind": "struct",
+            "fields": {
+              "layer": {
+                "kind": "ref",
+                "to": "plugin:media.paged.image/layer"
+              }
+            }
+          }
+        },
+        {
+          "id": "media.paged.image.command.addLayerMaskHideAll",
+          "title": "Add layer mask (hide all)",
+          "args": {
+            "kind": "struct",
+            "fields": {
+              "layer": {
+                "kind": "ref",
+                "to": "plugin:media.paged.image/layer"
+              }
+            }
+          }
+        },
+        {
+          "id": "media.paged.image.command.bakeAdjustToLayer",
+          "title": "Bake adjustments into the active layer",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.undo",
+          "title": "Undo image edit",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.redo",
+          "title": "Redo image edit",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.median",
+          "title": "Median (3×3)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.maximum",
+          "title": "Maximum (3×3)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.minimum",
+          "title": "Minimum (3×3)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.fillForeground",
+          "title": "Fill with the foreground colour",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.rotateCw",
+          "title": "Rotate canvas 90° clockwise",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.rotateCcw",
+          "title": "Rotate canvas 90° counter-clockwise",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.rotate180",
+          "title": "Rotate canvas 180°",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.flipHorizontal",
+          "title": "Flip canvas horizontal",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.flipVertical",
+          "title": "Flip canvas vertical",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.commitImage",
+          "title": "Commit image edits to the document",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.convertLayerToSmart",
+          "title": "Convert active layer to smart object",
+          "args": {
+            "kind": "struct",
+            "fields": {
+              "layer": {
+                "kind": "ref",
+                "to": "plugin:media.paged.image/layer"
+              }
+            }
+          }
+        },
+        {
+          "id": "media.paged.image.command.definePattern",
+          "title": "Define pattern from selection (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.fillPattern",
+          "title": "Fill selection with the defined pattern",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.shapeBlur",
+          "title": "Shape blur (defined pattern as the shape)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.applyToFile",
+          "title": "Apply adjustments to the file",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.saveToFile",
+          "title": "Save the adjusted file",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.loadBrushLibrary",
+          "title": "Load brush library (.abr)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.selectionToPath",
+          "title": "Selection to path (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.pathToSelection",
+          "title": "Path to selection (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.channelToSelection",
+          "title": "Luminosity channel to selection (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.setType",
+          "title": "Set type (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.contentAwareFill",
+          "title": "Content-aware fill",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.selectAll",
+          "title": "Select all (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.deselect",
+          "title": "Deselect (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.invertSelection",
+          "title": "Invert selection (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.featherSelection",
+          "title": "Feather selection (image)",
+          "args": {
+            "kind": "struct",
+            "fields": {}
+          }
+        },
+        {
+          "id": "media.paged.image.command.replaceLayerPixels",
+          "title": "Replace layer pixels",
+          "args": {
+            "kind": "struct",
+            "fields": {
+              "layer": {
+                "kind": "ref",
+                "to": "plugin:media.paged.image/layer"
+              },
+              "source": {
+                "kind": "asset"
+              }
+            }
+          }
+        }
+      ]
+    }
   }
 }

@@ -1,0 +1,730 @@
+[
+  {
+    "path": "exposure.ev",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.exposure.ev."
+  },
+  {
+    "path": "brightnessContrast.brightness",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.brightness_contrast.brightness."
+  },
+  {
+    "path": "brightnessContrast.contrast",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.brightness_contrast.contrast."
+  },
+  {
+    "path": "saturation.sat",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.saturation.sat."
+  },
+  {
+    "path": "whiteBalance.temp",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.white_balance.temp."
+  },
+  {
+    "path": "whiteBalance.tint",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.white_balance.tint."
+  },
+  {
+    "path": "levels.inBlack",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.levels.in_black."
+  },
+  {
+    "path": "levels.inWhite",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels.in_white."
+  },
+  {
+    "path": "levels.gamma",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels.gamma."
+  },
+  {
+    "path": "levels.outBlack",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.levels.out_black."
+  },
+  {
+    "path": "levels.outWhite",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels.out_white."
+  },
+  {
+    "path": "gaussianBlur.sigma",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel conv.gaussian_h.sigma."
+  },
+  {
+    "path": "unsharp.amount",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel conv.unsharp.amount."
+  },
+  {
+    "path": "hueRotate.degrees",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_rotate.degrees."
+  },
+  {
+    "path": "invert.enabled",
+    "type": {
+      "kind": "bool"
+    },
+    "default": false,
+    "summary": "From kernel adjust.invert_rgb (stage gate)."
+  },
+  {
+    "path": "curves.composite",
+    "type": {
+      "kind": "list",
+      "of": {
+        "kind": "number",
+        "integer": true
+      },
+      "maxItems": 256
+    },
+    "nullable": true,
+    "default": null,
+    "summary": "A 256-entry tone table; null = off. From the CPU curves pass."
+  },
+  {
+    "path": "vibrance.vibrance",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.vibrance.vibrance."
+  },
+  {
+    "path": "colorBalance.shCr",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.sh_cr."
+  },
+  {
+    "path": "colorBalance.shMg",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.sh_mg."
+  },
+  {
+    "path": "colorBalance.shYb",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.sh_yb."
+  },
+  {
+    "path": "colorBalance.midCr",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.mid_cr."
+  },
+  {
+    "path": "colorBalance.midMg",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.mid_mg."
+  },
+  {
+    "path": "colorBalance.midYb",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.mid_yb."
+  },
+  {
+    "path": "colorBalance.hiCr",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.hi_cr."
+  },
+  {
+    "path": "colorBalance.hiMg",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.hi_mg."
+  },
+  {
+    "path": "colorBalance.hiYb",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.color_balance.hi_yb."
+  },
+  {
+    "path": "blackWhite.enabled",
+    "type": {
+      "kind": "bool"
+    },
+    "default": false,
+    "summary": "From kernel adjust.black_white (stage gate)."
+  },
+  {
+    "path": "blackWhite.reds",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.4,
+    "summary": "From kernel adjust.black_white.reds."
+  },
+  {
+    "path": "blackWhite.yellows",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.6,
+    "summary": "From kernel adjust.black_white.yellows."
+  },
+  {
+    "path": "blackWhite.greens",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.4,
+    "summary": "From kernel adjust.black_white.greens."
+  },
+  {
+    "path": "blackWhite.cyans",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.6,
+    "summary": "From kernel adjust.black_white.cyans."
+  },
+  {
+    "path": "blackWhite.blues",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.2,
+    "summary": "From kernel adjust.black_white.blues."
+  },
+  {
+    "path": "blackWhite.magentas",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.8,
+    "summary": "From kernel adjust.black_white.magentas."
+  },
+  {
+    "path": "posterize.enabled",
+    "type": {
+      "kind": "bool"
+    },
+    "default": false,
+    "summary": "From kernel adjust.posterize (stage gate)."
+  },
+  {
+    "path": "posterize.levels",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.posterize.levels; takes effect while posterize.enabled is true."
+  },
+  {
+    "path": "threshold.enabled",
+    "type": {
+      "kind": "bool"
+    },
+    "default": false,
+    "summary": "From kernel adjust.threshold (stage gate)."
+  },
+  {
+    "path": "threshold.threshold",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.threshold.threshold; takes effect while threshold.enabled is true."
+  },
+  {
+    "path": "photoFilter.density",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.photo_filter.density."
+  },
+  {
+    "path": "photoFilter.fr",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.925,
+    "summary": "From kernel adjust.photo_filter.fr."
+  },
+  {
+    "path": "photoFilter.fg",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.639,
+    "summary": "From kernel adjust.photo_filter.fg."
+  },
+  {
+    "path": "photoFilter.fb",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0.365,
+    "summary": "From kernel adjust.photo_filter.fb."
+  },
+  {
+    "path": "photoFilter.preserve",
+    "type": {
+      "kind": "bool"
+    },
+    "default": true,
+    "summary": "From kernel adjust.photo_filter.preserve."
+  },
+  {
+    "path": "channelMixer.rr",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.channel_mixer.rr."
+  },
+  {
+    "path": "channelMixer.rg",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.rg."
+  },
+  {
+    "path": "channelMixer.rb",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.rb."
+  },
+  {
+    "path": "channelMixer.rc",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.rc."
+  },
+  {
+    "path": "channelMixer.gr",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.gr."
+  },
+  {
+    "path": "channelMixer.gg",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.channel_mixer.gg."
+  },
+  {
+    "path": "channelMixer.gb",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.gb."
+  },
+  {
+    "path": "channelMixer.gc",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.gc."
+  },
+  {
+    "path": "channelMixer.br",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.br."
+  },
+  {
+    "path": "channelMixer.bg",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.bg."
+  },
+  {
+    "path": "channelMixer.bb",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.channel_mixer.bb."
+  },
+  {
+    "path": "channelMixer.bc",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.channel_mixer.bc."
+  },
+  {
+    "path": "levelsRgb.rInBlack",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.levels_rgb.r_in_black."
+  },
+  {
+    "path": "levelsRgb.rInWhite",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels_rgb.r_in_white."
+  },
+  {
+    "path": "levelsRgb.rGamma",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels_rgb.r_gamma."
+  },
+  {
+    "path": "levelsRgb.gInBlack",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.levels_rgb.g_in_black."
+  },
+  {
+    "path": "levelsRgb.gInWhite",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels_rgb.g_in_white."
+  },
+  {
+    "path": "levelsRgb.gGamma",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels_rgb.g_gamma."
+  },
+  {
+    "path": "levelsRgb.bInBlack",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.levels_rgb.b_in_black."
+  },
+  {
+    "path": "levelsRgb.bInWhite",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels_rgb.b_in_white."
+  },
+  {
+    "path": "levelsRgb.bGamma",
+    "type": {
+      "kind": "number"
+    },
+    "default": 1,
+    "summary": "From kernel adjust.levels_rgb.b_gamma."
+  },
+  {
+    "path": "hueSaturation.master[0]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.master[0]."
+  },
+  {
+    "path": "hueSaturation.master[1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.master[1]."
+  },
+  {
+    "path": "hueSaturation.master[2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.master[2]."
+  },
+  {
+    "path": "hueSaturation.ranges[0][0]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[0]."
+  },
+  {
+    "path": "hueSaturation.ranges[0][1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[1]."
+  },
+  {
+    "path": "hueSaturation.ranges[0][2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[2]."
+  },
+  {
+    "path": "hueSaturation.ranges[1][0]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[4]."
+  },
+  {
+    "path": "hueSaturation.ranges[1][1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[5]."
+  },
+  {
+    "path": "hueSaturation.ranges[1][2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[6]."
+  },
+  {
+    "path": "hueSaturation.ranges[2][0]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[8]."
+  },
+  {
+    "path": "hueSaturation.ranges[2][1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[9]."
+  },
+  {
+    "path": "hueSaturation.ranges[2][2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[10]."
+  },
+  {
+    "path": "hueSaturation.ranges[3][0]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[12]."
+  },
+  {
+    "path": "hueSaturation.ranges[3][1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[13]."
+  },
+  {
+    "path": "hueSaturation.ranges[3][2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[14]."
+  },
+  {
+    "path": "hueSaturation.ranges[4][0]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[16]."
+  },
+  {
+    "path": "hueSaturation.ranges[4][1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[17]."
+  },
+  {
+    "path": "hueSaturation.ranges[4][2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[18]."
+  },
+  {
+    "path": "hueSaturation.ranges[5][0]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[20]."
+  },
+  {
+    "path": "hueSaturation.ranges[5][1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[21]."
+  },
+  {
+    "path": "hueSaturation.ranges[5][2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.ranges[22]."
+  },
+  {
+    "path": "hueSaturation.colorize[0]",
+    "type": {
+      "kind": "bool"
+    },
+    "default": false,
+    "summary": "From kernel adjust.hue_saturation.colorize[0]."
+  },
+  {
+    "path": "hueSaturation.colorize[1]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.colorize[1]."
+  },
+  {
+    "path": "hueSaturation.colorize[2]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.colorize[2]."
+  },
+  {
+    "path": "hueSaturation.colorize[3]",
+    "type": {
+      "kind": "number"
+    },
+    "default": 0,
+    "summary": "From kernel adjust.hue_saturation.colorize[3]."
+  },
+  {
+    "path": "curves.channels",
+    "type": {
+      "kind": "list",
+      "of": {
+        "kind": "list",
+        "of": {
+          "kind": "number",
+          "integer": true
+        },
+        "maxItems": 256
+      },
+      "maxItems": 3
+    },
+    "nullable": true,
+    "default": null,
+    "summary": "3 tone tables (red, green, blue); null = off. From the CPU curves pass."
+  }
+]

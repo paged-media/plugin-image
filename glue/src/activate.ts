@@ -30,6 +30,7 @@ import type {
   BindingProviderHandle,
   BundleHandle,
   BundleHost,
+  CommandContribution,
   Disposable,
 } from "@paged-media/plugin-api";
 import { contributePanel, contributeTool } from "@paged-media/plugin-sdk";
@@ -52,6 +53,7 @@ import { makeBrushGesture, PAINT_CURSOR } from "./brush-tool";
 import { makeTypeGesture } from "./type-tool";
 import { makeLayersBindingProvider } from "./binding-provider/layers-provider";
 import { makeTextBindingProvider } from "./binding-provider/text-provider";
+import { contributeImageObjectModel, type UntypedCommand } from "./object-model/contribute";
 
 const PANEL_ID = "media.paged.image.panel.adjustments";
 const CROP_TOOL_ID = "media.paged.image.tool.crop";
@@ -91,6 +93,13 @@ export function activate(host: BundleHost): BundleHandle {
    *  and rolls back by dropping one handle. */
   const providerHandles: BindingProviderHandle[] = [];
   let providerInvalidate: Disposable | null = null;
+  /** Every command as registered, so each gets its TYPED twin in the
+   *  object model (ADR 323) — the untyped registration stays. */
+  const untyped: UntypedCommand[] = [];
+  const command = (c: CommandContribution) => {
+    untyped.push({ id: c.id, title: c.title, handler: c.handler });
+    return host.contribute.command(c);
+  };
 
   contributePanel(host, {
     id: PANEL_ID,
@@ -100,7 +109,7 @@ export function activate(host: BundleHost): BundleHandle {
     defaultDock: "right",
   });
 
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.openImage",
     title: "Open image panel",
     category: "Image",
@@ -112,7 +121,7 @@ export function activate(host: BundleHost): BundleHandle {
   // The selection-driven flow: "Adjust image" on a placed image frame —
   // ingest the frame's original bytes (C-5) and raise the panel; the
   // panel's committed Apply runs the GPU chain + the in-frame composite.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.adjustSelected",
     title: "Adjust image",
     category: "Image",
@@ -130,7 +139,7 @@ export function activate(host: BundleHost): BundleHandle {
   // Auto-enhance: derive auto-levels + a gray-world white balance from the
   // ingested image's histogram (pure CPU readout) and set them on the panel
   // params. Like every edit it's PREVIEW-only — the user commits with Apply.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.autoEnhance",
     title: "Auto-enhance image",
     category: "Image",
@@ -145,7 +154,7 @@ export function activate(host: BundleHost): BundleHandle {
   // honest subset; the mip pyramid + Engine B window eval are the named
   // gap in tile-provider.ts). Degrades honestly when the host wires no
   // resource channel (rendering.resourceProvider@1 is false).
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.claimTiles",
     title: "Serve image tiles to the renderer",
     category: "Image",
@@ -235,7 +244,7 @@ export function activate(host: BundleHost): BundleHandle {
 
   // The crop commit command (also surfaced as the panel's "Apply crop"
   // button): cut the machine's rect out of the engine source + recomposite.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.commitCrop",
     title: "Apply crop",
     category: "Image",
@@ -485,7 +494,7 @@ export function activate(host: BundleHost): BundleHandle {
   // be a re-runnable stage of the adjust chain. The commands carry the
   // defaults (foreground→background linear, noise amount 0.5); the panel's
   // Generate section exposes the pickers.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.fillSelection",
     title: "Fill selection with a gradient",
     category: "Image",
@@ -501,7 +510,7 @@ export function activate(host: BundleHost): BundleHandle {
       });
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.fillNoise",
     title: "Fill selection with noise",
     category: "Image",
@@ -519,7 +528,7 @@ export function activate(host: BundleHost): BundleHandle {
   // surface. Undo/redo act on the plugin's OWN pixel journal — paint,
   // fills and bakes on the ingested image — not on the host document's
   // history, which the editor owns and which this plugin never mutates.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.addLayer",
     title: "Add image layer",
     category: "Image",
@@ -534,7 +543,7 @@ export function activate(host: BundleHost): BundleHandle {
     ["addLayerMask", "Add layer mask (reveal all)", true],
     ["addLayerMaskHideAll", "Add layer mask (hide all)", false],
   ] as const) {
-    host.contribute.command({
+    command({
       id: `media.paged.image.command.${suffix}`,
       title,
       category: "Image",
@@ -544,7 +553,7 @@ export function activate(host: BundleHost): BundleHandle {
       },
     });
   }
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.bakeAdjustToLayer",
     title: "Bake adjustments into the active layer",
     category: "Image",
@@ -553,7 +562,7 @@ export function activate(host: BundleHost): BundleHandle {
       void session.bakeAdjustToLayer();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.undo",
     title: "Undo image edit",
     category: "Image",
@@ -561,7 +570,7 @@ export function activate(host: BundleHost): BundleHandle {
       void session.undo();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.redo",
     title: "Redo image edit",
     category: "Image",
@@ -584,7 +593,7 @@ export function activate(host: BundleHost): BundleHandle {
     ["flipHorizontal", "Flip canvas horizontal", () => session.canvasOp("flip-h")],
     ["flipVertical", "Flip canvas vertical", () => session.canvasOp("flip-v")],
   ] as const) {
-    host.contribute.command({
+    command({
       id: `media.paged.image.command.${suffix}`,
       title,
       category: "Image",
@@ -594,7 +603,7 @@ export function activate(host: BundleHost): BundleHandle {
       },
     });
   }
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.commitImage",
     title: "Commit image edits to the document",
     category: "Image",
@@ -602,7 +611,7 @@ export function activate(host: BundleHost): BundleHandle {
       void session.commitToDocument();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.convertLayerToSmart",
     title: "Convert active layer to smart object",
     category: "Image",
@@ -611,7 +620,7 @@ export function activate(host: BundleHost): BundleHandle {
       void session.makeLayerSmart(session.state().layers.active);
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.definePattern",
     title: "Define pattern from selection (image)",
     category: "Image",
@@ -620,7 +629,7 @@ export function activate(host: BundleHost): BundleHandle {
       session.definePattern();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.fillPattern",
     title: "Fill selection with the defined pattern",
     category: "Image",
@@ -629,7 +638,7 @@ export function activate(host: BundleHost): BundleHandle {
       void session.fillWithPattern();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.shapeBlur",
     title: "Shape blur (defined pattern as the shape)",
     category: "Image",
@@ -654,7 +663,7 @@ export function activate(host: BundleHost): BundleHandle {
   // saver, PROBED rather than assumed — without the probe the door's
   // `false` would be indistinguishable from a user cancel. The exporters
   // below remain the delivery lane for a host with no saver.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.applyToFile",
     title: "Apply adjustments to the file",
     category: "Image",
@@ -664,7 +673,7 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.saveToFile",
     title: "Save the adjusted file",
     category: "Image",
@@ -679,7 +688,7 @@ export function activate(host: BundleHost): BundleHandle {
   // through `shell.pickFile@1` (the same READ door the importer uses);
   // `.abr` carries parameters, not pixels, so nothing is ingested and
   // no handle is retained.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.loadBrushLibrary",
     title: "Load brush library (.abr)",
     category: "Image",
@@ -692,7 +701,7 @@ export function activate(host: BundleHost): BundleHandle {
   // RASTER ↔ VECTOR — the conversion pair the "Paths / shapes" catalog
   // row priced as missing. The vector side stays host-owned; these are
   // only the bridge.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.selectionToPath",
     title: "Selection to path (image)",
     category: "Image",
@@ -701,7 +710,7 @@ export function activate(host: BundleHost): BundleHandle {
       void session.selectionToPath();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.pathToSelection",
     title: "Path to selection (image)",
     category: "Image",
@@ -710,7 +719,7 @@ export function activate(host: BundleHost): BundleHandle {
       void session.selectionFromPath();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.channelToSelection",
     title: "Luminosity channel to selection (image)",
     category: "Image",
@@ -765,7 +774,7 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.setType",
     title: "Set type (image)",
     category: "Image",
@@ -774,7 +783,7 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
 
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.contentAwareFill",
     title: "Content-aware fill",
     category: "Image",
@@ -785,7 +794,7 @@ export function activate(host: BundleHost): BundleHandle {
   });
 
   // Selection commands (the panel buttons + command-palette reach).
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.selectAll",
     title: "Select all (image)",
     category: "Image",
@@ -793,7 +802,7 @@ export function activate(host: BundleHost): BundleHandle {
       session.selectAll();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.deselect",
     title: "Deselect (image)",
     category: "Image",
@@ -801,7 +810,7 @@ export function activate(host: BundleHost): BundleHandle {
       session.deselect();
     },
   });
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.invertSelection",
     title: "Invert selection (image)",
     category: "Image",
@@ -810,7 +819,7 @@ export function activate(host: BundleHost): BundleHandle {
     },
   });
   // Fixed v0 sigma (session FEATHER_SIGMA_DEFAULT) — a slider follows.
-  host.contribute.command({
+  command({
     id: "media.paged.image.command.featherSelection",
     title: "Feather selection (image)",
     category: "Image",
@@ -1057,12 +1066,18 @@ export function activate(host: BundleHost): BundleHandle {
   // route to one: a raster editor's whole vocabulary lived in Cmd+K.
   const menuSub = contributeMenu(host);
 
+  // ADR 323 — the layer stacks as addressable, typed objects (headless:
+  // no edit context, no GPU), plus a typed twin of every command above.
+  const objectModel = contributeImageObjectModel(host, untyped);
+
   return {
     dispose() {
       // Providers first, then the subscription that feeds them, then
       // the session they read. Reverse registration order: a handle
       // disposed after its session would be a live provider over a
       // closed engine for however long the host takes to notice.
+      objectModel?.handle.dispose();
+      objectModel?.objects.dispose();
       providerInvalidate?.dispose();
       willSave?.dispose();
       toolSettingsSub?.dispose();
