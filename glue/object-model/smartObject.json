@@ -4,6 +4,7 @@
     "type": {
       "kind": "asset"
     },
+    "heavy": true,
     "summary": "Replace contents: a data: URL or a page item whose placed image becomes the preserved source."
   },
   {

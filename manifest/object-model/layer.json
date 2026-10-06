@@ -129,6 +129,7 @@
     "type": {
       "kind": "asset"
     },
+    "heavy": true,
     "summary": "Pixel replacement (Photoshop's pixel-replacement variable): a data: URL, or the address of a page item whose placed image supplies the pixels. Placed as is, centred. Reads the last source applied."
   }
 ]

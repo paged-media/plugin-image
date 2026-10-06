@@ -182,7 +182,11 @@ export function contributeImageObjectModel(
   const surface = host.contribute as Partial<BundleHost["contribute"]>;
   if (!host.supports("contribute.objectModel@1") || typeof surface.objectModel !== "function") return null;
   const objects = createImageObjects(host, codec);
-  const handle = surface.objectModel({ kinds: objects.kinds, commands: typedCommands(untyped, codec) });
+  const handle = surface.objectModel({
+    kinds: objects.kinds,
+    batch: objects.batch,
+    commands: typedCommands(untyped, codec),
+  });
   return {
     handle,
     objects,

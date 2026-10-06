@@ -68,6 +68,25 @@ at `f/<frame>/r<rev>-<hash>.json`. Then ONE engine batch moves the frame's
 `x-paged:media.paged.image` marker. Undo reverts the marker, so a write is
 one undo step, and redo still lands on a revision whose parts exist.
 
+- The marker is the plugin's ONE label on the frame: exactly
+  `x-paged:media.paged.image`, whose value is the envelope
+  `{"v": 2, "data": {…marker}}` that core and the SDK registry require.
+- The planner is the PLUGIN-level `batch` of the contribution (SDK
+  0.2.43). Layers, masks, adjustments and smart objects share one stack,
+  so every op of a batch, whatever its kind, is applied to one copy of each
+  frame's stack in batch order: one planner call, one write. (Planned per
+  kind, the second kind's plan would start from the stack before the
+  first's and drop its change; the registry now refuses that conflict.)
+- `hostOf` answers the canonical item address (`rectangle:<id>`), read from
+  the scene tree, so it is async; the same address is the write's label
+  host.
+- A page or doc scope (`page:#2 > plugin:media.paged.image/layer`) is
+  resolved by the registry through `hostOf`; the plugin's `list` sees only
+  item and plugin scopes.
+- `content` (the pixels) and the `asset` rows `layer.pixelSource` and
+  `smartObject.source` are `heavy`: `getAll` reads them only with
+  `{ content: true }`.
+
 **The bake.** Compositing is a GPU kernel fold, and the constitution allows
 no CPU blend path.
 
@@ -110,7 +129,8 @@ A Photoshop data set is one apply per record. Each `Binding::Property`
   is pixels (see the gaps).
 
 Persistence follows ADR 559 §6. The recipe goes in an `x-paged:bind` label
-on the host frame (`hostOf` = `frame:<id>`). The target is a selector over
+on the host frame (`hostOf` = the frame's canonical item address, e.g.
+`rectangle:<id>`). The target is a selector over
 layer names. The frame's image carries the last applied values, or the
 previous ones while a bake is pending.
 
@@ -151,7 +171,6 @@ These are built by the editor, not here.
 | `http(s)` pixel sources | no fetch door (manifest `network: false`); the caller resolves |
 | A placed *layered* PSD reads flat until opened in the editor | engine door: no stateless PSD→manifest export |
 | No `group` kind; `order` is refused in a grouped stack | plugin follow-up |
-| `page:… > plugin:…/layer` selectors resolve nothing | the scene tree carries no page ids |
 | A write to the frame that is open in the image edit context is not merged into the live session | plugin follow-up (the session should observe its marker) |
 | Adjustment rows carry no ranges or units | `ParamsLayout` has none (frozen ABI; needs an amendment or registry ranges) |
 | 35 typed twins take no target and act on the edit-context session | plugin follow-up (explicit targets) |

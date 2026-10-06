@@ -49,7 +49,7 @@ import type {
   SceneTreeNode,
 } from "@paged-media/plugin-api";
 
-import { escapeLabelValue, parseAddress } from "@paged-media/plugin-sdk";
+import { escapeLabelValue, fromElementId, parseAddress } from "@paged-media/plugin-sdk";
 
 import { blobPath, readSession, sha256Hex, type CommittedMarker, type SessionRecord } from "../session-store";
 import { adjustSchemaRows, IMAGE_SCHEMA, readAdjust, widenAdjust, writeAdjust, defaultAdjust } from "./adjust";
@@ -132,6 +132,8 @@ const LAYER_ROWS: PropertySchema[] = [
   {
     path: "pixelSource",
     type: { kind: "asset" },
+    // Up to 2 KiB of data: URL per layer: `getAll` skips it unless asked.
+    heavy: true,
     summary:
       "Pixel replacement (Photoshop's pixel-replacement variable): a data: URL, or the address of a page item " +
       "whose placed image supplies the pixels. Placed as is, centred. Reads the last source applied.",
@@ -144,7 +146,7 @@ const MASK_ROWS: PropertySchema[] = [
 ];
 
 const SMART_ROWS: PropertySchema[] = [
-  { path: "source", type: { kind: "asset" }, summary: "Replace contents: a data: URL or a page item whose placed image becomes the preserved source." },
+  { path: "source", type: { kind: "asset" }, heavy: true, summary: "Replace contents: a data: URL or a page item whose placed image becomes the preserved source." },
   { path: "sourceWidth", type: { kind: "number", integer: true }, access: "readOnly" },
   { path: "sourceHeight", type: { kind: "number", integer: true }, access: "readOnly" },
   { path: "scale", type: { kind: "number" }, access: "readOnly", summary: "Re-rendering at a new scale is a GPU resample: the editor's panel." },
@@ -210,10 +212,16 @@ export interface ImageObjectCounters {
   sessionReads: number;
   decodes: number;
   encodes: number;
+  /** Planner calls (one per `host.objects` batch, whatever its kinds). */
+  plans: number;
 }
 
 export interface ImageObjects {
   kinds: ObjectKindContribution[];
+  /** The PLUGIN-level planner (`ObjectModelContribution.batch`): every op
+   *  of a batch on any of the five kinds, in one plan per frame — layers,
+   *  masks, adjustments and smart objects share one stack. */
+  batch(ops: readonly ObjectOp[]): Promise<ObjectWrite>;
   counters: ImageObjectCounters;
   /** Forget every cached stack (the document changed). */
   invalidate(): void;
@@ -228,7 +236,7 @@ const KEEP_SOURCE_CHARS = 2048;
  * codec — no GPU is ever requested here).
  */
 export function createImageObjects(host: BundleHost, codec: () => Promise<ImageCodec>): ImageObjects {
-  const counters: ImageObjectCounters = { treeReads: 0, placedReads: 0, sessionReads: 0, decodes: 0, encodes: 0 };
+  const counters: ImageObjectCounters = { treeReads: 0, placedReads: 0, sessionReads: 0, decodes: 0, encodes: 0, plans: 0 };
   /** Stacks by `frameId|marker`. A marker names a content-addressed
    *  record, so an entry never goes stale for its key — but the frame's
    *  image can change under an unchanged marker, so each entry is
@@ -274,8 +282,8 @@ export function createImageObjects(host: BundleHost, codec: () => Promise<ImageC
           const m = n.pluginMetadata?.find((e) => e.key === LABEL_KEY)?.value ?? null;
           out.push({ node: n, marker: m, within });
         }
-        // Groups scope their members; the tree carries no page / spread
-        // ids, so a page-scoped selector cannot be resolved here (gap).
+        // Groups scope their members. Page / spread scopes never reach
+        // `list`: the registry resolves them through `hostOf`.
         if (n.children) walk(n.children, ownId ? [...within, ownId] : within);
       }
     };
@@ -725,11 +733,24 @@ export function createImageObjects(host: BundleHost, codec: () => Promise<ImageC
     return l;
   }
 
-  /** Plan every op (all on this plugin's objects) into ONE write. */
-  async function plan(kind: ImageKind, ops: readonly ObjectOp[]): Promise<ObjectWrite> {
-    const byFrame = new Map<string, ObjectOp[]>();
+  /** The kind an op writes: the created kind, or its address's. */
+  function kindOfOp(op: ObjectOp): ImageKind | null {
+    if (op.op === "create") {
+      const k = op.kind.startsWith(KIND_PREFIX) ? op.kind.slice(KIND_PREFIX.length) : "";
+      return k in KIND_ROWS ? (k as ImageKind) : null;
+    }
+    return op.op === "set" || op.op === "delete" ? (parseImageAddress(op.address)?.kind ?? null) : null;
+  }
+
+  /** Plan every op (on ANY of this plugin's kinds) into ONE write: one
+   *  stack per frame, every op applied to it in batch order. */
+  async function plan(ops: readonly ObjectOp[]): Promise<ObjectWrite> {
+    counters.plans++;
+    const byFrame = new Map<string, Array<{ kind: ImageKind; op: ObjectOp }>>();
     for (const op of ops) {
       let frameId: string | undefined;
+      const kind = kindOfOp(op);
+      if (!kind) return { kind: "rejected", reason: `${op.op} names no paged.image kind` };
       if (op.op === "create") {
         const w = op.within ? parseImageAddress(op.within) : null;
         // A mask / smart object create names the LAYER it goes on.
@@ -741,7 +762,7 @@ export function createImageObjects(host: BundleHost, codec: () => Promise<ImageC
         if (!frameId) return { kind: "rejected", reason: `${op.address} is not a paged.image address` };
       } else return { kind: "rejected", reason: `${op.op} is not a ${kind} write` };
       const list = byFrame.get(frameId) ?? [];
-      list.push(op);
+      list.push({ kind, op });
       byFrame.set(frameId, list);
     }
     const planned: Array<{ base: FrameState; next: FrameState }> = [];
@@ -754,7 +775,7 @@ export function createImageObjects(host: BundleHost, codec: () => Promise<ImageC
           sources: { ...base.sources },
           pendingRender: new Set(base.pendingRender),
         };
-        for (const op of frameOps) await applyOp(kind, next, op);
+        for (const { kind, op } of frameOps) await applyOp(kind, next, op);
         planned.push({ base, next });
       }
     } catch (err) {
@@ -825,7 +846,9 @@ export function createImageObjects(host: BundleHost, codec: () => Promise<ImageC
         args: { elementId: l.frame.elementId, key: LABEL_KEY, value: escapeLabelValue(l.value), caller: PLUGIN_ID },
       });
     }
-    const hostAddress = `frame:${first.frame.frameId}`;
+    // The canonical item address (`rectangle:<id>`), never the `frame:`
+    // alias: the frame's element id carries its kind.
+    const hostAddress = fromElementId(first.frame.elementId);
     return mutations.length > 0
       ? { kind: "both", mutations: mutations as never, parts, host: hostAddress, labelKey: LABEL_KEY, labelValue: first.value }
       : { kind: "state", parts, host: hostAddress, labelKey: LABEL_KEY, labelValue: first.value };
@@ -836,18 +859,25 @@ export function createImageObjects(host: BundleHost, codec: () => Promise<ImageC
     title: KIND_TITLES[kind],
     schema: KIND_ROWS[kind],
     ...(KIND_CONTENT[kind] ? { content: KIND_CONTENT[kind] } : {}),
-    hostOf(address: Address) {
+    // Async: the canonical address needs the frame's item kind, which
+    // only the scene tree knows. Also how the registry scopes
+    // `page:#n > plugin:media.paged.image/layer`.
+    async hostOf(address: Address) {
       const a = parseImageAddress(address);
-      return a ? `frame:${a.frameId}` : null;
+      const found = a ? await findFrame(a.frameId) : null;
+      return found ? fromElementId(found.node.id as ElementId) : null;
     },
     list: (q) => list(kind, q.within),
     get,
-    set: (address, path, v) => plan(kind, [{ op: "set", address, path, value: v }]),
-    batch: (ops) => plan(kind, ops),
+    // The fallback for a registry without the plugin-level `batch`
+    // (pre-0.2.43): one kind per plan.
+    set: (address, path, v) => plan([{ op: "set", address, path, value: v }]),
+    batch: (ops) => plan(ops),
   }));
 
   return {
     kinds,
+    batch: plan,
     counters,
     invalidate,
     dispose() {

@@ -312,22 +312,98 @@ lane("the object model on the real plugin, headless", () => {
   });
 });
 
+/** The object model alone, under the same manifest, so its counters
+ *  (and a part-write count) are reachable. */
+async function omDoc() {
+  const probe = { om: null as ReturnType<typeof contributeImageObjectModel>, partWrites: 0 };
+  const bundle = defineBundle({
+    manifest: manifestJson as PluginManifest,
+    activate(host: BundleHost) {
+      const write = host.parts.write.bind(host.parts);
+      (host.parts as { write: typeof write }).write = (p, b) => (probe.partWrites++, write(p, b));
+      probe.om = contributeImageObjectModel(host, [], engineCodec());
+      return { dispose: () => (probe.om?.objects.dispose(), probe.om?.handle.dispose()) } as never;
+    },
+  });
+  const h = await imageDoc(bundle);
+  return { h, probe };
+}
+
+lane("SDK 0.2.43 contract fix-ups (DESIGN.md §21.8)", () => {
+  it("one batch writing a layer AND an adjustment on one frame keeps both, in one planner call and one undo step", async () => {
+    const { h, probe } = await omDoc();
+    const image = `${P}/image/${FRAME}`;
+    expect(await h.objects.batch([{ op: "create", kind: `${P}/adjustment`, within: image }])).toMatchObject({ applied: true });
+    const L = `${P}/layer/${FRAME}/1`;
+    const A = `${P}/adjustment/${FRAME}/2`;
+    const c = probe.om!.objects.counters;
+    const plans = c.plans;
+    // Two kinds, one stack: planned per kind, the second plan would start
+    // from the stack before the first and drop its change.
+    expect(
+      await h.objects.batch([
+        { op: "set", address: L, path: "name", value: "Photo" },
+        { op: "set", address: A, path: "exposure.ev", value: 1.25 },
+        { op: "set", address: L, path: "opacity", value: 80 },
+      ]),
+    ).toMatchObject({ applied: true, undoSteps: 1 });
+    expect(c.plans - plans).toBe(1);
+    expect(await h.objects.get(L, "name")).toEqual(value("Photo"));
+    expect(await h.objects.get(L, "opacity")).toEqual(value(80));
+    expect(await h.objects.get(A, "exposure.ev")).toEqual(value(1.25));
+    await h.host.document.undo();
+    expect(await h.objects.get(L, "name")).toEqual(value("Background"));
+    expect(await h.objects.get(A, "exposure.ev")).toEqual(value(0));
+  });
+
+  it("the frame's label is exactly x-paged:media.paged.image with a {v, data} envelope, hosted on the canonical item", async () => {
+    const { h, probe } = await omDoc();
+    const L = `${P}/layer/${FRAME}/1`;
+    await h.objects.set(L, "name", "Labelled");
+    const labels = await h.objects.get(`rectangle:${FRAME}`, "labels");
+    expect(labels.kind).toBe("value");
+    const map = (labels as { value: Record<string, string> }).value;
+    expect(Object.keys(map).filter((k) => k.startsWith("x-paged:media.paged.image"))).toEqual(["x-paged:media.paged.image"]);
+    const env = JSON.parse(map["x-paged:media.paged.image"]!) as { v: number; data: { rev: number } };
+    expect(env.v).toBeGreaterThanOrEqual(1);
+    expect(env.data.rev).toBe(1);
+    // hostOf answers the canonical address (async: the item kind comes
+    // from the scene tree), never the `frame:` alias.
+    const layerKind = probe.om!.objects.kinds.find((k) => k.kind === "layer")!;
+    expect(await layerKind.hostOf(L)).toBe(`rectangle:${FRAME}`);
+    expect(await layerKind.hostOf(`${P}/layer/nowhere/1`)).toBeNull();
+  });
+
+  it("page- and doc-scoped selectors reach the layers (resolved through hostOf)", async () => {
+    const h = await imageDoc();
+    const L = `${P}/layer/${FRAME}/1`;
+    expect(await h.objects.query(`page:#1 > ${P}/layer`)).toEqual([L]);
+    expect(await h.objects.query(`page:#1 > ${P}/layer[name="Background"]`)).toEqual([L]);
+    expect(await h.objects.query(`page:#1 > ${P}/image`)).toEqual([`${P}/image/${FRAME}`]);
+    expect(await h.objects.query(`doc > ${P}/layer`)).toEqual([L]);
+    expect(await h.objects.query(`page:#2 > ${P}/layer`)).toEqual([]);
+  });
+
+  it("getAll skips the heavy rows (pixels, pixel sources) unless asked for content", async () => {
+    const h = await imageDoc();
+    const L = `${P}/layer/${FRAME}/1`;
+    const schema = await h.objects.schema(`${P}/layer`);
+    expect(schema.find((r) => r.path === "pixelSource")!.heavy).toBe(true);
+    expect((await h.objects.schema(`${P}/smartObject`)).find((r) => r.path === "source")!.heavy).toBe(true);
+    const light = await h.objects.getAll(L);
+    expect(light["name"]).toEqual(value("Background"));
+    expect("content" in light).toBe(false);
+    expect("pixelSource" in light).toBe(false);
+    const full = await h.objects.getAll(L, { content: true });
+    expect(full["content"]!.kind).toBe("value");
+    expect(full["pixelSource"]).toEqual({ kind: "absent" });
+  });
+});
+
 lane("count budgets", () => {
   it("a 10-op batch is one engine mutation, one undo step, and a bounded number of reads", async () => {
-    let om: ReturnType<typeof contributeImageObjectModel> = null;
-    let partWrites = 0;
-    // The object model alone, under the same manifest, so its counters
-    // are reachable.
-    const bundle = defineBundle({
-      manifest: manifestJson as PluginManifest,
-      activate(host: BundleHost) {
-        const write = host.parts.write.bind(host.parts);
-        (host.parts as { write: typeof write }).write = (p, b) => (partWrites++, write(p, b));
-        om = contributeImageObjectModel(host, [], engineCodec());
-        return { dispose: () => (om?.objects.dispose(), om?.handle.dispose()) } as never;
-      },
-    });
-    const h = await imageDoc(bundle);
+    const { h, probe } = await omDoc();
+    const om = probe.om;
     const image = `${P}/image/${FRAME}`;
     await h.objects.invoke("media.paged.image.command.addLayer", { image, name: "Two" });
     const A = `${P}/layer/${FRAME}/1`;
@@ -336,7 +412,7 @@ lane("count budgets", () => {
     const sub = h.host.document.onDidChange(() => changes++);
     const c = om!.objects.counters;
     const start = { ...c };
-    partWrites = 0;
+    probe.partWrites = 0;
     const ops = [
       ["name", "A"], ["opacity", 90], ["blendMode", "multiply"], ["locked", true], ["clipped", false],
     ].flatMap(([path, v]) => [
@@ -353,10 +429,11 @@ lane("count budgets", () => {
     // previous write left (the frame could have changed under it); no
     // stored-session read and no decode (that stack is cached under its
     // marker); no encode (two blended layers: the bake is pending).
-    expect(spent).toEqual({ treeReads: 1, placedReads: 1, sessionReads: 0, decodes: 0, encodes: 0 });
+    // One planner call for the whole batch (the plugin-level `batch`).
+    expect(spent).toEqual({ treeReads: 1, placedReads: 1, sessionReads: 0, decodes: 0, encodes: 0, plans: 1 });
     // Parts: the changed manifest + the record (unchanged pixels are
     // stored once, by content).
-    expect(partWrites).toBe(2);
+    expect(probe.partWrites).toBe(2);
     expect(await h.objects.get(B, "name")).toEqual(value("B"));
     await h.host.document.undo();
     expect(await h.objects.get(A, "name")).toEqual(value("Background"));
