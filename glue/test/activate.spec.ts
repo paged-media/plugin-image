@@ -52,7 +52,7 @@ describe("imageBundle.activate", () => {
   it("registers the panel, the commands, the tools, and the raster importer", () => {
     const fake = makeFakeEditor();
     load(fake);
-    expect(fake.panels.ids()).toEqual([PANEL_ID]);
+    expect(fake.panels.ids()).toEqual([PANEL_ID, "media.paged.image.panel.properties"]);
     expect(fake.commands.ids()).toEqual([
       "media.paged.image.command.openImage",
       "media.paged.image.command.adjustSelected",

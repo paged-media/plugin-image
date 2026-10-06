@@ -33,7 +33,12 @@ import type {
   CommandContribution,
   Disposable,
 } from "@paged-media/plugin-api";
-import { contributePanel, contributeTool } from "@paged-media/plugin-sdk";
+import { contributePanel, contributeSchemaPanel, contributeTool } from "@paged-media/plugin-sdk";
+import {
+  IMAGE_PROPERTIES_PANEL,
+  PROPERTIES_PANEL_ID,
+  publishPropertyLists,
+} from "./panels/properties-panel";
 import { contributeMenu } from "./menu";
 
 import manifest from "../manifest.json";
@@ -1069,6 +1074,19 @@ export function activate(host: BundleHost): BundleHandle {
   // ADR 323 — the layer stacks as addressable, typed objects (headless:
   // no edit context, no GPU), plus a typed twin of every command above.
   const objectModel = contributeImageObjectModel(host, untyped);
+  // ADR 323 — the layer stack's properties as host-rendered PropertyFields
+  // (a schema panel of property rows; needs the object model + bindings).
+  const propertyLists =
+    objectModel && host.supports("contribute.schemaPanel@1")
+      ? (contributeSchemaPanel(host, {
+          id: PROPERTIES_PANEL_ID,
+          title: IMAGE_PROPERTIES_PANEL.title,
+          icon: IMAGE_PROPERTIES_PANEL.icon,
+          defaultDock: "right",
+          schema: IMAGE_PROPERTIES_PANEL,
+        }),
+        publishPropertyLists(host))
+      : null;
 
   return {
     dispose() {
@@ -1076,6 +1094,7 @@ export function activate(host: BundleHost): BundleHandle {
       // the session they read. Reverse registration order: a handle
       // disposed after its session would be a live provider over a
       // closed engine for however long the host takes to notice.
+      propertyLists?.dispose();
       objectModel?.handle.dispose();
       objectModel?.objects.dispose();
       providerInvalidate?.dispose();
