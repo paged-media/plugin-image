@@ -25,6 +25,7 @@ import manifestJson from "../manifest.json";
 import { contributeImageObjectModel, engineCodec } from "../src/object-model/contribute";
 import { readPgil, writePgil } from "../src/object-model/pgil";
 import { readAdjust } from "../src/object-model/adjust";
+import { IMAGE_PANEL_FIELDS } from "../src/panels/properties-panel";
 import { sha256Hex } from "../src/session-store";
 import { minimalIdml } from "./fixtures/minimal-idml";
 
@@ -265,6 +266,27 @@ lane("the object model on the real plugin, headless", () => {
     // Delete a layer; the last one is refused.
     expect(await h.objects.batch([{ op: "delete", address: `${P}/layer/${FRAME}/2` }])).toMatchObject({ applied: true });
     expect(await h.objects.get(image, "layerCount")).toEqual(value(2));
+  });
+
+  it("every adjustment field of the properties panel writes through host.objects: one batch, one undo step", async () => {
+    const h = await imageDoc();
+    const image = `${P}/image/${FRAME}`;
+    await h.objects.batch([{ op: "create", kind: `${P}/adjustment`, within: image, props: {} }]);
+    const [A] = await h.objects.query(`${P}/adjustment`);
+    const rows = await h.objects.schema(`${P}/adjustment`);
+    const table = (k: number) => Array.from({ length: 256 }, (_, i) => (i * k) % 256);
+    const want = new Map<string, unknown>();
+    for (const f of IMAGE_PANEL_FIELDS.filter((x) => x.kind === "adjustment")) {
+      const t = rows.find((r) => r.path === f.path)!.type;
+      want.set(
+        f.path,
+        t.kind === "bool" ? true : t.kind === "number" ? 0.25 : f.path === "curves.composite" ? table(3) : [table(5), table(7), table(11)],
+      );
+    }
+    expect(want.size).toBe(89);
+    const out = await h.objects.batch([...want].map(([path, v]) => ({ op: "set" as const, address: A!, path, value: v })));
+    expect(out).toMatchObject({ applied: true, undoSteps: 1 });
+    for (const [path, v] of want) expect(await h.objects.get(A!, path), path).toEqual(value(v));
   });
 
   it("a Photoshop-style data set is one host.objects batch per record (visibility + pixel replacement)", async () => {

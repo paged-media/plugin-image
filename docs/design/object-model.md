@@ -139,7 +139,15 @@ Wave 5.
 
 ## Panel fields that should become a shared `PropertyField`
 
-These are built by the editor, not here.
+Done: the schema panel "Image properties" (`glue/src/panels/properties-panel.ts`)
+declares a property row for EVERY writable row of the layer, mask, smart-object
+and adjustment kinds (`IMAGE_PANEL_FIELDS`; a spec holds it to the schemas).
+Adjustment parameters are grouped into sections (tone, hue/saturation and its
+six ranges, colour balance, black & white, channel mixer, levels per channel,
+photo filter, curves, filters). The indexed scalars stay flat rows with
+labels ("Greens saturation", "Green from constant"). The two curves rows keep
+the typed list field: they are nullable (null = off), and the host's items
+editor cannot start a list from null. The list below was the original survey.
 
 - **Layers** (host Layers panel through the binding provider):
   - `layer.visible`, `layer.locked`, `layer.name`;
