@@ -478,7 +478,7 @@ describe("save-to-file (K-10)", () => {
     const session = createImageSession(handle.host);
     await session.importBytes("art.psd", psdBytes());
     expect(await session.saveToFile()).toBe(false);
-    expect(session.state().status).toContain("shell.saveFile@1");
+    expect(session.state().status).toContain("cannot save files");
     expect(session.state().status).toContain("Export Center");
     session.dispose();
     handle.dispose();

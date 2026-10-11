@@ -521,7 +521,7 @@ export function createImageObjects(host: BundleHost, codec: () => Promise<ImageC
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     } else if (typeof src === "string" && /^[a-z]+:\/\//i.test(src)) {
       throw new Refused(
-        "a network URL needs a fetch door this bundle does not have (manifest network: false); " +
+        "loading an image from a network URL is not supported; " +
           "pass the bytes, a data: URL or a placed image's page item",
       );
     } else if (typeof src === "string") {

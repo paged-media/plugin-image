@@ -462,8 +462,8 @@ mod tests {
         let out = r.swap_out(coord(1, 1)).unwrap_err();
         let msg = out.to_string();
         assert!(
-            msg.contains("I-03"),
-            "Tier 2 error must name BREAKAGE I-03, got: {msg}"
+            msg.contains("not supported yet") && !msg.contains("I-03"),
+            "Tier 2 error must say, in plain words, that swapping out is not supported yet, got: {msg}"
         );
         assert!(r.swap_in(coord(1, 1)).is_err());
     }
