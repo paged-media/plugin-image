@@ -136,6 +136,6 @@ pub enum GpuError {
     },
     /// Tier 2 (OPFS scratch) needs the storage capability the plugin SDK
     /// does not yet expose — see BREAKAGE I-03.
-    #[error("Tier 2 (OPFS scratch) unavailable: storage capability pending (BREAKAGE I-03)")]
+    #[error("Tier 2 (OPFS scratch) unavailable: swapping tiles out to disk is not supported yet")]
     Tier2Unsupported,
 }

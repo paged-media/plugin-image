@@ -2273,7 +2273,7 @@ export function createImageSession(host: BundleHost): ImageSession {
           `${result.note} ${result.fileName}, ${result.bytes.length} bytes — ready. ` +
             (host.supports("shell.saveFile@1")
               ? "Save it from the panel, or deliver it from the Export Center."
-              : "This host wires no save-file door — deliver it from the Export Center."),
+              : "This editor version cannot save files from a panel — deliver it from the Export Center."),
         );
         return result;
       } catch (err) {
@@ -2292,7 +2292,7 @@ export function createImageSession(host: BundleHost): ImageSession {
         // Probed, not assumed. Without this the door's `false` would be
         // indistinguishable from a user cancel.
         setStatus(
-          "This host wires no save-file door (shell.saveFile@1) — use the " +
+          "This editor version cannot save files from a panel — use the " +
             "Export Center.",
         );
         return false;
