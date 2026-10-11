@@ -421,7 +421,7 @@ describe("the panel's Layers section", () => {
   it("refuses to offer removal of the only layer", () => {
     const one = render({ layers: [layer()], active: 0 });
     expect(one).toContain("A document keeps at least one layer");
-    expect(render()).toContain("NOT undoable");
+    expect(render()).toContain("Undo brings it back");
   });
 
   it("states the history BOUND, not just the depth", () => {
@@ -440,10 +440,10 @@ describe("the panel's Layers section", () => {
 
   it("states the GPU-only rule for a multi-layer composite", () => {
     expect(render({ gpu: false })).toContain(
-      "Compositing more than one layer is GPU-only",
+      "Compositing more than one layer needs WebGPU",
     );
     expect(render({ gpu: false, layers: [layer()] })).not.toContain(
-      "Compositing more than one layer is GPU-only",
+      "Compositing more than one layer needs WebGPU",
     );
   });
 
@@ -459,20 +459,20 @@ describe("the panel's Layers section", () => {
 
   it("the scope note says what a layer can be and what undo covers", () => {
     expect(LAYERS_SCOPE_NOTE).toContain("canvas-extent layers");
-    expect(LAYERS_SCOPE_NOTE).toContain("compose.* kernels");
+    expect(LAYERS_SCOPE_NOTE).toContain("blend kernels");
     // What a layer can be — the old "no groups / no masks" note was
     // left standing long after those shipped.
     expect(LAYERS_SCOPE_NOTE).toContain("grouped, clipped and masked");
     expect(LAYERS_SCOPE_NOTE).toContain("an adjustment");
     // What undo covers, and its bound.
-    expect(LAYERS_SCOPE_NOTE).toContain("Undo is ONE list");
+    expect(LAYERS_SCOPE_NOTE).toContain("Undo is one list");
     expect(LAYERS_SCOPE_NOTE).toContain("removing");
     expect(LAYERS_SCOPE_NOTE).toContain("bounded");
     // The consequences people would otherwise discover by losing work.
-    expect(LAYERS_SCOPE_NOTE).toContain("FLATTENS");
+    expect(LAYERS_SCOPE_NOTE).toContain("flattens the stack");
     expect(LAYERS_SCOPE_NOTE).toContain("undo history goes with it");
     expect(LAYERS_SCOPE_NOTE).toContain(
-      "Export and save-back write the FLATTENED composite, not the layers",
+      "Export and save-back write the flattened composite, not the layers",
     );
     // The PSD lane's exact condition.
     expect(LAYERS_SCOPE_NOTE).toContain("8- or 16-bit RGB, with no groups and no layer masks");
@@ -752,10 +752,10 @@ describe("the layers panel's groups", () => {
         },
       ],
     });
-    expect(text).toContain("PASS THROUGH by default");
-    expect(text).toContain("fade the RESULT");
+    expect(text).toContain("pass through by default");
+    expect(text).toContain("fade the result");
     expect(text).toContain("forces isolation");
-    expect(text).toContain("Groups nest, up to eight deep");
+    expect(text).toContain("Groups nest up to eight deep");
     expect(text).not.toContain("do not nest");
   });
 

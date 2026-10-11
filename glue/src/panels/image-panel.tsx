@@ -69,7 +69,8 @@ import { SelectModifySection } from "./sections/select-modify-section";
 import { MoveSection } from "./sections/move-section";
 import { PatternSection } from "./sections/pattern-section";
 import { SmartObjectSection } from "./sections/smart-object-section";
-import { kicker, mono, note, row, sectionTitle } from "./sections/styles";
+import { About, Section } from "./sections/disclosure";
+import { actionBar, kicker, mono, note, panelTitle, row, sectionTitle, swatch } from "./sections/styles";
 
 interface SliderSpec {
   label: string;
@@ -236,7 +237,7 @@ function HistogramView({ hist }: { hist: ImageHistogram }) {
       style={{
         width: "100%",
         height: HIST_H,
-        background: "var(--pg-surface-2, rgba(127,127,127,0.12))",
+        background: "var(--pg-muted)",
         borderRadius: "3px",
       }}
       role="img"
@@ -317,7 +318,7 @@ function CurveEditor({
       style={{
         width: CURVE_SIZE,
         height: CURVE_SIZE,
-        background: "var(--pg-surface-2, rgba(127,127,127,0.12))",
+        background: "var(--pg-muted)",
         borderRadius: "3px",
         touchAction: "none",
         opacity: disabled ? 0.5 : 1,
@@ -404,6 +405,14 @@ const STOPS: Array<{ name: string; rgba: Rgba01 }> = [
   { name: "Transparent", rgba: [0, 0, 0, 0] },
 ];
 
+/** Pen-pressure targets in the panel's words. */
+const PRESSURE_LABELS: Record<string, string> = {
+  none: "Nothing",
+  size: "Size",
+  opacity: "Opacity",
+  both: "Size and opacity",
+};
+
 const stopCss = (c: Rgba01) =>
   `rgba(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(
     c[2] * 255,
@@ -434,19 +443,18 @@ const BRUSH_COLORS: Array<{ name: string; rgba: Rgba01 }> = [
  * panel's `APPEARANCE_BAKE_NOTE` convention).
  */
 export const BRUSH_SCOPE_NOTE =
-  "A stroke paints the ACTIVE LAYER, not the flattened image — add a layer " +
-  "and what is underneath survives. A committed stroke is UNDOABLE: the " +
+  "A stroke paints the active layer, not the flattened image — add a layer " +
+  "and what is underneath survives. A committed stroke is undoable: the " +
   "tiles it touched are journaled and Undo restores them byte for byte. " +
-  "That history is BOUNDED — 32 steps or 256 MB, whichever runs out first; " +
+  "That history is bounded — 32 steps or 256 MB, whichever runs out first; " +
   "past the bound the oldest edits are dropped and become permanent, and " +
-  "the panel says how many. Painting is still destructive INTO its own " +
-  "layer: paint on the background and what it covered is gone. Layer " +
-  "STRUCTURE — add, remove, reorder, opacity, blend — is not journaled, so " +
-  "a removed layer does not come back. The document and the source file " +
-  "are never touched (the in-frame result stays a preview layer). A stroke " +
-  "still in flight can be abandoned — the base pixels are held until you " +
-  "release. While you drag, the frame shows the whole stack with the " +
-  "stroke composited into it; the adjustment chain re-runs on release.";
+  "the panel says how many. Painting still replaces what it covers in its " +
+  "own layer: paint on the background and what it covered is gone until " +
+  "you undo. The document and the source file are never touched (the " +
+  "in-frame result stays a preview layer). A stroke still in flight can be " +
+  "abandoned — the base pixels are held until you release. While you drag, " +
+  "the frame shows the whole stack with the stroke composited into it; the " +
+  "adjustment chain re-runs on release.";
 
 /**
  * THE SCOPE OF THE LAYER GRAPH itself — what a layer here is and, more
@@ -455,20 +463,18 @@ export const BRUSH_SCOPE_NOTE =
  */
 export const LAYERS_SCOPE_NOTE =
   "Layers are canvas-extent layers composited bottom-up through the " +
-  "engine's own compose.* kernels — the same 26 blend modes the brush " +
-  "paints through, so nothing here is a second implementation. A layer " +
-  "holds pixels, an adjustment (it transforms everything beneath it) or " +
-  "a smart object (rescaling re-renders from the original); layers can " +
-  "be grouped, clipped and masked. Undo is ONE list for paint, fills and " +
-  "bakes AND every change to the stack — adding, removing, reordering, " +
-  "opacity, blend, masks, groups, rotate, flip and canvas size; it is " +
-  "bounded, and the panel says when old steps fall off. A crop, resize " +
-  "or straighten FLATTENS the stack, and the undo history goes with it. " +
-  "Export and save-back write the FLATTENED composite, not the layers — " +
-  "this stack lives in the session. A PSD opens as its own layers only " +
-  "when this model reproduces it exactly — 8- or 16-bit RGB, with no " +
-  "groups and no layer masks; anything else keeps " +
-  "Photoshop's merged composite as a single layer and says why.";
+  "engine's own blend kernels — the same 26 blend modes the brush paints " +
+  "through. A layer holds pixels, an adjustment (it transforms everything " +
+  "beneath it) or a smart object (rescaling re-renders from the original); " +
+  "layers can be grouped, clipped and masked. Undo is one list for paint, " +
+  "fills and bakes and every change to the stack — adding, removing, " +
+  "reordering, opacity, blend, masks, groups, rotate, flip and canvas size; " +
+  "it is bounded, and the panel says when old steps fall off. A crop, " +
+  "resize or straighten flattens the stack, and the undo history goes with " +
+  "it. Export and save-back write the flattened composite, not the layers. " +
+  "A PSD opens as its own layers only when this model reproduces it " +
+  "exactly — 8- or 16-bit RGB, with no groups and no layer masks; anything " +
+  "else keeps Photoshop's merged composite as a single layer and says why.";
 
 /** The paint parameters section — a PURE component (props in, elements
  *  out, no hooks) so a spec can render it without a DOM and assert what
@@ -502,9 +508,10 @@ export function BrushSection({
       c.rgba[3] === brush.color[3],
   );
   return (
-    <>
-      <div style={sectionTitle}>
-        Brush{masked ? " — clipped to the selection" : ""}
+    <Section title={`Brush${masked ? ", clipped to the selection" : ""}`} data-image-brush-section>
+      <div style={note}>
+        Settings for the paint, pencil and eraser tools; size, hardness,
+        opacity and flow are also in the tool options bar.
       </div>
       <Slider
         label="Size (px)"
@@ -569,28 +576,30 @@ export function BrushSection({
           ) : (
             <option
               value={brush.blend}
-            >{`${brush.blend} (engine not booted)`}</option>
+            >{`${brush.blend} (engine not started)`}</option>
           )}
         </select>
       </div>
       <div style={row}>
         <label htmlFor="pg-image-brush-color">Colour</label>
-        <select
-          id="pg-image-brush-color"
-          data-image-brush-color
-          value={colorIndex < 0 ? 0 : colorIndex}
-          disabled={disabled}
-          style={{ background: stopCss(brush.color) }}
-          onChange={(e) =>
-            onChange({ color: [...BRUSH_COLORS[Number(e.target.value)].rgba] })
-          }
-        >
-          {BRUSH_COLORS.map((c, i) => (
-            <option key={c.name} value={i}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={swatch(stopCss(brush.color))} aria-hidden="true" />
+          <select
+            id="pg-image-brush-color"
+            data-image-brush-color
+            value={colorIndex < 0 ? 0 : colorIndex}
+            disabled={disabled}
+            onChange={(e) =>
+              onChange({ color: [...BRUSH_COLORS[Number(e.target.value)].rgba] })
+            }
+          >
+            {BRUSH_COLORS.map((c, i) => (
+              <option key={c.name} value={i}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </span>
       </div>
       <div style={row}>
         <label htmlFor="pg-image-brush-pressure">Pen pressure drives</label>
@@ -605,7 +614,7 @@ export function BrushSection({
         >
           {PRESSURE_TARGETS.map((t) => (
             <option key={t} value={t}>
-              {t}
+              {PRESSURE_LABELS[t] ?? t}
             </option>
           ))}
         </select>
@@ -624,21 +633,18 @@ export function BrushSection({
       ) : null}
       {!gpu ? (
         <div style={note}>
-          Painting is GPU-only — the dab composite is a registered WGSL kernel
-          dispatch and no CPU blend path ships. Without a WebGPU device the
-          paint tools decline instead of painting differently.
+          Painting needs WebGPU, so the paint tools are disabled here.
         </div>
       ) : null}
-      <div style={note} data-image-brush-note>
-        {BRUSH_SCOPE_NOTE}
-      </div>
-      <div style={note}>
-        Colours are a shortlist (the host contract wires no colour-picker door);
-        the blend list is the engine&apos;s own `compose.*` kernel registry.
-        Parameters are frozen into each stroke at pointer-down — a stroke whose
-        size changed halfway through would not replay.
-      </div>
-    </>
+      <div style={note}>Strokes paint the active layer, and Undo takes them back.</div>
+      <About>
+        <p data-image-brush-note>{BRUSH_SCOPE_NOTE}</p>
+        <p>
+          The colours are a shortlist, and the blend list comes from the
+          engine itself. Settings are fixed for a stroke when it starts.
+        </p>
+      </About>
+    </Section>
   );
 }
 
@@ -662,8 +668,7 @@ export function TypeSection({
   onChange: (patch: Partial<{ text: string; family: string; sizePx: number }>) => void;
 }) {
   return (
-    <>
-      <div style={sectionTitle}>Type</div>
+    <Section title="Type" data-image-type-section>
       <div style={row}>
         <label htmlFor="pg-image-type-text">Text</label>
         <input
@@ -672,7 +677,7 @@ export function TypeSection({
           data-image-type-text
           value={type.text}
           disabled={disabled}
-          placeholder="type here, then click the canvas"
+          placeholder="Type here, then click the canvas"
           onChange={(e) => onChange({ text: e.target.value })}
         />
       </div>
@@ -697,30 +702,27 @@ export function TypeSection({
         onChange={(sizePx) => onChange({ sizePx })}
       />
       <div style={note} data-image-type-note>
-        Click the canvas to set the BASELINE and paint the run. Glyphs are
-        shaped by the font&apos;s own tables — joining, reordering, ligatures
-        and kerning — so scripts that need it come out right rather than
-        merely plausible. The colour is the brush colour.
+        Click the canvas to set the baseline and paint the text as pixels in
+        the brush colour; the Character panel styles it.
       </div>
-      <div style={note}>
-        Faces come from the DOCUMENT: only fonts it already embeds can be
-        used, and nothing is ever fetched from the network. A character with
-        no glyph in the chosen face is reported and left undrawn rather than
-        replaced with a box.
-      </div>
-      <div style={note}>
-        This paints PIXELS, not a text object. The Character panel is
-        live over a run — family, style, size, tracking, leading, case,
-        scale, slant, baseline shift, super/subscript, underline,
-        strikethrough, ligatures and line alignment all apply. What is
-        NOT here is everything that needs a text COLUMN: no WRAPPING (a
-        line ends where you end it), no indents, no hyphenation. A
-        raster layer is not a column, which is why those are absent
-        rather than pending. For live, editable, wrapping text use the
-        host&apos;s text frame, which is a real text engine; a second
-        one living in here would drift from it.
-      </div>
-    </>
+      <About>
+        <p>
+          Glyphs are shaped by the font&apos;s own tables — joining,
+          reordering, ligatures and kerning. Only fonts the document already
+          embeds can be used, and nothing is fetched from the network. A
+          character with no glyph in the chosen face is reported and left
+          undrawn rather than replaced with a box.
+        </p>
+        <p>
+          This paints pixels, not a text object. The Character panel applies
+          family, style, size, tracking, leading, case, scale, slant,
+          baseline shift, super/subscript, underline, strikethrough,
+          ligatures and line alignment. Anything that needs a text column —
+          wrapping, indents, hyphenation — is absent: a line ends where you
+          end it. For live, editable, wrapping text use a text frame.
+        </p>
+      </About>
+    </Section>
   );
 }
 
@@ -745,8 +747,7 @@ export function RetouchSection({
   onContentAwareFill: () => void;
 }) {
   return (
-    <>
-      <div style={sectionTitle}>Retouch</div>
+    <Section title="Retouch" data-image-retouch-section>
       <div style={row}>
         <span>Clone source</span>
         <span style={mono} data-image-clone-source>
@@ -768,17 +769,20 @@ export function RetouchSection({
       </div>
       <div style={note}>
         Alt-click with the Clone stamp or the Healing brush to set the source.
-        The anchor survives between strokes, and aligned keeps a fixed offset
-        from the cursor so the copy translates instead of repeating.
       </div>
-      <div style={note} data-image-heal-limit>
-        The healing brush solves for its correction in the gradient domain —
-        a membrane fitted to the mismatch around the dab&apos;s edge — so it
-        follows a ramp instead of shifting the patch by one number. Where the
-        sampled window runs off the image there is no boundary to fit, and it
-        falls back to a plain clone rather than inventing a correction from
-        pixels that do not exist.
-      </div>
+      <About>
+        <p>
+          The source survives between strokes, and Aligned keeps a fixed
+          offset from the cursor so the copy moves with it instead of
+          repeating.
+        </p>
+        <p data-image-heal-limit>
+          The healing brush fits its correction to the mismatch around the
+          dab&apos;s edge, so it follows a ramp instead of shifting the patch
+          by one number. Where the sampled area runs off the image there is no
+          edge to fit, and it falls back to a plain clone.
+        </p>
+      </About>
       <div style={row}>
         <button
           type="button"
@@ -788,19 +792,19 @@ export function RetouchSection({
         >
           Content-aware fill
         </button>
-        <span style={mono}>{hasSelection ? "" : "select an area first"}</span>
+        <span style={note}>{hasSelection ? "" : "Select an area first."}</span>
       </div>
       <div style={note} data-image-caf-note>
-        Fills the SELECTION with texture found elsewhere in the same image,
-        patch by patch from the edge inward — so it keeps grain and continues
-        edges rather than blurring across them. Every pixel it writes was
-        copied from real image data, never averaged into existence. It works
-        coarse to fine, deciding large-scale structure at half resolution
-        before matching texture at full, so a big hole keeps its shape as
-        well as its grain. Its search is still WINDOWED: a match on the far
-        side of a large image will not be found.
+        Fills the selection with texture copied from elsewhere in the image.
+        <About>
+          It works patch by patch from the edge inward, so it keeps grain and
+          continues edges rather than blurring across them, and decides
+          large-scale structure at half resolution before matching texture at
+          full. Its search is limited to a window around the hole: a match on
+          the far side of a large image will not be found.
+        </About>
       </div>
-    </>
+    </Section>
   );
 }
 
@@ -834,8 +838,7 @@ export function PathsSection({
   onFromPath: () => void;
 }) {
   return (
-    <>
-      <div style={sectionTitle}>Paths</div>
+    <Section title="Paths" data-image-paths-section>
       <Slider
         label="Trace at coverage ≥"
         min={1}
@@ -864,20 +867,22 @@ export function PathsSection({
         </button>
       </div>
       <div style={note}>
-        A traced path is inserted as a real vector polygon on the page — the
-        host owns it from then on, so the Pen, the shape tools and the
-        Pathfinder all apply, and undo is the document&apos;s rather than the
-        image journal&apos;s. Each contour becomes its own polygon, holes
-        included: a ring is two paths, because collapsing them would fill the
-        hole.
+        Turns the selection into a vector shape on the page, or a selected
+        shape back into a selection.
       </div>
-      <div style={note}>
-        Corners are corners. The trace follows pixel edges and the anchors
-        carry no handles, because fitting curves to a mask&apos;s staircase
-        would invent a smoothness the selection does not have — straighten it
-        with the tolerance, or edit it with the Pen once it is a path.
-      </div>
-    </>
+      <About>
+        <p>
+          A traced path becomes an ordinary page shape, so the Pen, the shape
+          tools and the Pathfinder apply, and its undo is the document&apos;s.
+          Each contour becomes its own polygon, holes included: a ring is two
+          paths.
+        </p>
+        <p>
+          The trace follows pixel edges and its corners carry no handles;
+          smooth it with the Pen once it is a path.
+        </p>
+      </About>
+    </Section>
   );
 }
 
@@ -903,10 +908,9 @@ export function ChannelsSection({
   onLoadSelection: (channel: string) => void;
 }) {
   return (
-    <>
-      <div style={sectionTitle}>Channels</div>
+    <Section title="Channels" data-image-channels-section>
       {channels === null ? (
-        <div style={note}>Ingest an image to read its channels.</div>
+        <div style={note}>Choose Use selected frame to read the image&apos;s channels.</div>
       ) : (
         <>
           <div data-image-channels>
@@ -930,20 +934,23 @@ export function ChannelsSection({
             ))}
           </div>
           <div style={note}>
-            Loading a channel REPLACES the selection, and its bytes are the
-            coverage directly — no threshold — so a mid-grey channel selects
-            at 50% and every masked kernel honours that partial coverage.
-            Luma is the derived Rec.709 luminance, the usual luminosity mask.
+            Click a channel to load it as the selection, replacing the current one.
           </div>
-          <div style={note}>
-            Viewing one channel in isolation is not offered: that is a display
-            state, and the host scene channel takes a composited image rather
-            than a view mode. Compositing a greyscale image into the document
-            to imitate it would be a destructive edit, not a view.
-          </div>
+          <About>
+            <p>
+              The channel&apos;s values are the coverage directly, with no
+              threshold, so a mid-grey channel selects at 50%. Luma is the
+              Rec.709 luminance, the usual luminosity mask.
+            </p>
+            <p>
+              Viewing one channel on its own is not offered: the frame shows
+              the composited image, and faking a channel view would mean
+              writing a greyscale image into the document.
+            </p>
+          </About>
         </>
       )}
-    </>
+    </Section>
   );
 }
 
@@ -1175,13 +1182,22 @@ export function LayersSection({
   const rows = [...layers].reverse();
   const multi = layers.length > 1;
   return (
-    <>
-      <div style={sectionTitle} data-image-layers-title>
-        Layers{layers.length > 0 ? ` (${layers.length})` : ""}
-      </div>
+    <Section
+      title={
+        <span data-image-layers-title>
+          Layers{layers.length > 0 ? ` (${layers.length})` : ""}
+        </span>
+      }
+      data-image-layers-section
+    >
       {layers.length === 0 ? (
-        <div style={note}>Ingest an image to open its layer stack.</div>
-      ) : null}
+        <div style={note}>Choose Use selected frame to open the image&apos;s layers.</div>
+      ) : (
+        <div style={note}>
+          While you edit the image, the Layers panel and Image properties show
+          this same stack.
+        </div>
+      )}
       {rows.map((l, i) => (
         <Fragment key={l.id}>
           {/* A GROUP HEADER, emitted once at the top of its run (rows
@@ -1444,7 +1460,7 @@ export function LayersSection({
               type="button"
               title={
                 multi
-                  ? "Remove (NOT undoable — layer structure is not journaled)"
+                  ? "Remove layer (Undo brings it back)"
                   : "A document keeps at least one layer"
               }
               data-image-layer-remove={l.index}
@@ -1459,15 +1475,15 @@ export function LayersSection({
       ))}
       {groups.length > 0 ? (
         <div style={note} data-image-groups-note>
-          A group is PASS THROUGH by default, as in Photoshop: its members
-          composite straight into the stack below, so an adjustment inside
-          reaches everything beneath it. Switch it to ISOLATED and the members
-          composite into their own buffer first — which is what makes group
-          opacity fade the RESULT rather than each member, and what confines an
-          adjustment to its group-mates. Setting the opacity below 100% forces
-          isolation either way, because fading a group that has no composite of
-          its own is not defined. Groups nest, up to eight deep; each open
-          level parks a full-canvas buffer while it composites.
+          Groups pass through by default, as in Photoshop.
+          <About>
+            A pass-through group&apos;s members composite straight into the
+            stack below, so an adjustment inside reaches everything beneath
+            it. Switch it to isolated and the members composite into their own
+            buffer first — that makes group opacity fade the result rather than
+            each member, and confines an adjustment to its group. Opacity below
+            100% forces isolation either way. Groups nest up to eight deep.
+          </About>
         </div>
       ) : null}
       <div
@@ -1603,16 +1619,14 @@ export function LayersSection({
       ) : null}
       {!gpu && layers.length > 1 ? (
         <div style={note}>
-          Compositing more than one layer is GPU-only — every blend is a
-          registered WGSL kernel dispatch and no CPU blend path ships. Without a
-          WebGPU device only a single visible layer at full opacity in normal
-          mode can be shown (that fold is the identity).
+          Compositing more than one layer needs WebGPU; without it only a
+          single visible layer at full opacity in Normal mode can be shown.
         </div>
       ) : null}
-      <div style={note} data-image-layers-note>
-        {LAYERS_SCOPE_NOTE}
-      </div>
-    </>
+      <About>
+        <p data-image-layers-note>{LAYERS_SCOPE_NOTE}</p>
+      </About>
+    </Section>
   );
 }
 
@@ -1719,28 +1733,105 @@ export function makeImagePanel(session: ImageSession) {
 
     return (
       <div style={{ padding: "var(--space-2, 8px)", fontSize: "12px" }}>
-        <div style={kicker}>paged.image — levels / curves / white balance</div>
+        <div style={panelTitle}>Image adjustments</div>
 
-        <div style={row}>
-          <span>Bundle</span>
-          <span style={mono}>
-            {manifest.id}@{manifest.version}
-          </span>
+        {/* THE COMMIT BAR — sticky, so Apply, Reset and the status line
+            (where every refusal is written) stay in view while the
+            sections below scroll. */}
+        <div style={actionBar} data-image-action-bar>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: "var(--space-2, 8px)",
+            }}
+          >
+            <button
+              type="button"
+              disabled={s.busy}
+              onClick={() => void session.ingestSelection()}
+              title="Load the selected image frame into the panel"
+            >
+              Use selected frame
+            </button>
+            <label title="Sliders update the frame as they move; full resolution follows when they rest">
+              <input
+                type="checkbox"
+                data-image-live-preview
+                checked={s.livePreview}
+                onChange={(e) => session.setLivePreview(e.target.checked)}
+              />{" "}
+              Live
+            </label>
+            <button
+              type="button"
+              disabled={disabled}
+              title={
+                disabled
+                  ? s.busy
+                    ? "Working…"
+                    : "Load an image first"
+                  : "Show the adjusted image in its frame (the placed file is unchanged)"
+              }
+              onClick={() => void session.apply()}
+            >
+              Apply
+            </button>
+            <button
+              type="button"
+              data-image-reset
+              disabled={s.busy}
+              title="Return every adjustment to its starting value"
+              onClick={() => {
+                // session.reset() restores the FULL identity params — every
+                // stage below, including the extended ones; the local
+                // pickers are the panel's own state.
+                void session.reset();
+                setCurvePointsBy({
+                  rgb: IDENTITY_CURVE,
+                  r: IDENTITY_CURVE,
+                  g: IDENTITY_CURVE,
+                  b: IDENTITY_CURVE,
+                });
+                setAspect("free");
+                setAngle(0);
+                setGradKind("linear");
+                setStop0(0);
+                setStop1(1);
+                setNoiseAmount(0.5);
+              }}
+            >
+              Reset
+            </button>
+          </div>
+          {/* The one line every door writes its outcome to — a result, or
+              a stated reason there is none. Addressable so a journey can
+              assert the app answered at all: silence here is what an
+              unhandled throw looks like from the outside. */}
+          <div style={{ ...note, opacity: 0.85 }} data-image-status role="status">
+            {s.status}
+          </div>
+          {s.engine === "ready" && !s.gpu ? (
+            <div style={note} data-image-no-gpu>
+              WebGPU is not available here, so adjustments, filters and painting are disabled.
+            </div>
+          ) : null}
+          {s.engine === "unavailable" ? (
+            <div style={note} data-image-engine-unavailable>
+              The image engine could not start. Diagnostics, at the bottom of the panel, has the reason.
+            </div>
+          ) : null}
         </div>
-        <div style={row}>
-          <span>Engine</span>
-          <span style={{ textAlign: "right" }}>{engineLine}</span>
-        </div>
-        {s.engineDetail ? <div style={note}>{s.engineDetail}</div> : null}
 
-        <div style={row}>
-          <span>Source</span>
-          <span style={{ ...mono, textAlign: "right" }}>
-            {s.source
-              ? `${s.source.name} ${s.source.width}×${s.source.height}`
-              : "none"}
-          </span>
-        </div>
+        {s.source ? (
+          <div style={row}>
+            <span>Image</span>
+            <span style={{ ...mono, textAlign: "right" }}>
+              {`${s.source.name} · ${s.source.width}×${s.source.height} px`}
+            </span>
+          </div>
+        ) : null}
 
         {/* CMS rung 1 — SAY which colour treatment the ingest applied.
             "sRGB assumed" is the honest majority case (most PNG/JPEG carry
@@ -1761,19 +1852,21 @@ export function makeImagePanel(session: ImageSession) {
         {s.source && isCmykConversion(s.source.display) ? (
           <div style={note} data-image-cmyk-converted>
             {s.source.display === "cmyk-converted"
-              ? "This is a CMYK document. It was converted to sRGB through its embedded profile when it opened (Photoshop's default view: relative colorimetric with black-point compensation, approximated by the profile's perceptual table)."
-              : "This is a CMYK document without a usable profile. It was converted to sRGB with the plain ink formula, which is not colour-managed."}{" "}
-            The layers, the edits and the save-back are RGB; layers using a blend
-            mode other than Normal are not imported, because Photoshop blends
-            them in CMYK.
+              ? "This CMYK image was converted to sRGB through its embedded profile; edits and save-back are RGB."
+              : "This CMYK image has no usable profile, so it was converted to sRGB without colour management; edits and save-back are RGB."}
+            <About>
+              The conversion follows Photoshop&apos;s default view: relative
+              colorimetric with black-point compensation, approximated by the
+              profile&apos;s perceptual table. Layers that use a blend mode
+              other than Normal are not imported, because Photoshop blends
+              them in CMYK.
+            </About>
           </div>
         ) : null}
 
         {/* DEPTH, stated for the same reason the colour treatment is: a
-            16-bit source is REDUCED to 8 here, and a user who chose
-            16-bit deliberately deserves to know that rather than to
-            discover it in a gradient. Shown only when it happened — an
-            8-bit file needs no announcement. */}
+            16-bit source is REDUCED to 8 here. Shown only when it
+            happened — an 8-bit file needs no announcement. */}
         {s.source?.depthReduced ? (
           <div style={row}>
             <span>Depth</span>
@@ -1784,35 +1877,16 @@ export function makeImagePanel(session: ImageSession) {
         ) : null}
         {s.source?.depthReduced ? (
           <div style={note}>
-            The layer stack, the edits and the save-back are 8-bit, so the
-            extra precision could not survive them. This used to be a refusal
-            — the file simply would not open — and opening it while saying
-            what was lost is the better of the two honest answers.
+            Layers, edits and save-back work in 8 bits, so the extra precision is not kept.
           </div>
         ) : null}
-
-        <div
-          style={{
-            display: "flex",
-            gap: "var(--space-2, 8px)",
-            marginTop: "var(--space-2, 8px)",
-          }}
-        >
-          <button
-            type="button"
-            disabled={s.busy}
-            onClick={() => void session.ingestSelection()}
-          >
-            Use selected frame
-          </button>
-        </div>
 
         {/* Histogram */}
         <div style={sectionTitle}>Histogram (R / G / B / luma)</div>
         {s.histogram ? (
           <HistogramView hist={s.histogram} />
         ) : (
-          <div style={note}>Ingest an image to see its histogram.</div>
+          <div style={note}>Choose Use selected frame to see the histogram.</div>
         )}
         <div
           style={{
@@ -1831,8 +1905,8 @@ export function makeImagePanel(session: ImageSession) {
           </button>
         </div>
         <div style={note}>
-          Auto-enhance reads the histogram for auto-levels + a gray-world white
-          balance and fills the sliders below; click Apply to composite.
+          Auto-enhance sets levels and white balance from the histogram; Apply
+          shows the result.
         </div>
 
         {/* Selection readout — the engine-side coverage the marquee /
@@ -2341,12 +2415,12 @@ export function makeImagePanel(session: ImageSession) {
                 </option>
               ))}
             </select>
+            <span style={swatch(stopCss(STOPS[stop0].rgba))} aria-hidden="true" />
             <select
               data-image-gradient-stop0
               value={stop0}
               disabled={disabled}
               onChange={(e) => setStop0(Number(e.target.value))}
-              style={{ background: stopCss(STOPS[stop0].rgba) }}
               title="Start colour"
             >
               {STOPS.map((c, i) => (
@@ -2355,12 +2429,12 @@ export function makeImagePanel(session: ImageSession) {
                 </option>
               ))}
             </select>
+            <span style={swatch(stopCss(STOPS[stop1].rgba))} aria-hidden="true" />
             <select
               data-image-gradient-stop1
               value={stop1}
               disabled={disabled}
               onChange={(e) => setStop1(Number(e.target.value))}
-              style={{ background: stopCss(STOPS[stop1].rgba) }}
               title="End colour"
             >
               {STOPS.map((c, i) => (
@@ -3239,83 +3313,49 @@ export function makeImagePanel(session: ImageSession) {
           </>
         ) : (
           <div style={note}>
-            Bakes the adjustments into the source file&apos;s bytes at full
-            resolution: a PSD writes its channel pixels back (single-layer; a
-            MULTI-layer PSD is flattened into a new single-layer PSD and says
-            so), a PNG/JPEG is re-encoded. Save… hands the result to the
-            host&apos;s saver; where no saver is wired it says so, and the
-            Export Center delivers the same bytes.
+            Writes the adjustments into a copy of the source file at full resolution.
+            <About>
+              A single-layer PSD gets its channel pixels written back; a
+              multi-layer PSD is flattened into a new single-layer PSD, and the
+              panel says so. A PNG or JPEG is re-encoded. Save… hands the
+              result to the editor&apos;s file saver; where there is none, the
+              Export Center delivers the same bytes.
+            </About>
           </div>
         )}
 
-        {/* Commit */}
-        <div
-          style={{
-            display: "flex",
-            gap: "var(--space-2, 8px)",
-            marginTop: "var(--space-3, 12px)",
-          }}
-        >
-          <label title="Sliders update the frame as they move; full resolution follows when they rest">
-            <input
-              type="checkbox"
-              data-image-live-preview
-              checked={s.livePreview}
-              onChange={(e) => session.setLivePreview(e.target.checked)}
-            />{" "}
-            Live
-          </label>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => void session.apply()}
-          >
-            Apply
-          </button>
-          <button
-            type="button"
-            data-image-reset
-            disabled={s.busy}
-            onClick={() => {
-              // session.reset() restores the FULL identity params — every
-              // stage above, including the extended ones; the local
-              // pickers below are the panel's own state.
-              void session.reset();
-              setCurvePointsBy({
-                rgb: IDENTITY_CURVE,
-                r: IDENTITY_CURVE,
-                g: IDENTITY_CURVE,
-                b: IDENTITY_CURVE,
-              });
-              setAspect("free");
-              setAngle(0);
-              setGradKind("linear");
-              setStop0(0);
-              setStop1(1);
-              setNoiseAmount(0.5);
-            }}
-          >
-            Reset
-          </button>
-        </div>
-
-        {/* The one line every door writes its outcome to — a result, or
-            a STATED reason there is none. Addressable so a journey can
-            assert the app answered at all: silence here is what an
-            unhandled throw looks like from the outside. */}
-        <div style={note} data-image-status>
-          {s.status}
-        </div>
-        <div style={note}>
-          Apply composites an in-frame PREVIEW layer (C-1 Stage A) — the
-          document and the placed file are unchanged. The crop commit cuts the
-          engine source, straightening first when the angle is non-zero (a
-          bilinear resample, so it needs the GPU; 0&deg; stays an exact
-          axis-aligned cut). &ldquo;Apply to file&rdquo; is the save-back lane.
-          Per-drag preview for the ADJUSTMENT sliders is still a later milestone
-          (Stage B); the paint tools do stream a preview per pointer sample, at
-          the cost of a whole-image byte payload each time.
-        </div>
+        {/* DIAGNOSTICS — the developer readout (bundle, engine, source),
+            collapsed at the bottom. The Source row keeps its exact
+            span/span shape: journeys read it by text. */}
+        <details style={{ ...note, marginTop: "var(--space-3, 12px)" }} data-image-diagnostics>
+          <summary style={{ cursor: "pointer" }}>Diagnostics</summary>
+          <div style={row}>
+            <span>Bundle</span>
+            <span style={mono}>
+              {manifest.id}@{manifest.version}
+            </span>
+          </div>
+          <div style={row}>
+            <span>Engine</span>
+            <span style={{ textAlign: "right" }}>{engineLine}</span>
+          </div>
+          {s.engineDetail ? <div>{s.engineDetail}</div> : null}
+          <div style={row}>
+            <span>Source</span>
+            <span style={{ ...mono, textAlign: "right" }}>
+              {s.source
+                ? `${s.source.name} ${s.source.width}×${s.source.height}`
+                : "none"}
+            </span>
+          </div>
+          <p>
+            Apply shows a preview layer in the frame; the document and the
+            placed file stay unchanged until Apply to file. A crop cuts the
+            image itself, straightening first when the angle is not zero
+            (straightening needs WebGPU). The paint tools preview every
+            pointer sample; the adjustment sliders preview when Live is on.
+          </p>
+        </details>
       </div>
     );
   };

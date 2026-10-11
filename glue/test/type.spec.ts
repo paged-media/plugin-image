@@ -261,7 +261,7 @@ describe("the panel's Type section", () => {
       .replace(/\s+/g, " ");
 
   it("tells the user what a click does", () => {
-    expect(render()).toContain("Click the canvas to set the BASELINE");
+    expect(render()).toContain("Click the canvas to set the baseline");
   });
 
   it("states that glyphs are SHAPED, not merely advanced", () => {
@@ -274,8 +274,8 @@ describe("the panel's Type section", () => {
 
   it("states where faces come from and what a missing glyph does", () => {
     const text = render();
-    expect(text).toContain("come from the DOCUMENT");
-    expect(text).toContain("nothing is ever fetched from the network");
+    expect(text).toContain("fonts the document already");
+    expect(text).toContain("nothing is fetched from the network");
     expect(text).toContain("left undrawn rather than replaced with a box");
   });
 
@@ -283,8 +283,8 @@ describe("the panel's Type section", () => {
     // The scope sentence. Without it the tool reads as a worse version
     // of the host's text frame instead of a different thing.
     const text = render();
-    expect(text).toContain("paints PIXELS, not a text object");
-    expect(text).toContain("host");
+    expect(text).toContain("paints pixels, not a text object");
+    expect(text).toContain("text frame");
   });
 });
 

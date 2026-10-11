@@ -246,8 +246,7 @@ describe("the panel's Retouch section", () => {
     // leaving it would be a different kind of lie. What remains is the
     // real edge case: no boundary, no correction.
     const text = render();
-    expect(text).toContain("gradient domain");
-    expect(text).toContain("follows a ramp");
+        expect(text).toContain("follows a ramp");
     expect(text).toContain("falls back to a plain clone");
     expect(text).not.toContain("still shows a seam");
   });
@@ -258,16 +257,16 @@ describe("the panel's Retouch section", () => {
     // are genuinely there rather than the absence that no longer is.
     const text = render();
     expect(text).toContain("Content-aware fill");
-    expect(text).toContain("copied from real image data");
-    expect(text).toContain("coarse to fine");
-    expect(text).toContain("still WINDOWED");
+    expect(text).toContain("texture copied from elsewhere in the image");
+    expect(text).toContain("half resolution");
+    expect(text).toContain("limited to a window");
     expect(text).not.toContain("is not offered");
   });
 
   it("asks for a selection before it will fill", () => {
     // The fill synthesises the SELECTION; with none there is no hole,
     // and a button that did nothing would read as broken.
-    expect(render({ hasSelection: false })).toContain("select an area first");
+    expect(render({ hasSelection: false })).toContain("Select an area first");
   });
 
   it("explains alt-click and aligned", () => {

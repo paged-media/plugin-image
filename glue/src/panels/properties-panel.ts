@@ -273,7 +273,7 @@ const rowsOf = (kind: string, group: string, address: PropertyFieldAddress) =>
 export const IMAGE_PROPERTIES_PANEL: PanelSchema = {
   id: PROPERTIES_PANEL_ID,
   title: "Image properties",
-  icon: "panel-layers",
+  icon: "panel-properties",
   defaultDock: "right",
   sections: [
     { title: "Layers", rows: [layerList, ...rowsOf(LAYER, "Layers", { bind: BIND.layer })] },

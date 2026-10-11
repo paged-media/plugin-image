@@ -188,13 +188,13 @@ describe("the panel's Channels section", () => {
     // A gap named in the UI beats a gap discovered by a designer looking
     // for a feature that silently is not there.
     const text = render();
-    expect(text).toContain("Viewing one channel in isolation is not offered");
-    expect(text).toContain("destructive edit");
+    expect(text).toContain("Viewing one channel on its own is not offered");
+    expect(text).toContain("writing a greyscale image into the document");
   });
 
   it("before an ingest it asks for one, rather than showing zeros", () => {
     const text = render({ channels: null });
-    expect(text).toContain("Ingest an image");
+    expect(text).toContain("Choose Use selected frame");
     expect(text).not.toContain("mean 0");
   });
 

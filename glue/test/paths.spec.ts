@@ -289,7 +289,7 @@ describe("the panel's Paths section", () => {
     // The property that makes this worth having rather than a private
     // path list: once traced, the whole vector toolchain applies.
     const text = render();
-    expect(text).toContain("real vector polygon");
+    expect(text).toContain("ordinary page shape");
     expect(text).toContain("Pathfinder");
   });
 
@@ -298,7 +298,7 @@ describe("the panel's Paths section", () => {
   });
 
   it("explains why the anchors have no handles", () => {
-    expect(render()).toContain("invent a smoothness");
+    expect(render()).toContain("corners carry no handles");
   });
 });
 

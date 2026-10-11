@@ -649,7 +649,7 @@ describe("the panel's Brush section", () => {
     );
     // …and says so honestly when the engine has not booted, rather than
     // showing a plausible-looking hardcoded list.
-    expect(render({ blendModes: [] })).toContain("engine not booted");
+    expect(render({ blendModes: [] })).toContain("engine not started");
   });
 
   it("names the selection clip and the in-flight stroke readout", () => {
@@ -663,8 +663,8 @@ describe("the panel's Brush section", () => {
   });
 
   it("states the GPU-only rule when there is no device", () => {
-    expect(render({ gpu: false })).toContain("Painting is GPU-only");
-    expect(render({ gpu: true })).not.toContain("Painting is GPU-only");
+    expect(render({ gpu: false })).toContain("Painting needs WebGPU");
+    expect(render({ gpu: true })).not.toContain("Painting needs WebGPU");
   });
 
   it("RENDERS the scope note (an honesty note nobody reads is not one)", () => {
@@ -673,20 +673,20 @@ describe("the panel's Brush section", () => {
 
   it("the scope note states what the layer graph did and did NOT change", () => {
     // What changed: a stroke lands in the ACTIVE LAYER and is undoable.
-    expect(BRUSH_SCOPE_NOTE).toContain("A stroke paints the ACTIVE LAYER");
+    expect(BRUSH_SCOPE_NOTE).toContain("A stroke paints the active layer");
     expect(BRUSH_SCOPE_NOTE).toContain("not the flattened image");
-    expect(BRUSH_SCOPE_NOTE).toContain("UNDOABLE");
+    expect(BRUSH_SCOPE_NOTE).toContain("undoable");
     expect(BRUSH_SCOPE_NOTE).toContain("tiles it touched are journaled");
     // …but the undo is BOUNDED, and the bound is a number, not a mood.
-    expect(BRUSH_SCOPE_NOTE).toContain("BOUNDED");
+    expect(BRUSH_SCOPE_NOTE).toContain("bounded");
     expect(BRUSH_SCOPE_NOTE).toContain("32 steps or 256 MB");
     expect(BRUSH_SCOPE_NOTE).toContain("become permanent");
     // What did NOT change: paint still covers what is under it in ITS
-    // layer, and layer structure is not journaled at all.
-    expect(BRUSH_SCOPE_NOTE).toContain("destructive INTO its own layer");
+    // layer. (Layer structure IS journaled now — removing a layer is
+    // undoable — so the note must not claim otherwise.)
+    expect(BRUSH_SCOPE_NOTE).toContain("replaces what it covers in its own layer");
     expect(BRUSH_SCOPE_NOTE).toContain("what it covered is gone");
-    expect(BRUSH_SCOPE_NOTE).toContain("STRUCTURE");
-    expect(BRUSH_SCOPE_NOTE).toContain("is not journaled");
+    expect(BRUSH_SCOPE_NOTE).not.toContain("is not journaled");
     // …and the document is still never touched.
     expect(BRUSH_SCOPE_NOTE).toContain(
       "The document and the source file are never touched",

@@ -931,7 +931,7 @@ export function createImageSession(host: BundleHost): ImageSession {
     histogram: null,
     compositedFrame: null,
     busy: false,
-    status: "Select a placed image frame, then ingest.",
+    status: "Select a placed image on the page, then choose Use selected frame.",
     psd: null,
     selection: null,
     pattern: null,
