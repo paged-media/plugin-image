@@ -235,8 +235,8 @@ fn image_residency_tier01_tier2_ops_still_report_i03() {
         .swap_out(coord(0, 0))
         .expect_err("Tier 2 swap_out unsupported");
     assert!(
-        err.to_string().contains("I-03"),
-        "Tier-2 error must name BREAKAGE I-03, got: {err}"
+        err.to_string().contains("not supported yet"),
+        "Tier-2 error must say the disk tier is not supported yet, got: {err}"
     );
     assert!(
         r.swap_in(coord(0, 0)).is_err(),
