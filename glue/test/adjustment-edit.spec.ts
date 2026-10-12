@@ -96,4 +96,46 @@ describe("editable adjustment layers", () => {
     session.dispose();
     handle.dispose();
   });
+
+  // IMG-1: the binding, the panel chain parked behind it and the
+  // per-layer chains all belong to the image they were made on. A new
+  // image's stack reuses layer ids, so a binding that survived would
+  // retune ITS layer, and unbinding would hand back the old panel.
+  it("a new image unbinds the sliders and leaves the previous image's chains behind", async () => {
+    const fake = makeFakeEditor();
+    const handle = createBundleHost(() => fake.editor, manifestJson as PluginManifest, {
+      console: silentConsole,
+      storage: mapBacking(),
+      shell: shellStub(),
+    });
+    const session = createImageSession(handle.host);
+    expect(await session.importBytes("a.psd", psdBytes())).toBe(true);
+    session.setParams({ exposureEv: 0.5 });
+    await session.addAdjustmentLayer();
+    session.setParams({ exposureEv: 0.2 });
+    session.setActiveLayer(1);
+    expect(session.state().editingAdjustment?.index).toBe(1);
+
+    expect(await session.importBytes("b.psd", psdBytes())).toBe(true);
+    expect(session.state().editingAdjustment).toBeNull();
+    expect(session.state().params.exposureEv).toBe(0);
+
+    // A slider on the new image previews it; it retunes no layer.
+    setCalls.length = 0;
+    session.setParams({ exposureEv: -0.1 });
+    expect(setCalls).toEqual([]);
+    expect(session.state().params.exposureEv).toBe(-0.1);
+    // Selecting a layer of the new image keeps the new image's panel.
+    session.setActiveLayer(0);
+    expect(session.state().params.exposureEv).toBe(-0.1);
+
+    // An adjustment layer at the id the old one had binds only its own chain.
+    await session.addAdjustmentLayer();
+    session.setActiveLayer(0);
+    session.setActiveLayer(1);
+    expect(session.state().params.exposureEv).toBe(-0.1);
+
+    session.dispose();
+    handle.dispose();
+  });
 });

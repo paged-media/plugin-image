@@ -38,7 +38,9 @@ import {
   packAdjustExt,
 } from "../src/engine";
 import { createImageSession } from "../src/session";
+import { psdLayersNote } from "../src/panels/image-panel";
 import {
+  layeredPsdBytes,
   makeFakeEditor,
   mapBacking,
   psdBytes,
@@ -369,6 +371,79 @@ describe("the save-back lane (real engine wasm)", () => {
     round.dispose();
     session.dispose();
     handle.dispose();
+  });
+
+  // IMG-1 (filmed 2026-10-12). A photo auto-enhanced and committed, then
+  // a layered PSD opened into a new frame: the PSD inherited the photo's
+  // Temp / Tint / In-black, and with them its export took the flattening
+  // lane — one layer named "Adjusted", the layers and the opacity edit
+  // gone. The panel's values, the healing source and the layout scale
+  // belong to the image they were set on; the next image starts clean.
+  it("a PSD opened after another image's auto-enhance starts clean and exports every layer with its edit", async () => {
+    const fake = makeFakeEditor();
+    fake.placed.set("u1", psdBytes());
+    fake.geometry.set("u1", {
+      id: { kind: "rectangle", id: "u1" },
+      pageId: "pg1",
+      bounds: [0, 0, 10, 20],
+    } as never);
+    fake.geometry.set("u2", {
+      id: { kind: "rectangle", id: "u2" },
+      pageId: "pg1",
+      bounds: [40, 0, 70, 40],
+    } as never);
+    fake.emitSelection([{ kind: "rectangle", id: "u1" }]);
+    const handle = makeHost(fake);
+    const session = createImageSession(handle.host);
+
+    // The photo: shown in its frame, auto-enhanced, a healing source set,
+    // committed (the film's order).
+    expect(await session.ingestSelection()).toBe(true);
+    expect(await session.apply()).toBe(true); // identity: no GPU needed
+    expect(session.state().ptPerPx).not.toBeNull();
+    session.autoEnhance();
+    expect(isIdentity(session.state().params)).toBe(false);
+    session.setCloneSource([1, 0]);
+    expect(await session.commitToDocument()).toBe(true);
+
+    // A layered PSD into a new frame.
+    const layered = await layeredPsdBytes(["Plate", "Signal"]);
+    fake.emitSelection([{ kind: "rectangle", id: "u2" }]);
+    expect(await session.importBytes("annual-layers.psd", layered)).toBe(true);
+    expect(isIdentity(session.state().params)).toBe(true);
+    expect(session.state().cloneSource).toBeNull();
+    expect(session.state().ptPerPx).toBeNull();
+
+    // A record edit, then the PSD exporter: every layer, the edit kept.
+    expect(session.state().psd?.layers.map((l) => l.name)).toEqual(["Background", "Plate", "Signal"]);
+    expect(session.psdSetLayerOpacity(2, 64)).toBe(true);
+    const exported = await session.psdExportBytes();
+    expect(exported).not.toBeNull();
+    const round = createImageSession(handle.host);
+    expect(await round.importBytes("again.psd", exported!.bytes)).toBe(true);
+    expect(round.state().psd?.layers.map((l) => [l.name, l.opacity])).toEqual([
+      ["Background", 255],
+      ["Plate", 255],
+      ["Signal", 64],
+    ]);
+    round.dispose();
+
+    session.dispose();
+    handle.dispose();
+  });
+
+  // IMG-1, the panel half: the PSD layers note promised "edits land in
+  // the exported PSD" while panel adjustments were set, which is exactly
+  // when the export flattens a layered file to one layer.
+  it("the PSD layers note says when the export will flatten the layers", () => {
+    const adjusted = { ...freshIdentityParams(), temp: -0.04 };
+    expect(psdLayersNote(freshIdentityParams(), 3)).toMatch(/Edits land in the exported PSD/);
+    const flat = psdLayersNote(adjusted, 3);
+    expect(flat).not.toMatch(/Edits land in the exported PSD/);
+    expect(flat).toMatch(/one layer/);
+    expect(flat).toMatch(/Reset/);
+    // One layer has nothing to lose: the adjusted pixels replace it.
+    expect(psdLayersNote(adjusted, 1)).toMatch(/Edits land in the exported PSD/);
   });
 
   it("an edit the PSD save-back cannot write is refused, not exported as the original", async () => {

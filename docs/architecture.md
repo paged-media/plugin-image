@@ -188,14 +188,15 @@ writes unmodified blocks back byte for byte ([ADR 458](adr/458-psd-preservation.
 ## Where data is stored
 
 During a session, images, layers, the selection, the undo list and the PSD parse live in
-the wasm module's memory, and the panel's parameters in the session object. A COMMIT
-(ADR 462) writes the layer stack into the plugin's container parts (`px/<sha256>.bin`
-buffers, shared across revisions, and `f/<frame>/r<n>.json` records;
-`glue/src/session-store.ts`), replaces the frame's placed image with the composite, and sets
-the frame's marker to `{ v: 2, data: { owns: "pixels", rev, record, baked } }`. Before a
-commit the marker is `{ v: 1, data: { owns: "pixels" } }`, written at ingest so the
-`rasterImage` edit context matches. "Selection to path" inserts paths. The undo history is
-not stored.
+the wasm module's memory, and the panel's parameters in the session object; everything set
+on one image (the parameters, a slider binding to an adjustment layer, the healing source)
+is cleared when the next image is ingested. A COMMIT (ADR 462) writes the layer stack into
+the plugin's container parts (`px/<sha256>.bin` buffers, shared across revisions, and
+`f/<frame>/r<n>.json` records; `glue/src/session-store.ts`), replaces the frame's placed
+image with the composite, and sets the frame's marker to
+`{ v: 2, data: { owns: "pixels", rev, record, baked } }`. Before a commit the marker is
+`{ v: 1, data: { owns: "pixels" } }`, written at ingest so the `rasterImage` edit context
+matches. "Selection to path" inserts paths. The undo history is not stored.
 
 ## Host doors
 

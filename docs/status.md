@@ -12,6 +12,8 @@ landed. How the parts fit is in
   CMYK JPEG, are decoded by the codec adapters, a PSD from its merged composite (RGB,
   greyscale, and CMYK converted to sRGB through the file's embedded profile). EXIF
   orientation is applied. Decoding runs in a worker pool when the host grants workers.
+  Each image starts with the panel at identity; values set on one image do not carry over
+  to the next.
 - **Adjustments.** The "Image" panel has a histogram and a re-runnable chain: exposure,
   brightness, contrast, saturation, temperature and tint, levels (composite and per
   channel), tone curves (composite and per channel), Hue/Saturation (master, six colour

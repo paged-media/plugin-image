@@ -1416,6 +1416,20 @@ export function createImageSession(host: BundleHost): ImageSession {
     sourceRef = null;
     state.committedRev = null;
     state.uncommitted = false;
+    // What was SET ON this image goes with it, so the next image starts
+    // clean. The panel's values used to survive a re-ingest: a PSD opened
+    // after a photo's auto-enhance inherited its temperature, tint and
+    // levels, and with them the PSD export took the flattening lane and
+    // wrote one "Adjusted" layer instead of the file's own. The slider
+    // binding and the chains behind it are keyed by LAYER ID, which the
+    // next stack reuses; the healing source is in this image's pixels;
+    // the pt-per-px scale is this image's layout.
+    state.params = freshIdentityParams();
+    state.editingAdjustment = null;
+    paramsBeforeBinding = null;
+    adjustmentParams.clear();
+    state.cloneSource = null;
+    state.ptPerPx = null;
     freeProxy();
   };
 
