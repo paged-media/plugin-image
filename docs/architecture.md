@@ -99,9 +99,10 @@ surface.submit(frame, { kind: "image", rgba, ... })               session.ts (su
 
 1. **Ingest and decode.** "Adjust image" reads the original bytes of the one selected
    frame. The importer decodes a file into the session without replacing the document, and
-   binds the image to the selected frame when exactly one is selected. With a worker pool
-   (`glue/src/decode-pool.ts`) a worker decodes and the main realm registers the RGBA8
-   result; otherwise `decode_image` runs on the main thread. A PSD is also parsed
+   binds the image to the selected frame when exactly one is selected; when that frame holds
+   no image, the import is committed into it at once (step 5), so it is placed there. With a
+   worker pool (`glue/src/decode-pool.ts`) a worker decodes and the main realm registers the
+   RGBA8 result; otherwise `decode_image` runs on the main thread. A PSD is also parsed
    structurally and, when its layers can be reproduced, opened as a layer stack; otherwise
    its merged composite is the one "Background" layer and the status line says why.
 2. **Adjust.** `adjust_image_ext` builds an Engine A pipeline: a raw source over the held

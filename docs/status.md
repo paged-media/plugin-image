@@ -12,6 +12,9 @@ landed. How the parts fit is in
   CMYK JPEG, are decoded by the codec adapters, a PSD from its merged composite (RGB,
   greyscale, and CMYK converted to sRGB through the file's embedded profile). EXIF
   orientation is applied. Decoding runs in a worker pool when the host grants workers.
+  A file imported with one empty frame selected is placed in that frame: its composite is
+  committed into it with its layers, as a commit does. A frame that already holds an image
+  only previews the file.
   Each image starts with the panel at identity; values set on one image do not carry over
   to the next.
 - **Adjustments.** The "Image" panel has a histogram and a re-runnable chain: exposure,
