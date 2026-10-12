@@ -127,6 +127,59 @@ describe("commit to the document, and reopen", () => {
     b.handle.dispose();
   });
 
+  // IMG-4. A frame that opens flat still carries its marker and its
+  // stored revisions. The next commit used to start again at revision 1
+  // and rewrite r1.json, a record the document's undo can still land on.
+  it("a commit after an outside change keeps the stored revision and continues the numbering", async () => {
+    const fake = setup();
+    const a = open(fake);
+    await a.session.ingestSelection();
+    await a.session.addLayer("Top");
+    expect(await a.session.commitToDocument()).toBe(true);
+    const r1 = [...fake.parts].find(([k]) => k.endsWith("/r1.json"))!;
+    a.session.dispose();
+    a.handle.dispose();
+
+    fake.placed.set("u1", psdBytes()); // someone relinked the original
+    const b = open(fake);
+    expect(await b.session.ingestSelection()).toBe(true);
+    expect(b.session.state().layersNote).toMatch(/changed outside paged\.image/);
+    await b.session.addLayer("Again");
+    expect(await b.session.commitToDocument()).toBe(true);
+    expect(b.session.state().committedRev).toBe(2);
+    expect(fake.parts.get(r1[0])).toEqual(r1[1]);
+    expect([...fake.parts.keys()].some((k) => k.endsWith("/r2.json"))).toBe(true);
+    const marker = JSON.parse(fake.metadata.get("u1")!.get("x-paged:media.paged.image")!);
+    expect(marker.data.rev).toBe(2);
+    b.session.dispose();
+    b.handle.dispose();
+  });
+
+  it("a commit after an unreadable stored session keeps that record and continues the numbering", async () => {
+    const fake = setup();
+    const a = open(fake);
+    await a.session.ingestSelection();
+    await a.session.addLayer("Top");
+    expect(await a.session.commitToDocument()).toBe(true);
+    const r1 = [...fake.parts].find(([k]) => k.endsWith("/r1.json"))!;
+    a.session.dispose();
+    a.handle.dispose();
+
+    // A buffer the record names is gone: the reopen cannot restore it.
+    const record = JSON.parse(new TextDecoder().decode(r1[1])) as { manifest: string };
+    const manifestPart = [...fake.parts.keys()].find((k) => k.endsWith(`px/${record.manifest}.bin`))!;
+    fake.parts.delete(manifestPart);
+    const b = open(fake);
+    expect(await b.session.ingestSelection()).toBe(true);
+    expect(b.session.state().layersNote).toMatch(/could not be read/);
+    await b.session.addLayer("Again");
+    expect(await b.session.commitToDocument()).toBe(true);
+    expect(b.session.state().committedRev).toBe(2);
+    expect(fake.parts.get(r1[0])).toEqual(r1[1]);
+    b.session.dispose();
+    b.handle.dispose();
+  });
+
   // IMG-2 (filmed 2026-10-12). A file opened with one EMPTY frame
   // selected is that frame's image: the composite is baked into it and
   // the layers stored, exactly as a commit does, so the page shows it at

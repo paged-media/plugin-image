@@ -122,7 +122,8 @@ surface.submit(frame, { kind: "image", rgba, ... })               session.ts (su
 5. **Commit.** "Commit image edits to the document" writes the layer stack into the
    plugin's container parts and replaces the frame's placed image with the composite, in
    one batch mutation; reopening the frame restores the layers
-   ([ADR 462](adr/462-sessions-persist-in-parts.md)).
+   ([ADR 462](adr/462-sessions-persist-in-parts.md)). Revisions are numbered per frame from
+   its marker, also when the frame reopened flat, so a commit never rewrites a stored one.
 
 ## Kernels and how they run
 

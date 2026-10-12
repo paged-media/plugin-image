@@ -1037,7 +1037,13 @@ export function createImageSession(host: BundleHost): ImageSession {
     if (!engine) return;
     type Marker = { v?: number; data?: Partial<CommittedMarker> } | null;
     const marker = (await host.document.getMetadata(ref).catch(() => null)) as unknown as Marker;
-    if (marker?.v !== 2 || !marker.data?.record) return;
+    if (marker?.v !== 2) return;
+    // The frame HAS committed revisions whether or not their layers can be
+    // restored below, so the next commit continues their numbering. Every
+    // branch that opens flat used to leave this unset, and that commit
+    // then rewrote r1.json, a record the document's undo can still reach.
+    if (typeof marker.data?.rev === "number") state.committedRev = marker.data.rev;
+    if (!marker.data?.record) return;
     const data = marker.data as CommittedMarker;
     if ((await sha256Hex(placed)) !== data.baked) {
       state.layersNote =
@@ -1056,7 +1062,6 @@ export function createImageSession(host: BundleHost): ImageSession {
       state.layersNote = `Stored layers could not be restored (${err instanceof Error ? err.message : err}); opened as one layer.`;
       return;
     }
-    state.committedRev = data.rev;
     state.uncommitted = false;
     // A revision written through the OBJECT MODEL in a realm without a
     // GPU (object-model/image-objects.ts): smart objects whose source was
