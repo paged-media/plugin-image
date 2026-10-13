@@ -69,6 +69,41 @@ export function psdBytes(): Uint8Array {
 /** The 2×1 RGBA8 pixels `psdBytes()` decodes to. */
 export const PSD_RGBA = [10, 30, 50, 255, 20, 40, 60, 255];
 
+/** A LAYERED PSD: the 2×1 fixture as "Background" plus one empty pixel
+ *  layer per name, written by the engine's own layered save through a
+ *  throwaway session — exactly the file a user's export of that stack
+ *  is. Imported lazily so this module stays free of the bundle. */
+export async function layeredPsdBytes(names: string[]): Promise<Uint8Array> {
+  const [{ createBundleHost }, { createImageSession }, manifest] = await Promise.all([
+    import("@paged-media/plugin-sdk"),
+    import("../src/session"),
+    import("@paged-media/image-manifest/manifest.json"),
+  ]);
+  const fake = makeFakeEditor();
+  const handle = createBundleHost(
+    () => fake.editor,
+    manifest.default as unknown as Parameters<typeof createBundleHost>[1],
+    { console: silentConsole, storage: mapBacking(), shell: shellStub() },
+  );
+  const session = createImageSession(handle.host);
+  try {
+    if (!(await session.importBytes("layers.psd", psdBytes()))) {
+      throw new Error(`layeredPsdBytes: import failed (${session.state().status})`);
+    }
+    for (const name of names) {
+      if (!(await session.addLayer(name))) {
+        throw new Error(`layeredPsdBytes: addLayer failed (${session.state().status})`);
+      }
+    }
+    const out = await session.psdExportBytes();
+    if (!out) throw new Error(`layeredPsdBytes: export failed (${session.state().status})`);
+    return out.bytes;
+  } finally {
+    session.dispose();
+    handle.dispose();
+  }
+}
+
 export function makeFakeEditor() {
   const panels = fakeRegistry();
   const commands = fakeRegistry();

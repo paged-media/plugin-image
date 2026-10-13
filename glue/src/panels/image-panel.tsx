@@ -57,6 +57,7 @@ import {
   isCmykConversion,
   GRADIENT_KINDS,
   PRESSURE_TARGETS,
+  isIdentity,
 } from "../engine";
 import type { AspectPreset } from "../crop-machine";
 
@@ -475,6 +476,27 @@ export const LAYERS_SCOPE_NOTE =
   "A PSD opens as its own layers only when this model reproduces it " +
   "exactly — 8- or 16-bit RGB, with no groups and no layer masks; anything " +
   "else keeps Photoshop's merged composite as a single layer and says why.";
+
+/**
+ * What the PSD exporter will do with the file's layers, given the
+ * panel's adjustments. Panel adjustments exist only as a chain over the
+ * composite, so a file with more than one layer is flattened to one when
+ * they are set: the note must not promise the layers then.
+ */
+export function psdLayersNote(params: AdjustParams, layerCount: number): string {
+  if (!isIdentity(params) && layerCount > 1) {
+    return (
+      "While adjustments are set, the PSD export writes the adjusted image " +
+      "as one layer: these layers and their edits are not kept. Reset the " +
+      "adjustments to export the layers. The canvas shows the import-time " +
+      "flatten."
+    );
+  }
+  return (
+    "Edits land in the exported PSD (preservation-safe — a zero-edit " +
+    "export is byte-identical). The canvas shows the import-time flatten."
+  );
+}
 
 /** The paint parameters section — a PURE component (props in, elements
  *  out, no hooks) so a spec can render it without a DOM and assert what
@@ -1679,6 +1701,21 @@ export function makeImagePanel(session: ImageSession) {
       setCanvasSize((c) => ({ ...c, width: s.source?.width ?? 0, height: s.source?.height ?? 0 }));
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [s.source?.handle, s.source?.width, s.source?.height]);
+    // A NEW image starts from identity in the session (its params are
+    // reset on ingest), so the pickers this panel keeps for itself follow:
+    // a curve left drawn here would be re-sent, shape and all, by the
+    // next drag on it. Keyed on the source OBJECT, which a crop or a
+    // resize updates in place and only a new ingest replaces.
+    useEffect(() => {
+      setCurvePointsBy({
+        rgb: IDENTITY_CURVE,
+        r: IDENTITY_CURVE,
+        g: IDENTITY_CURVE,
+        b: IDENTITY_CURVE,
+      });
+      setAspect("free");
+      setAngle(0);
+    }, [s.source]);
     const disabled = s.busy || !s.source;
     const engineLine =
       s.engine === "ready"
@@ -3161,15 +3198,14 @@ export function makeImagePanel(session: ImageSession) {
               </div>
             ))}
             <p
+              data-image-psd-note
               style={{
                 margin: "2px 0 0",
                 font: "10px/1.5 var(--font-sans, sans-serif)",
                 color: "var(--pg-muted-fg)",
               }}
             >
-              Edits land in the exported PSD (preservation-safe — a zero-edit
-              export is byte-identical). The canvas shows the import-time
-              flatten.
+              {psdLayersNote(p, s.psd.layers.length)}
             </p>
           </>
         )}

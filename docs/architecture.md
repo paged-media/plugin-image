@@ -99,9 +99,10 @@ surface.submit(frame, { kind: "image", rgba, ... })               session.ts (su
 
 1. **Ingest and decode.** "Adjust image" reads the original bytes of the one selected
    frame. The importer decodes a file into the session without replacing the document, and
-   binds the image to the selected frame when exactly one is selected. With a worker pool
-   (`glue/src/decode-pool.ts`) a worker decodes and the main realm registers the RGBA8
-   result; otherwise `decode_image` runs on the main thread. A PSD is also parsed
+   binds the image to the selected frame when exactly one is selected; when that frame holds
+   no image, the import is committed into it at once (step 5), so it is placed there. With a
+   worker pool (`glue/src/decode-pool.ts`) a worker decodes and the main realm registers the
+   RGBA8 result; otherwise `decode_image` runs on the main thread. A PSD is also parsed
    structurally and, when its layers can be reproduced, opened as a layer stack; otherwise
    its merged composite is the one "Background" layer and the status line says why.
 2. **Adjust.** `adjust_image_ext` builds an Engine A pipeline: a raw source over the held
@@ -121,7 +122,8 @@ surface.submit(frame, { kind: "image", rgba, ... })               session.ts (su
 5. **Commit.** "Commit image edits to the document" writes the layer stack into the
    plugin's container parts and replaces the frame's placed image with the composite, in
    one batch mutation; reopening the frame restores the layers
-   ([ADR 462](adr/462-sessions-persist-in-parts.md)).
+   ([ADR 462](adr/462-sessions-persist-in-parts.md)). Revisions are numbered per frame from
+   its marker, also when the frame reopened flat, so a commit never rewrites a stored one.
 
 ## Kernels and how they run
 
@@ -188,14 +190,15 @@ writes unmodified blocks back byte for byte ([ADR 458](adr/458-psd-preservation.
 ## Where data is stored
 
 During a session, images, layers, the selection, the undo list and the PSD parse live in
-the wasm module's memory, and the panel's parameters in the session object. A COMMIT
-(ADR 462) writes the layer stack into the plugin's container parts (`px/<sha256>.bin`
-buffers, shared across revisions, and `f/<frame>/r<n>.json` records;
-`glue/src/session-store.ts`), replaces the frame's placed image with the composite, and sets
-the frame's marker to `{ v: 2, data: { owns: "pixels", rev, record, baked } }`. Before a
-commit the marker is `{ v: 1, data: { owns: "pixels" } }`, written at ingest so the
-`rasterImage` edit context matches. "Selection to path" inserts paths. The undo history is
-not stored.
+the wasm module's memory, and the panel's parameters in the session object; everything set
+on one image (the parameters, a slider binding to an adjustment layer, the healing source)
+is cleared when the next image is ingested. A COMMIT (ADR 462) writes the layer stack into
+the plugin's container parts (`px/<sha256>.bin` buffers, shared across revisions, and
+`f/<frame>/r<n>.json` records; `glue/src/session-store.ts`), replaces the frame's placed
+image with the composite, and sets the frame's marker to
+`{ v: 2, data: { owns: "pixels", rev, record, baked } }`. Before a commit the marker is
+`{ v: 1, data: { owns: "pixels" } }`, written at ingest so the `rasterImage` edit context
+matches. "Selection to path" inserts paths. The undo history is not stored.
 
 ## Host doors
 

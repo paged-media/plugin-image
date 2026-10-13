@@ -1037,7 +1037,13 @@ export function createImageSession(host: BundleHost): ImageSession {
     if (!engine) return;
     type Marker = { v?: number; data?: Partial<CommittedMarker> } | null;
     const marker = (await host.document.getMetadata(ref).catch(() => null)) as unknown as Marker;
-    if (marker?.v !== 2 || !marker.data?.record) return;
+    if (marker?.v !== 2) return;
+    // The frame HAS committed revisions whether or not their layers can be
+    // restored below, so the next commit continues their numbering. Every
+    // branch that opens flat used to leave this unset, and that commit
+    // then rewrote r1.json, a record the document's undo can still reach.
+    if (typeof marker.data?.rev === "number") state.committedRev = marker.data.rev;
+    if (!marker.data?.record) return;
     const data = marker.data as CommittedMarker;
     if ((await sha256Hex(placed)) !== data.baked) {
       state.layersNote =
@@ -1056,7 +1062,6 @@ export function createImageSession(host: BundleHost): ImageSession {
       state.layersNote = `Stored layers could not be restored (${err instanceof Error ? err.message : err}); opened as one layer.`;
       return;
     }
-    state.committedRev = data.rev;
     state.uncommitted = false;
     // A revision written through the OBJECT MODEL in a realm without a
     // GPU (object-model/image-objects.ts): smart objects whose source was
@@ -1087,6 +1092,29 @@ export function createImageSession(host: BundleHost): ImageSession {
     state.layersNote = `Reopened ${state.layers.layers.length} stored layer${
       state.layers.layers.length === 1 ? "" : "s"
     } (revision ${data.rev}${state.uncommitted ? "; its composite is new and will be committed" : ""}).`;
+  };
+
+  /** True when the frame holds no placed image: an empty frame, or one
+   *  whose link no longer resolves. False when it holds one, and false
+   *  when this host cannot say — a frame we cannot read is never
+   *  overwritten on a guess. */
+  const frameIsEmpty = async (id: string): Promise<boolean> => {
+    if (!host.supports("assets.images@1")) return false;
+    try {
+      return (await host.assets.getPlacedImage(id)) === null;
+    } catch {
+      return false;
+    }
+  };
+
+  /** The revision the frame's marker names, or null when it carries no
+   *  committed session. A commit into a frame that already has one
+   *  continues its numbering: revision records are never rewritten, and
+   *  the document's undo can still land on the old one. */
+  const markerRevision = async (ref: ElementId): Promise<number | null> => {
+    type Marker = { v?: number; data?: { rev?: unknown } } | null;
+    const marker = (await host.document.getMetadata(ref).catch(() => null)) as unknown as Marker;
+    return marker?.v === 2 && typeof marker.data?.rev === "number" ? marker.data.rev : null;
   };
 
   /** The engine handle of the defined pattern (`definePattern`). */
@@ -1416,6 +1444,20 @@ export function createImageSession(host: BundleHost): ImageSession {
     sourceRef = null;
     state.committedRev = null;
     state.uncommitted = false;
+    // What was SET ON this image goes with it, so the next image starts
+    // clean. The panel's values used to survive a re-ingest: a PSD opened
+    // after a photo's auto-enhance inherited its temperature, tint and
+    // levels, and with them the PSD export took the flattening lane and
+    // wrote one "Adjusted" layer instead of the file's own. The slider
+    // binding and the chains behind it are keyed by LAYER ID, which the
+    // next stack reuses; the healing source is in this image's pixels;
+    // the pt-per-px scale is this image's layout.
+    state.params = freshIdentityParams();
+    state.editingAdjustment = null;
+    paramsBeforeBinding = null;
+    adjustmentParams.clear();
+    state.cloneSource = null;
+    state.ptPerPx = null;
     freeProxy();
   };
 
@@ -1989,16 +2031,42 @@ export function createImageSession(host: BundleHost): ImageSession {
         const selected = host.selection.get();
         const boundTo = selected.length === 1 ? elementIdOf(selected[0]) : null;
         const ok = await decodeInto(name, bytes, "import", boundTo);
-        if (ok) {
-          setStatus(
-            boundTo
-              ? `${name} — ${state.source?.width}×${state.source?.height} decoded ` +
-                  "into the selected frame. Apply to composite, or paint on it."
-              : `${name} — ${state.source?.width}×${state.source?.height} decoded. ` +
-                  "Select an image frame and Apply to composite.",
-          );
+        if (!ok) return false;
+        const decoded = `${name} — ${state.source?.width}×${state.source?.height} decoded`;
+        if (!boundTo) {
+          setStatus(`${decoded}. Select an image frame and Apply to composite.`);
+          return true;
         }
-        return ok;
+        // AN EMPTY FRAME RECEIVES THE IMAGE: it is placed there the way a
+        // commit places an edited one — the composite baked into the
+        // frame, the layers stored with it (ADR 462) — so the page shows
+        // it at once, keeps it, and a double-click reopens the layers.
+        // Before, the frame stayed empty: the import could never be
+        // committed (no frame reference), and the preview an Apply put up
+        // vanished with the selection. A frame that already holds an
+        // image keeps it; the file is only previewed there.
+        if (await frameIsEmpty(boundTo)) {
+          sourceRef = selected[0] as ElementId;
+          state.committedRev = await markerRevision(sourceRef);
+          if (await api.commitToDocument()) {
+            const n = state.layers.layers.length;
+            setStatus(
+              `${decoded} and placed in the selected frame, ${n} layer${n === 1 ? "" : "s"} ` +
+                `stored with it (revision ${state.committedRev}). Double-click the frame ` +
+                "to edit the layers; undo in the document removes it.",
+            );
+            return true;
+          }
+          // Not placed (the host keeps no plugin data, or refused the
+          // write): the commit's reason, and the import stays a preview.
+          const reason = state.status;
+          sourceRef = null;
+          state.committedRev = null;
+          setStatus(`${decoded} into the selected frame, but not placed in it: ${reason}`);
+          return true;
+        }
+        setStatus(`${decoded} into the selected frame. Apply to composite, or paint on it.`);
+        return true;
       } finally {
         state.busy = false;
         emit();
